@@ -1,6 +1,5 @@
 #include <API/Model/GameObject.h>
-//#include <render/opengl/nukeogl.h>
-#include <render/universal/nukebgfx.h>
+#include <interface/RenderModular.h>
 #include <input/keyboard.h>
 #include <config.h>
 #include <editor/editorui.h>
@@ -180,7 +179,7 @@ void InitEngine()
     if (instance->currentScene->GetHierarchy().empty())
     {
         GameObject* edcam = new GameObject("Editor Camera");
-        iRender* rnd = NukeBGFX::getSingleton();
+        iRender* rnd = AppInstance::GetSingleton()->render;
 		cout << "[main]\t\t\t" << "Camera render is: " << rnd << endl;
         Camera* edcamc = new Camera(edcam, rnd);
         edcamc->transform->position = { 0, 10, -10};
@@ -248,7 +247,7 @@ void RenderScene(){
 iRender* PreInitRender(){
 	cout << "[main]\t\t\t" << "Render preinit..." << endl;
 
-    iRender * render = NukeBGFX::getSingleton();
+    iRender * render = AppInstance::GetSingleton()->render;
 
 	cout << "[main]\t\t\t" << "Renderer is: " << render << endl;
     //auto gl = (NukeBGFX*)render;
@@ -286,8 +285,18 @@ int main()
 	AppInstance* instance = AppInstance::GetSingleton();
 	instance->setEditor(true);
 	cout << "[main]\t\t\t" << "NukeEngine starting... Welcome!" << endl;
+
+	// The renderer is loaded as a module (plugin), selected by id, with fallback
+	// to the first render module found in modules/.
+	iRender* render = LoadRenderModule("diligent");
+	if (!render) {
+		cout << "[main]\t\t\t" << "No render module found in modules/. Aborting." << endl;
+		return 1;
+	}
+	instance->render = render;
+
 	InitEngine();
-	iRender* render = PreInitRender();
+	PreInitRender();
 	cout << "[main]\t\t\t" << "Preinited render is: " << render << endl;
     Config* config = Config::getSingleton();
 	
