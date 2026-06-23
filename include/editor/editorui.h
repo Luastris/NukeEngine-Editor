@@ -124,7 +124,7 @@ bool HierarchyGetter(void* data, int n, const char** out_text)
 {
   const bc::list<GameObject*>* v = (bc::list<GameObject*>*)data;
   auto it = v->begin();
-  boost::advance(it, n);
+  std::advance(it, n);
   *out_text = (*it)->GetName().c_str();
   return true;
 }
@@ -194,7 +194,7 @@ public:
 		win = &Config::getSingleton()->window;
 
 		cout << "[editorui]\t\t" << "Load font from... " << win->mainFont << endl;
-        io.Fonts->AddFontFromFileTTF(Config::getSingleton()->window.mainFont, 19.f);
+        io.Fonts->AddFontFromFileTTF(Config::getSingleton()->window.mainFont.c_str(), 19.f);
         
         InitMenu();
         *KeyBoard::getSingleton() &= b::function<void(unsigned char, int, int)>(b::bind(&EditorUI::OnKeyBoardUp, this, _1, _2, _3));
@@ -474,7 +474,7 @@ public:
         for (int i = 0; i < ((int)gos.size()); i++)
         {
             auto it = gos.begin(); //AppInstance::GetSingleton()->currentScene->hierarchy.begin();
-            boost::advance(it, i);
+            std::advance(it, i);
             ImGuiTreeNodeFlags node_flags = ((selection_mask & (1 << i)) ? ImGuiTreeNodeFlags_Selected : 0) | ImGuiTreeNodeFlags_OpenOnDoubleClick;
             bool opened = ImGui::TreeNodeEx((void*)(intptr_t)i, node_flags, (*it)->GetName().c_str(), i);
             if (ImGui::IsItemClicked())
