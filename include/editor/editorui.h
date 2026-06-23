@@ -14,6 +14,7 @@
 #include "config.h"
 #include "interface/AppInstance.h"
 #include "interface/Modular.h"
+#include "API/Model/MeshRenderer.h"
 #include <boost/container/list.hpp>
 #include <boost/bind/bind.hpp>
 #include <cstring>
@@ -30,6 +31,8 @@ private:
 	bool freezeWindows = true;
 	ImGuiWindowFlags window_flags = 0;
 	Camera* editorCam = nullptr;
+	uint64_t sceneRTId = 0;   // render target the editor camera draws into
+	float camYaw = 0.0f, camPitch = 0.0f;   // editor camera look angles (radians)
 
 public:
 	static EditorUI* getSingleton()
@@ -66,6 +69,20 @@ public:
 		GameObject* camObj = editor->currentScene->Get("Editor Camera");
 		if (camObj)
 			editorCam = camObj->GetComponent<Camera>();
+		if (editorCam)
+		{
+			// Park the editor camera so it looks at the origin (camera control TODO).
+			editorCam->transform->position.x = 0; editorCam->transform->position.y = 0; editorCam->transform->position.z = -5;
+			// rotation defaults to identity quaternion (looks +Z, at the origin).
+		}
+		// Demo geometry via the spawn API so the viewport shows something.
+		{
+			GameObject* cube = new GameObject("Cube");
+			MeshRenderer* mr = new MeshRenderer();
+			cube->AddComponent(mr);
+			mr->mesh = Mesh::CreateCube();
+			editor->currentScene->Add(cube);
+		}
 		cout << "[editorui]\t\t" << "EditorUI ready." << endl;
 	}
 
@@ -268,9 +285,10 @@ public:
 			double p[3] = { t.position.x, t.position.y, t.position.z };
 			if (ImGui::InputScalarN("Position", ImGuiDataType_Double, p, 3))
 			{ t.position.x = p[0]; t.position.y = p[1]; t.position.z = p[2]; }
-			double r[3] = { t.rotation.x, t.rotation.y, t.rotation.z };
-			if (ImGui::InputScalarN("Rotation", ImGuiDataType_Double, r, 3))
-			{ t.rotation.x = r[0]; t.rotation.y = r[1]; t.rotation.z = r[2]; }
+			Vector3 er = t.EulerDeg();
+			double r[3] = { er.x, er.y, er.z };
+			if (ImGui::InputScalarN("Rotation (deg)", ImGuiDataType_Double, r, 3))
+				t.SetEulerDeg(Vector3(r[0], r[1], r[2]));
 			double s[3] = { t.scale.x, t.scale.y, t.scale.z };
 			if (ImGui::InputScalarN("Scale", ImGuiDataType_Double, s, 3))
 			{ t.scale.x = s[0]; t.scale.y = s[1]; t.scale.z = s[2]; }
@@ -299,9 +317,50 @@ public:
 	{
 		if (!win->render) return;
 		ImGui::Begin("Render", &win->render, window_flags);
-		ImGui::TextWrapped("Scene viewport.");
-		ImGui::TextDisabled("3D rendering of the scene comes next (#6): the renderer will");
-		ImGui::TextDisabled("draw into a texture and this panel will show it via ImGui::Image.");
+		ImVec2 avail = ImGui::GetContentRegionAvail();
+		iRender* r = AppInstance::GetSingleton()->render;
+		if (r && avail.x >= 1.0f && avail.y >= 1.0f)
+		{
+			if (sceneRTId == 0)
+			{
+				sceneRTId = r->createRenderTarget((int)avail.x, (int)avail.y);
+				if (editorCam) editorCam->renderTarget = sceneRTId; // editor cam draws here
+			}
+			else
+			{
+				r->resizeRenderTarget(sceneRTId, (int)avail.x, (int)avail.y); // match the panel
+			}
+			uint64_t tex = r->getRenderTargetTexture(sceneRTId);
+			if (tex)
+				ImGui::Image((ImTextureID)tex, avail); // the live scene viewport
+			else
+				ImGui::TextDisabled("No scene texture.");
+
+			// Viewport camera control (while hovering the image):
+			//   RMB drag = orbit/look, MMB drag = pan, wheel = dolly.
+			if (editorCam && editorCam->transform && ImGui::IsItemHovered())
+			{
+				ImGuiIO& io = ImGui::GetIO();
+				Transform* t = editorCam->transform;
+				const float rotSpeed = 0.005f, panSpeed = 0.01f, zoomSpeed = 0.5f;
+				if (ImGui::IsMouseDragging(ImGuiMouseButton_Right))
+				{
+					camYaw   += io.MouseDelta.x * rotSpeed;
+					camPitch += io.MouseDelta.y * rotSpeed;
+					const float lim = 1.55f; // ~89deg pitch clamp
+					if (camPitch >  lim) camPitch =  lim;
+					if (camPitch < -lim) camPitch = -lim;
+					t->SetEulerDeg(Vector3(camPitch * 57.29578f, camYaw * 57.29578f, 0.0f));
+				}
+				if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle))
+				{
+					t->position += t->right() * (double)(-io.MouseDelta.x * panSpeed)
+					             + t->up()    * (double)( io.MouseDelta.y * panSpeed);
+				}
+				if (io.MouseWheel != 0.0f)
+					t->position += t->direction() * (double)(io.MouseWheel * zoomSpeed);
+			}
+		}
 		ImGui::End();
 	}
 

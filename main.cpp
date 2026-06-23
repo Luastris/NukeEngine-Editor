@@ -211,7 +211,11 @@ iRender* PreInitRender(){
     iRender * render = AppInstance::GetSingleton()->render;
 
 	cout << "[main]\t\t\t" << "Renderer is: " << render << endl;
-    render->setOnRender(RenderScene);
+    // Scene rendering lives in the engine lib (Scene::Render), shared by editor
+    // and game. The renderer just invokes onRender each frame.
+    render->setOnRender([]{
+        AppInstance::GetSingleton()->currentScene->Render(AppInstance::GetSingleton()->render);
+    });
     // UI is driven by the UI module (NukeUI); it is wired in main() after the
     // renderer is initialized (NukeUI hooks the renderer's onGUI itself).
 
