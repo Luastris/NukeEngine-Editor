@@ -1,8 +1,10 @@
 #include <API/Model/GameObject.h>
 #include <interface/RenderModular.h>
+#include <nukeui.h>
+#include "imgui.h"
+#include <editor/editorui.h>
 #include <input/keyboard.h>
 #include <config.h>
-#include <editor/editorui.h>
 #include <interface/Modular.h>
 #ifdef EDITOR
 #include <interface/AppInstance.h>
@@ -89,23 +91,6 @@ void keyboard2(unsigned char c, int x, int y)
 
 void special(int key, int x, int y){
     cout << "[main]\t\t\t" << "[special] ( " << key << ", " << x << ", " << y << ")" << endl;
-    if(key == 11)
-    {
-        glutFullScreenToggle();
-    }
-    if(key == 12)
-    {
-//        std::vector<unsigned char> out;
-//        auto renTex = (NukeOGL::getSingleton()->getRenderTexture());
-//        int w = NukeOGL::getSingleton()->width;
-//        int h = NukeOGL::getSingleton()->height;
-//        unsigned char *rent = (unsigned char*)malloc(sizeof(unsigned char) * w * h * 3);
-//        void* rt = renTex;
-//        memcpy(rent, rt, 3*h*w);
-//        cout << "[main]\t\t\t" << "Allocated: " << rent << endl;
-//        lodepng::encode(out, rent, w, h);
-//        lodepng::save_file(out, "render.png");
-    }
 }
 
 void specialup(int key, int x, int y){
@@ -203,30 +188,6 @@ void Unload()
     UnloadModules();
 }
 
-//positions of the cubes
-float positionz[10];
-float positionx[10];
-
-void cubepositions (void) { //set the positions of the cubes
-
-    for (int i=0;i<10;i++)
-    {
-    positionz[i] = rand()%5 + 5;
-    positionx[i] = rand()%5 + 5;
-    }
-}
-
-void cube (void) {
-    for (int i=0;i<10;i++)
-    {
-    glPushMatrix();
-    glTranslated(-positionx[i + 1] * 10, 0, -positionz[i + 1] *
-10); //translate the cube
-    glutSolidCube(2); //draw the cube
-    glPopMatrix();
-    }
-}
-
 void RenderObject(GameObject* go){
     for(auto goc : go->children)
     {
@@ -250,20 +211,9 @@ iRender* PreInitRender(){
     iRender * render = AppInstance::GetSingleton()->render;
 
 	cout << "[main]\t\t\t" << "Renderer is: " << render << endl;
-    //auto gl = (NukeBGFX*)render;
-    render->_UIinit = editorinit;
-    render->_UIkeyaboardUp = editorkeyaboardUp;
-    render->_UIkeyboard = editorkeyboard;
-    render->_UImouse = editormouse;
-    render->_UImouseWheel = editormousewheel;
-	render->_UImove = editormove;
-	render->_UIpmove = editorpmove;
-	render->_UIreshape = editorreshape;
-	render->_UIspecial = editorspecial;
-	render->_UIspecialUp = editorspecialUp;
-
     render->setOnRender(RenderScene);
-    render->setOnGUI(editorDraw);
+    // UI is driven by the UI module (NukeUI); it is wired in main() after the
+    // renderer is initialized (NukeUI hooks the renderer's onGUI itself).
 
 	cout << "[main]\t\t\t" << "Preinit done... Next stage..." << endl;
 
@@ -309,6 +259,13 @@ int main()
 	cout << "[main]\t\t\t" << ">> Window size: w(" << config->window.w << "), h(" << config->window.h << ")" << endl;
     render->init(config->window.w, config->window.h);
     cout << "[main]\t\t\t" << "> Render: " << render << endl;
+
+	// Bring up the UI module (ImGui) — it renders through the renderer's neutral
+	// seam, so this works regardless of which renderer module is loaded.
+	NukeUI::Init(render);
+	editorinit();                       // sets up editor panels (style, menu, windows)
+	NukeUI::AddDrawCallback(editorDraw); // editor draws via the UI module each frame
+	cout << "[main]\t\t\t" << "Editor UI initialized." << endl;
 
 	cout << "[main]\t\t\t" << "Modules initialization..." << endl;
     InitModules(instance);

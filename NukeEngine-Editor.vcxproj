@@ -117,8 +117,8 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
-      <AdditionalIncludeDirectories>..\NukeEngine\;..\NukeEngine\deps\LuaBridge\Source;..\NukeEngine\deps\bx\include\compat\msvc;..\NukeEngine\deps\bgfx\include;..\NukeEngine\deps\bx\include;.\include\;..\NukeEngine\include;..\NukeEngine\deps\glm;..\NukeEngine\deps;..\NukeEngine\deps\imgui;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>WIN32;_DEBUG;_CONSOLE;GLM_ENABLE_EXPERIMENTAL;EDITOR;_USE_MATH_DEFINES;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\NukeEngine\;..\NukeEngine\deps\LuaBridge\Source;..\NukeEngine\deps\bx\include\compat\msvc;..\NukeEngine\deps\bgfx\include;..\NukeEngine\deps\bx\include;.\include\;..\NukeEngine\include;..\NukeEngine\deps\glm;..\NukeEngine\deps;..\NukeImGui\imgui;..\NukeImGui\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>WIN32;_DEBUG;_CONSOLE;GLM_ENABLE_EXPERIMENTAL;EDITOR;_USE_MATH_DEFINES;NOMINMAX;IMGUI_API=__declspec(dllimport);%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ForcedIncludeFiles>NukeEngine.h</ForcedIncludeFiles>
       <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
       <LanguageStandard>Default</LanguageStandard>
@@ -130,7 +130,8 @@
     </ClCompile>
     <Link>
       <IgnoreAllDefaultLibraries>false</IgnoreAllDefaultLibraries>
-      <AdditionalLibraryDirectories>..\NukeEngine\$(Platform)\$(Configuration);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>..\NukeEngine\$(Platform)\$(Configuration);..\NukeImGui\build\Debug;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>NukeImGui.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
