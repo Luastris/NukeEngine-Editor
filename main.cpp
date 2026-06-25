@@ -262,7 +262,17 @@ int main()
    
 	InitInput(instance->keyboard);
 	cout << "[main]\t\t\t" << ">> Window size: w(" << config->window.w << "), h(" << config->window.h << ")" << endl;
-    render->init(config->window.w, config->window.h);
+    WindowDesc wd;
+    wd.w = config->window.w; wd.h = config->window.h;
+    wd.title       = config->window.title.c_str();
+    wd.decorated   = config->window.decorated;
+    wd.resizable   = config->window.resizable;
+    wd.floating    = config->window.floating;
+    wd.maximized   = config->window.maximized;
+    wd.fullscreen  = config->window.fullscreen;
+    wd.transparent = config->window.transparent;
+    wd.opacity     = config->window.opacity;
+    render->init(wd);
     cout << "[main]\t\t\t" << "> Render: " << render << endl;
 
 	// Bring up the UI module (ImGui) — it renders through the renderer's neutral
