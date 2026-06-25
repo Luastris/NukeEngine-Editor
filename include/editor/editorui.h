@@ -11,6 +11,9 @@
 // What remains here is just the panels: menu, hierarchy, inspector, about, etc.
 
 #include "imgui.h"
+#include "imgui_internal.h"   // BeginViewportSideBar (toolbar attached under the main menu bar)
+#include "nukeui.h"           // NukeUI::MergeIconFont
+#include "IconsLucide.h"      // ICON_LC_* toolbar icons
 #include "config.h"
 #include "interface/AppInstance.h"
 #include "interface/Modular.h"
@@ -49,11 +52,19 @@ public:
 		win = &Config::getSingleton()->window;
 
 		// The UI module owns the font atlas, but the APP chooses its font.
+		ImGuiIO& io = ImGui::GetIO();
 		if (!win->mainFont.empty())
 		{
 			cout << "[editorui]\t\t" << "Loading font: " << win->mainFont << endl;
-			ImGui::GetIO().Fonts->AddFontFromFileTTF(win->mainFont.c_str(), 19.0f);
+			io.Fonts->AddFontFromFileTTF(win->mainFont.c_str(), 19.0f);
 		}
+		else
+		{
+			io.Fonts->AddFontDefault();
+		}
+		// Merge Lucide icons on top so toolbar/panels can use ICON_LC_* glyphs.
+		// Lucide glyphs sit high in the line, so nudge them down to centre.
+		NukeUI::MergeIconFont("fonts/lucide.ttf", 20.0f, 4.0f);
 
 		InitMenu();
 
@@ -260,8 +271,11 @@ public:
 
 	void CamComponent(Camera* cam)
 	{
-		ImGui::InputInt("Width", &cam->renderer->width);
-		ImGui::InputInt("Height", &cam->renderer->height);
+		if (cam->renderer)
+		{
+			ImGui::InputInt("Width", &cam->renderer->width);
+			ImGui::InputInt("Height", &cam->renderer->height);
+		}
 		float fov = cam->fov * (float)M_PI / 180.f;
 		ImGui::SliderAngle("FOV", &fov, 0, 180);
 		cam->fov = fov * 180.f / (float)M_PI;
@@ -419,13 +433,110 @@ public:
 		ImGui::End();
 	}
 
+	// ---- toolbar ----
+	// A flat button that stays highlighted while `active` (radio/toggle look).
+	bool ToolBtn(const char* icon, const char* tip, bool active, float w)
+	{
+		if (active)
+		{
+			ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.18f, 0.42f, 0.30f, 1.0f));
+			ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.24f, 0.55f, 0.38f, 1.0f));
+			ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.30f, 0.65f, 0.45f, 1.0f));
+		}
+		bool clicked = ImGui::Button(icon, ImVec2(w, 0));
+		if (active) ImGui::PopStyleColor(3);
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
+		return clicked;
+	}
+
+	void SpawnEmpty()
+	{
+		AppInstance* app = AppInstance::GetSingleton();
+		GameObject* go = new GameObject("Empty");
+		app->currentScene->Add(go);
+		app->selectedInHieararchy = go;
+	}
+	void SpawnCube()
+	{
+		AppInstance* app = AppInstance::GetSingleton();
+		GameObject* go = new GameObject("Cube");
+		MeshRenderer* mr = new MeshRenderer();
+		go->AddComponent(mr);
+		mr->mesh = Mesh::CreateCube();
+		app->currentScene->Add(go);
+		app->selectedInHieararchy = go;
+	}
+	void SpawnCamera()
+	{
+		AppInstance* app = AppInstance::GetSingleton();
+		GameObject* go = new GameObject("Camera");
+		Camera* c = new Camera();
+		c->renderer = app->render;          // share the active renderer (avoids re-init / null deref)
+		go->AddComponent(c);
+		app->currentScene->Add(go);
+		app->selectedInHieararchy = go;
+	}
+
+	// Second row under the main menu: tools (left) | PIE (center) | viewport mode (right).
+	void Toolbar()
+	{
+		ImGuiViewport* vp = ImGui::GetMainViewport();
+		// Keep WindowPadding pushed across the WHOLE window scope (Begin..End) so the
+		// top and bottom padding match — otherwise the row sticks to the top edge.
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8, 6));
+		float barH = ImGui::GetFrameHeight() + 12.0f;
+		ImGuiWindowFlags flags = ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
+		bool open = ImGui::BeginViewportSideBar("##nuke-toolbar", vp, ImGuiDir_Up, barH, flags);
+		if (open)
+		{
+			AppInstance* app = AppInstance::GetSingleton();
+			ImGuiStyle& st = ImGui::GetStyle();
+			const float bw = ImGui::GetFrameHeight();   // square icon buttons
+
+			// LEFT — manipulation tools + create
+			if (ToolBtn(ICON_LC_MOUSE_POINTER, "Select", app->manipulationMode == 0, bw)) app->manipulationMode = 0; ImGui::SameLine();
+			if (ToolBtn(ICON_LC_MOVE,          "Move",   app->manipulationMode == 1, bw)) app->manipulationMode = 1; ImGui::SameLine();
+			if (ToolBtn(ICON_LC_ROTATE_3D,     "Rotate", app->manipulationMode == 2, bw)) app->manipulationMode = 2; ImGui::SameLine();
+			if (ToolBtn(ICON_LC_SCALING,       "Scale",  app->manipulationMode == 3, bw)) app->manipulationMode = 3; ImGui::SameLine();
+			if (ToolBtn(ICON_LC_PLUS,          "Create", false,                       bw)) ImGui::OpenPopup("##nuke-create");
+			if (ImGui::BeginPopup("##nuke-create"))
+			{
+				if (ImGui::MenuItem("Empty"))  SpawnEmpty();
+				if (ImGui::MenuItem("Cube"))   SpawnCube();
+				if (ImGui::MenuItem("Camera")) SpawnCamera();
+				ImGui::EndPopup();
+			}
+
+			// CENTER — PIE (Play / Pause / Stop)
+			float winW = ImGui::GetWindowWidth();
+			float centerW = bw * 3 + st.ItemSpacing.x * 2;
+			ImGui::SameLine();
+			ImGui::SetCursorPosX((winW - centerW) * 0.5f);
+			if (ToolBtn(ICON_LC_PLAY,   "Play",  app->playState == 1, bw)) app->playState = 1; ImGui::SameLine();
+			if (ToolBtn(ICON_LC_PAUSE,  "Pause", app->playState == 2, bw)) app->playState = 2; ImGui::SameLine();
+			if (ToolBtn(ICON_LC_SQUARE, "Stop",  app->playState == 0, bw)) app->playState = 0;
+
+			// RIGHT — viewport draw mode (Solid / Wireframe)
+			float rightW = bw * 2 + st.ItemSpacing.x;
+			ImGui::SameLine();
+			ImGui::SetCursorPosX(winW - rightW - 8.0f);
+			if (ToolBtn(ICON_LC_BOX,      "Solid",     !app->wireframe, bw)) app->wireframe = false; ImGui::SameLine();
+			if (ToolBtn(ICON_LC_GRID_3X3, "Wireframe",  app->wireframe, bw)) app->wireframe = true;
+		}
+		ImGui::End();
+		ImGui::PopStyleVar();
+	}
+
 	void Draw()
 	{
+		// Order matters: main menu, then the toolbar side-bar, then the dock space —
+		// each reserves viewport work-area for the next, so panels sit below both bars.
+		EditorMenu();
+		Toolbar();
 		// Full-window dock space so panels can be docked/tabbed/split (sticky).
 		// PassthruCentralNode leaves the centre transparent for the scene viewport.
 		ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport(), ImGuiDockNodeFlags_PassthruCentralNode);
 		window_flags = 0; // panels are dockable/movable now
-		EditorMenu();
 		for (auto tup : *AppInstance::GetSingleton()->editorWindows)
 			tup.second();
 	}
