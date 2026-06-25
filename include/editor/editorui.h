@@ -104,6 +104,7 @@ public:
 		{
 			// Park the editor camera so it looks at the origin (camera control TODO).
 			editorCam->transform->position.x = 0; editorCam->transform->position.y = 0; editorCam->transform->position.z = -5;
+			editorCam->fov = 60.0f;   // 90 vertical is too wide → strong edge distortion
 			// rotation defaults to identity quaternion (looks +Z, at the origin).
 		}
 		// Demo geometry via the spawn API so the viewport shows something.
@@ -428,8 +429,8 @@ public:
 		if (!win->render) return;
 		ImGui::Begin("Render", &win->render, window_flags);
 
-		// Hotkeys (when the viewport is focused and not typing): Q/W/E/R = tools, X = World/Local.
-		if (ImGui::IsWindowFocused() && !ImGui::GetIO().WantTextInput)
+		// Hotkeys (when focused, not typing, and NOT flying with RMB): Q/W/E/R = tools, X = World/Local.
+		if (ImGui::IsWindowFocused() && !ImGui::GetIO().WantTextInput && !ImGui::IsMouseDown(ImGuiMouseButton_Right))
 		{
 			AppInstance* a = AppInstance::GetSingleton();
 			if (ImGui::IsKeyPressed(ImGuiKey_Q)) a->manipulationMode = 0;
@@ -581,6 +582,19 @@ public:
 				}
 				if (io.MouseWheel != 0.0f)
 					t->position += t->direction() * (double)(io.MouseWheel * zoomSpeed);
+
+				// Free-flight: hold RMB + WASD (Q/E = down/up, Shift = faster), Unity/UE-style.
+				if (ImGui::IsMouseDown(ImGuiMouseButton_Right))
+				{
+					float fly = 5.0f * io.DeltaTime;
+					if (io.KeyShift) fly *= 3.0f;
+					if (ImGui::IsKeyDown(ImGuiKey_W)) t->position += t->direction() * (double) fly;
+					if (ImGui::IsKeyDown(ImGuiKey_S)) t->position += t->direction() * (double)-fly;
+					if (ImGui::IsKeyDown(ImGuiKey_D)) t->position += t->right()     * (double) fly;
+					if (ImGui::IsKeyDown(ImGuiKey_A)) t->position += t->right()     * (double)-fly;
+					if (ImGui::IsKeyDown(ImGuiKey_E)) t->position += t->up()        * (double) fly;
+					if (ImGui::IsKeyDown(ImGuiKey_Q)) t->position += t->up()        * (double)-fly;
+				}
 			}
 		}
 		ImGui::End();
