@@ -1,4 +1,4 @@
-#include <API/Model/GameObject.h>
+#include <API/Model/Atom.h>
 #include <interface/RenderModular.h>
 #include <nukeui.h>
 #include "imgui.h"
@@ -16,12 +16,13 @@
 
 #include <iostream>
 using namespace std;
+using namespace nuke;   // engine API now lives in namespace nuke
 
 //void CreateDemoObjects(){
-//    GameObject* root = new GameObject("root");
-//    GameObject* subroot = new GameObject("subroot");
-//    GameObject* secsubroot = new GameObject("2 subroot");
-//    GameObject* deepObject = new GameObject("Deep object");
+//    Atom* root = new Atom("root");
+//    Atom* subroot = new Atom("subroot");
+//    Atom* secsubroot = new Atom("2 subroot");
+//    Atom* deepObject = new Atom("Deep object");
 //    deepObject->SetParent(subroot);
 //    subroot->SetParent(root);
 //    secsubroot->SetParent(root);
@@ -31,7 +32,7 @@ using namespace std;
 //int main() {
 //	AppInstance* app = AppInstance::GetSingleton();
 //	app->setEditor(true);
-//	Scene* nScene = new Scene();
+//	World* nScene = new World();
 //	app->currentScene = nScene;
 //    iRender* render = NukeBGFX::getSingleton();
 //	Config* conf = Config::getSingleton();
@@ -39,7 +40,7 @@ using namespace std;
 //	
 //	if (app->currentScene->GetHierarchy().empty())
 //    {
-//        GameObject* edcam = new GameObject("Editor Camera");
+//        Atom* edcam = new Atom("Editor Camera");
 //        cout << "[main]\t\t\t" << "Camera render is: " << render << endl;
 //        Camera* edcamc = new Camera(edcam, render);
 //        edcamc->transform->position = { 0, 10, -10};
@@ -48,7 +49,7 @@ using namespace std;
 //        app->currentScene->GetHierarchy().push_back(edcam);
 //    }
 //	cout << "[main]\t\t\t" << "New hierarchy size: " << app->currentScene->GetHierarchy().size() << endl;
-//	GameObject* editorCam = app->currentScene->Get("Editor Camera");
+//	Atom* editorCam = app->currentScene->Get("Editor Camera");
 //	cout << "[main]\t\t\t" << "Editor camera: " << editorCam << endl;
 //	
 //	render->_UIinit = editorinit;
@@ -112,10 +113,10 @@ void specialup(int key, int x, int y){
 //}
 
 void CreateDemoObjects(){
-    GameObject* root = new GameObject("root");
-    GameObject* subroot = new GameObject("subroot");
-    GameObject* secsubroot = new GameObject("2 subroot");
-    GameObject* deepObject = new GameObject("Deep object");
+    Atom* root = new Atom("root");
+    Atom* subroot = new Atom("subroot");
+    Atom* secsubroot = new Atom("2 subroot");
+    Atom* deepObject = new Atom("Deep object");
     deepObject->SetParent(subroot);
     subroot->SetParent(root);
     secsubroot->SetParent(root);
@@ -130,10 +131,10 @@ std::string MultiString(std::string str, int times) {
 	return out;
 }
 
-void PrintHierarchy(GameObject* go, int level) {
+void PrintHierarchy(Atom* go, int level) {
 	if (!go)
 		return;
-	//GameObject* goo = go;
+	//Atom* goo = go;
 	cout << "[AppInstance]\t"
 		<< MultiString("\t", level)
 		<< go->GetName()
@@ -163,7 +164,7 @@ void InitEngine()
 	AppInstance* instance = AppInstance::GetSingleton();
     if (instance->currentScene->GetHierarchy().empty())
     {
-        GameObject* edcam = new GameObject("Editor Camera");
+        Atom* edcam = new Atom("Editor Camera");
         iRender* rnd = AppInstance::GetSingleton()->render;
 		cout << "[main]\t\t\t" << "Camera render is: " << rnd << endl;
         Camera* edcamc = new Camera(edcam, rnd);
@@ -188,7 +189,7 @@ void Unload()
     UnloadModules();
 }
 
-void RenderObject(GameObject* go){
+void RenderObject(Atom* go){
     for(auto goc : go->children)
     {
         goc->Update<MeshRenderer>();
@@ -211,7 +212,7 @@ iRender* PreInitRender(){
     iRender * render = AppInstance::GetSingleton()->render;
 
 	cout << "[main]\t\t\t" << "Renderer is: " << render << endl;
-    // Scene rendering lives in the engine lib (Scene::Render), shared by editor
+    // World rendering lives in the engine lib (World::Render), shared by editor
     // and game. The renderer just invokes onRender each frame.
     render->setOnRender([]{
         AppInstance::GetSingleton()->currentScene->Render(AppInstance::GetSingleton()->render);
@@ -285,7 +286,7 @@ int main()
             AppInstance::GetSingleton()->currentScene->Add(pref);
         }
 //        for(auto m : ResDB::getSingleton()->meshes){
-//            GameObject* go = new GameObject(m->name);
+//            Atom* go = new Atom(m->name);
 //            MeshRenderer* mr = new MeshRenderer();
 //            mr->mesh = m;
 //            go->AddComponent(mr);//dynamic_cast<Component*>(mr));

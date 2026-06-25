@@ -23,6 +23,9 @@
 #include <cstring>
 #include <cmath>
 
+using namespace nuke;   // engine API lives in namespace nuke
+using namespace std;    // cout/endl (previously leaked from engine headers)
+
 class EditorUI
 {
 private:
@@ -77,7 +80,7 @@ public:
 		editor->PushWindow("nukeeditor-render", boost::bind(&EditorUI::winRender, this));
 		editor->PushWindow("nukeeditor-plugins", boost::bind(&EditorUI::PluginMGRWindow, this));
 
-		GameObject* camObj = editor->currentScene->Get("Editor Camera");
+		Atom* camObj = editor->currentScene->Get("Editor Camera");
 		if (camObj)
 			editorCam = camObj->GetComponent<Camera>();
 		if (editorCam)
@@ -88,7 +91,7 @@ public:
 		}
 		// Demo geometry via the spawn API so the viewport shows something.
 		{
-			GameObject* cube = new GameObject("Cube");
+			Atom* cube = new Atom("Cube");
 			MeshRenderer* mr = new MeshRenderer();
 			cube->AddComponent(mr);
 			mr->mesh = Mesh::CreateCube();
@@ -237,7 +240,7 @@ public:
 	}
 
 	// ---- panels ----
-	void DisplayRecursiveGameObjectHierarchy(bc::list<GameObject*>& gos)
+	void DisplayRecursiveAtomHierarchy(bc::list<Atom*>& gos)
 	{
 		int i = 0;
 		for (auto go : gos)
@@ -254,7 +257,7 @@ public:
 			if (opened)
 			{
 				if (go->children.size() > 0)
-					DisplayRecursiveGameObjectHierarchy(go->children);
+					DisplayRecursiveAtomHierarchy(go->children);
 				ImGui::TreePop();
 			}
 			++i;
@@ -265,7 +268,7 @@ public:
 	{
 		if (!win->hierarchy) return;
 		ImGui::Begin("Hierarchy", &win->hierarchy, window_flags);
-		DisplayRecursiveGameObjectHierarchy(AppInstance::GetSingleton()->currentScene->GetHierarchy());
+		DisplayRecursiveAtomHierarchy(AppInstance::GetSingleton()->currentScene->GetHierarchy());
 		ImGui::End();
 	}
 
@@ -452,14 +455,14 @@ public:
 	void SpawnEmpty()
 	{
 		AppInstance* app = AppInstance::GetSingleton();
-		GameObject* go = new GameObject("Empty");
+		Atom* go = new Atom("Empty");
 		app->currentScene->Add(go);
 		app->selectedInHieararchy = go;
 	}
 	void SpawnCube()
 	{
 		AppInstance* app = AppInstance::GetSingleton();
-		GameObject* go = new GameObject("Cube");
+		Atom* go = new Atom("Cube");
 		MeshRenderer* mr = new MeshRenderer();
 		go->AddComponent(mr);
 		mr->mesh = Mesh::CreateCube();
@@ -469,7 +472,7 @@ public:
 	void SpawnCamera()
 	{
 		AppInstance* app = AppInstance::GetSingleton();
-		GameObject* go = new GameObject("Camera");
+		Atom* go = new Atom("Camera");
 		Camera* c = new Camera();
 		c->renderer = app->render;          // share the active renderer (avoids re-init / null deref)
 		go->AddComponent(c);
