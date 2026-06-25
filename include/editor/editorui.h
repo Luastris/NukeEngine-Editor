@@ -19,6 +19,7 @@
 #include "interface/AppInstance.h"
 #include "interface/Modular.h"
 #include "API/Model/MeshRenderer.h"
+#include "reflect/Reflect.h"   // auto-inspector: draw component fields from the schema
 #include <boost/container/list.hpp>
 #include <boost/bind/bind.hpp>
 #include <cstring>
@@ -111,6 +112,7 @@ public:
 			MeshRenderer* mr = new MeshRenderer();
 			cube->AddComponent(mr);
 			mr->mesh = Mesh::CreateCube();
+			mr->primitive = "cube";
 			editor->currentScene->Add(cube);
 		}
 		cout << "[editorui]\t\t" << "EditorUI ready." << endl;
@@ -220,8 +222,13 @@ public:
 			if (ImGui::BeginMenu("File"))
 			{
 				if (ImGui::MenuItem("New")) {}
-				if (ImGui::MenuItem("Open", "Ctrl+O")) {}
-				if (ImGui::MenuItem("Save", "Ctrl+S")) {}
+				if (ImGui::MenuItem("Open", "Ctrl+O"))
+				{
+					AppInstance::GetSingleton()->selectedInHieararchy = nullptr;
+					AppInstance::GetSingleton()->currentScene->LoadFromFile("scene.nuworld");
+				}
+				if (ImGui::MenuItem("Save", "Ctrl+S"))
+					AppInstance::GetSingleton()->currentScene->SaveToFile("scene.nuworld");
 				ImGui::Separator();
 				if (ImGui::MenuItem("Quit", "Alt+F4")) {}
 				ImGui::EndMenu();
@@ -303,6 +310,53 @@ public:
 		ImGui::Checkbox("Free mode", &cam->freeMode);
 	}
 
+	// Auto-draw a reflected object's fields from its schema (component inspector).
+	bool DrawFields(void* obj, nuke::TypeInfo* ti)
+	{
+		if (!ti) return false;
+		bool changed = false;
+		for (const nuke::Field& f : ti->fields)
+		{
+			void* a = f.addr(obj);
+			const char* n = f.name.c_str();
+			switch (f.type)
+			{
+			case nuke::FT::Bool:   changed |= ImGui::Checkbox(n, (bool*)a); break;
+			case nuke::FT::Int:    changed |= ImGui::InputInt(n, (int*)a); break;
+			case nuke::FT::Float:  changed |= ImGui::DragFloat(n, (float*)a, 0.05f); break;
+			case nuke::FT::Double: changed |= ImGui::InputDouble(n, (double*)a); break;
+			case nuke::FT::String:
+			{
+				std::string* s = (std::string*)a;
+				char buf[256]; strncpy(buf, s->c_str(), 255); buf[255] = 0;
+				if (ImGui::InputText(n, buf, sizeof(buf))) { *s = buf; changed = true; }
+				break;
+			}
+			case nuke::FT::Vec2:
+			{
+				Vector2* v = (Vector2*)a; float t[2] = { (float)v->x, (float)v->y };
+				if (ImGui::DragFloat2(n, t, 0.05f)) { v->x = t[0]; v->y = t[1]; changed = true; }
+				break;
+			}
+			case nuke::FT::Vec3:
+			{
+				Vector3* v = (Vector3*)a; float t[3] = { (float)v->x, (float)v->y, (float)v->z };
+				if (ImGui::DragFloat3(n, t, 0.05f)) { v->x = t[0]; v->y = t[1]; v->z = t[2]; changed = true; }
+				break;
+			}
+			case nuke::FT::Vec4:
+			case nuke::FT::Quat:
+			{
+				Vector4* v = (Vector4*)a; float t[4] = { (float)v->x, (float)v->y, (float)v->z, (float)v->w };
+				if (ImGui::DragFloat4(n, t, 0.05f)) { v->x = t[0]; v->y = t[1]; v->z = t[2]; v->w = t[3]; changed = true; }
+				break;
+			}
+			default: break;
+			}
+		}
+		return changed;
+	}
+
 	// Vector3 editor with colored X/Y/Z axis labels (Unity-style). True if edited.
 	bool EditV3(const char* rowLabel, double v[3])
 	{
@@ -357,8 +411,7 @@ public:
 					if (ImGui::CollapsingHeader(cmp->name))
 					{
 						ImGui::Checkbox("Enabled", &cmp->enabled);
-						if (auto cam = dynamic_cast<Camera*>(cmp))
-							CamComponent(cam);
+						DrawFields(cmp, cmp->GetType());   // auto fields from [[nuke::prop]] schema
 					}
 				}
 			}
@@ -618,6 +671,7 @@ public:
 		MeshRenderer* mr = new MeshRenderer();
 		go->AddComponent(mr);
 		mr->mesh = Mesh::CreateCube();
+		mr->primitive = "cube";
 		app->currentScene->Add(go);
 		app->selectedInHieararchy = go;
 	}
