@@ -24,6 +24,10 @@
 #include <boost/container/list.hpp>
 #include <boost/bind/bind.hpp>
 #include <cstring>
+#include <nlohmann/json.hpp>   // editor_state.json (editor-side state, not world state)
+#include <fstream>
+#include <map>
+#include <string>
 #include <cmath>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -55,6 +59,10 @@ private:
 	ImGuiWindowFlags window_flags = 0;
 	Camera* editorCam = nullptr;
 	uint64_t sceneRTId = 0;   // render target the editor camera draws into
+	uint64_t camPreviewRT = 0;          // small RT for the selected camera's preview
+	nuke::Camera* previewCam = nullptr; // camera currently retargeted to the preview RT
+	std::map<std::string, bool> uiOpen; // persisted CollapsingHeader states (Components + per atom/component)
+	std::string pendingSelect;          // atom name to reselect after load (from editor_state.json)
 	float camYaw = 0.0f, camPitch = 0.0f;   // editor camera look angles (radians)
 	float gizmoMatrix[16] = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };   // persistent during a gizmo drag
 	std::string pieSnapshot;   // scene serialized on Play, restored on Stop (PIE)
@@ -64,6 +72,53 @@ public:
 	{
 		static EditorUI instance;
 		return &instance;
+	}
+
+	// Open-state for a CollapsingHeader, defaulting to `def` and persisted in uiOpen.
+	bool& OpenState(const std::string& key, bool def = true)
+	{
+		auto it = uiOpen.find(key);
+		if (it == uiOpen.end()) it = uiOpen.emplace(key, def).first;
+		return it->second;
+	}
+
+	// Editor state (NOT world state) -> editor_state.json next to the exe: editor-camera
+	// transform, selected object, and which inspector headers are expanded.
+	void SaveEditorState()
+	{
+		nlohmann::json j;
+		if (editorCam && editorCam->transform)
+		{
+			Transform& t = *editorCam->transform;
+			j["editorCamera"]["pos"] = { t.position.x, t.position.y, t.position.z };
+			j["editorCamera"]["rot"] = { t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w };
+		}
+		if (auto sel = AppInstance::GetSingleton()->selectedInHieararchy)
+			j["selected"] = sel->GetName();
+		nlohmann::json o = nlohmann::json::object();
+		for (auto& kv : uiOpen) o[kv.first] = kv.second;
+		j["uiOpen"] = o;
+		std::ofstream f("editor_state.json");
+		if (f) f << j.dump(2);
+	}
+
+	void LoadEditorState()
+	{
+		std::ifstream f("editor_state.json");
+		if (!f) return;
+		nlohmann::json j = nlohmann::json::parse(f, nullptr, false);
+		if (j.is_discarded()) return;
+		if (j.contains("uiOpen") && j["uiOpen"].is_object())
+			for (auto& kv : j["uiOpen"].items()) uiOpen[kv.key()] = kv.value().get<bool>();
+		if (j.contains("selected") && j["selected"].is_string())
+			pendingSelect = j["selected"].get<std::string>();
+		if (j.contains("editorCamera") && editorCam && editorCam->transform)
+		{
+			nlohmann::json& jc = j["editorCamera"];
+			Transform& t = *editorCam->transform;
+			if (jc.contains("pos")) { auto p = jc["pos"]; t.position.x = p[0]; t.position.y = p[1]; t.position.z = p[2]; }
+			if (jc.contains("rot")) { auto r = jc["rot"]; t.rotation.x = r[0]; t.rotation.y = r[1]; t.rotation.z = r[2]; t.rotation.w = r[3]; }
+		}
 	}
 
 	void SetUp()
@@ -109,6 +164,7 @@ public:
 			editorCam->fov = 60.0f;   // 90 vertical is too wide → strong edge distortion
 			// rotation defaults to identity quaternion (looks +Z, at the origin).
 		}
+		LoadEditorState();   // restore editor-camera transform + inspector open-states + pending selection
 		// Demo geometry via the spawn API so the viewport shows something.
 		{
 			Atom* cube = new Atom("Cube");
@@ -448,12 +504,34 @@ public:
 			if (EditV3("Scale", s))
 			{ t.scale.x = s[0]; t.scale.y = s[1]; t.scale.z = s[2]; }
 
-			if (ImGui::CollapsingHeader("Components"))
+			// Expand/Collapse all — affects the Components category AND every component header.
+			std::string atomName = sltd->GetName();
+			{
+				int force = -1;
+				if (ImGui::SmallButton("Expand All"))   force = 1;
+				ImGui::SameLine();
+				if (ImGui::SmallButton("Collapse All")) force = 0;
+				if (force != -1)
+				{
+					OpenState("Components") = (force == 1);
+					for (auto cmp : sltd->components)
+						OpenState(atomName + "/" + cmp->name) = (force == 1);
+				}
+			}
+
+			// Headers are driven by uiOpen (persisted): set state -> draw -> read the toggle back.
+			bool& compsOpen = OpenState("Components");
+			ImGui::SetNextItemOpen(compsOpen);
+			compsOpen = ImGui::CollapsingHeader("Components");
+			if (compsOpen)
 			{
 				for (auto cmp : sltd->components)
 				{
 					ImGui::PushID(cmp);   // unique ID per component (avoid "Enabled" ID clashes)
-					if (ImGui::CollapsingHeader(cmp->name))
+					bool& st = OpenState(atomName + "/" + cmp->name);
+					ImGui::SetNextItemOpen(st);
+					st = ImGui::CollapsingHeader(cmp->name);
+					if (st)
 					{
 						ImGui::Checkbox("Enabled", &cmp->enabled);
 						DrawFields(cmp, cmp->GetType());   // auto fields from [[nuke::prop]] schema
@@ -520,6 +598,30 @@ public:
 				ImGui::Image((ImTextureID)tex, avail); // the live scene viewport
 			else
 				ImGui::TextDisabled("No scene texture.");
+
+			// --- selected-camera preview: a small overlay in the viewport's bottom-right ---
+			if (previewCam) { previewCam->renderTarget = 0; previewCam = nullptr; }   // release last frame's
+			{
+				Atom* sel = AppInstance::GetSingleton()->selectedInHieararchy;
+				Camera* selCam = sel ? sel->GetComponent<Camera>() : nullptr;
+				if (tex && selCam && selCam != editorCam)
+				{
+					if (camPreviewRT == 0) camPreviewRT = r->createRenderTarget(256, 144);
+					selCam->renderTarget = camPreviewRT;   // World::Render draws it here next pass
+					previewCam = selCam;
+
+					ImVec2 imax = ImGui::GetItemRectMax();  // bottom-right of the scene image
+					ImVec2 pv(256, 144), pad(12, 12);
+					ImVec2 p0(imax.x - pv.x - pad.x, imax.y - pv.y - pad.y);
+					ImVec2 p1(p0.x + pv.x, p0.y + pv.y);
+					ImDrawList* dl = ImGui::GetWindowDrawList();
+					dl->AddRectFilled(ImVec2(p0.x - 2, p0.y - 16), ImVec2(p1.x + 2, p1.y + 2), IM_COL32(15, 15, 15, 220));
+					if (uint64_t ptex = r->getRenderTargetTexture(camPreviewRT))
+						dl->AddImage((ImTextureID)ptex, p0, p1);
+					dl->AddRect(p0, p1, IM_COL32(180, 180, 180, 255));
+					dl->AddText(ImVec2(p0.x + 3, p0.y - 15), IM_COL32_WHITE, sel->GetName().c_str());
+				}
+			}
 
 			// Transform gizmo over the selected object (only when a manip tool is active).
 			{
@@ -688,7 +790,7 @@ public:
 	void PluginMGRWindow()
 	{
 		if (!win->plugmgr) return;
-		if (ImGui::Begin("Plugins", &win->plugmgr))
+		if (ImGui::Begin("Plugins", &win->plugmgr, window_flags))
 		{
 			// Left: the list of loaded plugins.
 			ImGui::BeginChild("pluglist", ImVec2(180, 0), ImGuiChildFlags_Borders);
@@ -857,6 +959,14 @@ public:
 		// PIE: while playing, run game logic (component Update) each frame.
 		if (AppInstance::GetSingleton()->playState == 1)
 			AppInstance::GetSingleton()->currentScene->Update();
+
+		// Restore the selection saved in editor_state.json, once the scene is loaded.
+		if (!pendingSelect.empty())
+		{
+			if (Atom* a = AppInstance::GetSingleton()->currentScene->Get(pendingSelect.c_str()))
+				AppInstance::GetSingleton()->selectedInHieararchy = a;
+			pendingSelect.clear();
+		}
 		// Order matters: main menu, then the toolbar side-bar, then the dock space —
 		// each reserves viewport work-area for the next, so panels sit below both bars.
 		EditorMenu();

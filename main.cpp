@@ -15,6 +15,7 @@
 #include <lodepng/lodepng.h>
 
 #include <iostream>
+#include <fstream>
 using namespace std;
 using namespace nuke;   // engine API now lives in namespace nuke
 
@@ -305,6 +306,20 @@ int main()
 //        }
     }
 
+    // Restore the last-saved scene if present (replaces the startup demo geometry). Safe
+    // here: InitModules already loaded the plugins, whose DLL-load static initializers
+    // registered their component types (e.g. ScriptComponent) — so the world deserializes
+    // with all components intact.
+    {
+        std::ifstream sceneChk("scene.nuworld");
+        if (sceneChk.good())
+        {
+            sceneChk.close();
+            cout << "[main]\t\t\t" << "Restoring last scene (scene.nuworld)..." << endl;
+            AppInstance::GetSingleton()->currentScene->LoadFromFile("scene.nuworld");
+        }
+    }
+
 	cout << "[main]\t\t\t" << "Hierarchy: " << &AppInstance::GetSingleton()->currentScene->GetHierarchy() << endl;
 	/*if(AppInstance::GetSingleton()->currentScene->GetHierarchy().size() > 0)
 		for(auto g : AppInstance::GetSingleton()->currentScene->GetHierarchy())
@@ -318,6 +333,7 @@ int main()
     render->loop();
 
     cout << "[main]\t\t\t" << "shit down..." << endl;
+    EditorUI::getSingleton()->SaveEditorState();   // persist editor state (camera, selection, panels)
     Unload();
     render->deinit();
     return 0;

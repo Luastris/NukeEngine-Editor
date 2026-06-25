@@ -137,7 +137,7 @@
       <Command>xcopy "$(ProjectDir)dist" "$(OutDir)" /s /e /i /y /d
 rem Deploy runtime DLLs explicitly. Runs AFTER vcpkg applocal (which otherwise removes
 rem the engine's transitive deps because they aren't the editor's own direct deps).
-set VCPKGBIN=D:\vcpkg\installed\x64-windows\debug\bin
+set VCPKGBIN=$(VCPKG_ROOT)\installed\x64-windows\debug\bin
 copy /y "%VCPKGBIN%\assimp*.dll" "$(OutDir)"
 copy /y "%VCPKGBIN%\boost_filesystem*.dll" "$(OutDir)"
 copy /y "%VCPKGBIN%\boost_thread*.dll" "$(OutDir)"
