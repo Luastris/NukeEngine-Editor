@@ -320,6 +320,7 @@ public:
 		bool changed = false;
 		for (const nuke::Field& f : ti->fields)
 		{
+			if (f.hidden) continue;   // serialized but not shown (e.g. script props JSON)
 			void* a = f.addr(obj);
 			const char* n = f.name.c_str();
 			switch (f.type)
@@ -358,6 +359,46 @@ public:
 			}
 		}
 		return changed;
+	}
+
+	// Draw a component's dynamic props (e.g. a Lua script's exported vars). The component
+	// supplies data only (DynamicProps/SetDynamicProp); all UI lives here in the editor.
+	void DrawDynamicProps(nuke::Component* cmp)
+	{
+		std::vector<nuke::DynProp> props = cmp->DynamicProps();
+		if (props.empty()) return;
+		ImGui::Separator();
+		ImGui::Text("Script Props");
+		for (nuke::DynProp& p : props)
+		{
+			bool edited = false;
+			nuke::NukeVar nv = p.value;
+			switch (p.value.kind)
+			{
+			case nuke::NukeVar::Kind::Number:
+			{
+				float f = (float)p.value.num;
+				if (ImGui::DragFloat(p.name.c_str(), &f, 0.05f)) { nv.num = f; edited = true; }
+				break;
+			}
+			case nuke::NukeVar::Kind::Bool:
+			{
+				bool b = p.value.b;
+				if (ImGui::Checkbox(p.name.c_str(), &b)) { nv.b = b; edited = true; }
+				break;
+			}
+			case nuke::NukeVar::Kind::String:
+			{
+				char buf[256]; strncpy(buf, p.value.str.c_str(), 255); buf[255] = 0;
+				if (ImGui::InputText(p.name.c_str(), buf, sizeof(buf))) { nv.str = buf; edited = true; }
+				break;
+			}
+			default: continue;
+			}
+			ImGui::SameLine();
+			if (ImGui::SmallButton(("Reset##" + p.name).c_str())) { nv = p.def; edited = true; }
+			if (edited) cmp->SetDynamicProp(p.name, nv);
+		}
 	}
 
 	// Vector3 editor with colored X/Y/Z axis labels (Unity-style). True if edited.
@@ -416,6 +457,7 @@ public:
 					{
 						ImGui::Checkbox("Enabled", &cmp->enabled);
 						DrawFields(cmp, cmp->GetType());   // auto fields from [[nuke::prop]] schema
+						DrawDynamicProps(cmp);             // dynamic props (e.g. Lua script vars)
 					}
 					ImGui::PopID();
 				}
