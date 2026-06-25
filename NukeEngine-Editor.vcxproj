@@ -112,7 +112,7 @@
       <OptimizeReferences>true</OptimizeReferences>
     </Link>
     <PostBuildEvent>
-      <Command>xcopy "$(ProjectDir)dist" "$(OutputPath)" /s /i /y /e</Command>
+      <Command>xcopy "$(ProjectDir)dist" "$(OutDir)" /s /e /i /y /d</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -133,6 +133,9 @@
       <AdditionalLibraryDirectories>..\NukeEngine\$(Platform)\$(Configuration);..\NukeImGui\build\Debug;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>NukeImGui.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
+    <PostBuildEvent>
+      <Command>xcopy "$(ProjectDir)dist" "$(OutDir)" /s /e /i /y /d</Command>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
@@ -149,11 +152,11 @@
       <IgnoreAllDefaultLibraries>false</IgnoreAllDefaultLibraries>
     </Link>
     <PostBuildEvent>
-      <Command>xcopy "$(ProjectDir)dist" "$(OutputPath)" /s /i /y /e</Command>
+      <Command>xcopy "$(ProjectDir)dist" "$(OutDir)" /s /e /i /y /d</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <None Include="config\main.lua" />
+    <None Include="dist\config\main.json" />
     <None Include="res\logo.icns" />
   </ItemGroup>
   <ItemGroup>

@@ -20,6 +20,7 @@
 #include "interface/Modular.h"
 #include "API/Model/MeshRenderer.h"
 #include "reflect/Reflect.h"   // auto-inspector: draw component fields from the schema
+#include "API/Model/Time.h"    // per-frame delta/elapsed
 #include <boost/container/list.hpp>
 #include <boost/bind/bind.hpp>
 #include <cstring>
@@ -410,12 +411,30 @@ public:
 			{
 				for (auto cmp : sltd->components)
 				{
+					ImGui::PushID(cmp);   // unique ID per component (avoid "Enabled" ID clashes)
 					if (ImGui::CollapsingHeader(cmp->name))
 					{
 						ImGui::Checkbox("Enabled", &cmp->enabled);
 						DrawFields(cmp, cmp->GetType());   // auto fields from [[nuke::prop]] schema
 					}
+					ImGui::PopID();
 				}
+			}
+
+			// Add any registered, create-able Component type (incl. ones added by plugins).
+			ImGui::Separator();
+			if (ImGui::Button("Add Component"))
+				ImGui::OpenPopup("addcomp");
+			if (ImGui::BeginPopup("addcomp"))
+			{
+				for (nuke::TypeInfo* ti : nuke::Registry_All())
+				{
+					if (!ti->create || ti->base != "Component")
+						continue;
+					if (ImGui::MenuItem(ti->name.c_str()))
+						sltd->AddComponent((nuke::Component*)ti->create());
+				}
+				ImGui::EndPopup();
 			}
 		}
 		else
@@ -629,10 +648,10 @@ public:
 		if (!win->plugmgr) return;
 		if (ImGui::Begin("Plugins", &win->plugmgr))
 		{
-			ImGui::TextWrapped("To install a plugin, put it in the `modules` directory.");
-			ImGui::Separator();
+			// Left: the list of loaded plugins.
+			ImGui::BeginChild("pluglist", ImVec2(180, 0), ImGuiChildFlags_Borders);
 			int idx = 0;
-			for (auto& mod : modules)
+			for (auto& mod : nuke::GetModules())   // single instance owned by the engine DLL
 			{
 				bool sel = (selectedPluginIndex == idx);
 				if (ImGui::Selectable(mod->title, sel))
@@ -642,16 +661,29 @@ public:
 				}
 				++idx;
 			}
-			ImGui::Separator();
+			ImGui::EndChild();
+
+			ImGui::SameLine();
+
+			// Right: selected plugin details + its inline settings panel.
+			ImGui::BeginChild("plugdetails", ImVec2(0, 0));
 			if (selectedPlugin)
 			{
 				ImGui::TextUnformatted(selectedPlugin->title);
 				ImGui::TextUnformatted(selectedPlugin->author);
 				ImGui::TextUnformatted(selectedPlugin->version);
 				ImGui::TextWrapped("%s", selectedPlugin->description);
-				if (selectedPlugin->HasSettings() && ImGui::Button("Settings"))
-					selectedPlugin->Settings();
+				if (selectedPlugin->HasSettings())
+				{
+					ImGui::SeparatorText("Settings");
+					selectedPlugin->Settings();   // plugin draws its settings inline (a panel here)
+				}
 			}
+			else
+			{
+				ImGui::TextWrapped("Select a plugin on the left. To install one, put its DLL in the `modules` directory.");
+			}
+			ImGui::EndChild();
 		}
 		ImGui::End();
 	}
@@ -777,6 +809,8 @@ public:
 	void Draw()
 	{
 		ImGuizmo::BeginFrame();   // must come right after ImGui::NewFrame (done by NukeUI)
+
+		nuke::Time::getSingleton()->NewFrame();   // real frame delta/elapsed (scripts & systems)
 
 		// PIE: while playing, run game logic (component Update) each frame.
 		if (AppInstance::GetSingleton()->playState == 1)

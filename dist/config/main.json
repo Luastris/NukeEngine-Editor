@@ -1,0 +1,8 @@
+{
+  // NukeEngine config (JSON). Comments are allowed.
+  "window": {
+    "width": 1700,
+    "height": 920,
+    "mainFont": "fonts/OpenSansLight.ttf"
+  }
+}
