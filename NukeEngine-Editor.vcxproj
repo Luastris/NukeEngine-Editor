@@ -88,7 +88,7 @@
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <Optimization>Disabled</Optimization>
       <LanguageStandard>stdcpp14</LanguageStandard>
-      <AdditionalIncludeDirectories>..\NukeEngine\deps\LuaBridge\Source;..\NukeEngine\deps\bx\include\compat\msvc;..\NukeEngine\deps\glfw\include;..\NukeEngine\deps\bgfx\include;..\NukeEngine\deps\bx\include;.\;..\NukeEngine;..\NukeEngine\deps\glm;..\NukeEngine\deps;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>.\;..\NukeEngine;..\NukeEngine\deps\glm;..\NukeEngine\deps;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <ForcedIncludeFiles>NukeEngine.h;%(ForcedIncludeFiles)</ForcedIncludeFiles>
     </ClCompile>
     <Link>
@@ -117,7 +117,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
-      <AdditionalIncludeDirectories>..\NukeEngine\;..\NukeEngine\deps\LuaBridge\Source;..\NukeEngine\deps\bx\include\compat\msvc;..\NukeEngine\deps\bgfx\include;..\NukeEngine\deps\bx\include;.\include\;..\NukeEngine\include;..\NukeEngine\deps\glm;..\NukeEngine\deps;..\NukeImGui\imgui;..\NukeImGui\src;..\NukeImGui\imguizmo;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\NukeEngine\;.\include\;..\NukeEngine\include;..\NukeEngine\deps\glm;..\NukeEngine\deps;..\NukeImGui\imgui;..\NukeImGui\src;..\NukeImGui\imguizmo;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>WIN32;_DEBUG;_CONSOLE;GLM_ENABLE_EXPERIMENTAL;EDITOR;_USE_MATH_DEFINES;NOMINMAX;IMGUI_API=__declspec(dllimport);%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ForcedIncludeFiles>NukeEngine.h</ForcedIncludeFiles>
       <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
@@ -134,12 +134,24 @@
       <AdditionalDependencies>NukeImGui.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
-      <Command>xcopy "$(ProjectDir)dist" "$(OutDir)" /s /e /i /y /d</Command>
+      <Command>xcopy "$(ProjectDir)dist" "$(OutDir)" /s /e /i /y /d
+rem Deploy runtime DLLs explicitly. Runs AFTER vcpkg applocal (which otherwise removes
+rem the engine's transitive deps because they aren't the editor's own direct deps).
+set VCPKGBIN=D:\vcpkg\installed\x64-windows\debug\bin
+copy /y "%VCPKGBIN%\assimp*.dll" "$(OutDir)"
+copy /y "%VCPKGBIN%\boost_filesystem*.dll" "$(OutDir)"
+copy /y "%VCPKGBIN%\boost_thread*.dll" "$(OutDir)"
+copy /y "%VCPKGBIN%\zlibd1.dll" "$(OutDir)"
+copy /y "%VCPKGBIN%\minizip.dll" "$(OutDir)"
+copy /y "%VCPKGBIN%\poly2tri.dll" "$(OutDir)"
+copy /y "%VCPKGBIN%\pugixml.dll" "$(OutDir)"
+copy /y "%VCPKGBIN%\lua.dll" "$(OutDir)"
+copy /y "%VCPKGBIN%\glfw3.dll" "$(OutDir)"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
-      <AdditionalIncludeDirectories>..\NukeEngine\;..\NukeEngine\deps\LuaBridge\Source;..\NukeEngine\deps\bx\include\compat\msvc;..\NukeEngine\deps\bgfx\include;..\NukeEngine\deps\bx\include;.\include;..\NukeEngine\include;..\NukeEngine\deps\glm;..\NukeEngine\deps;..\NukeEngine\deps\imgui;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\NukeEngine\;.\include;..\NukeEngine\include;..\NukeEngine\deps\glm;..\NukeEngine\deps;..\NukeEngine\deps\imgui;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>WIN32;NDEBUG;_CONSOLE;GLM_ENABLE_EXPERIMENTAL;EDITOR;_USE_MATH_DEFINES;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ForcedIncludeFiles>algorithm;NukeEngine.h;pch.h;%(ForcedIncludeFiles)</ForcedIncludeFiles>
       <UndefinePreprocessorDefinitions>
