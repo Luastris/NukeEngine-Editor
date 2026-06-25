@@ -14,6 +14,7 @@
 #include "imgui_internal.h"   // BeginViewportSideBar (toolbar attached under the main menu bar)
 #include "nukeui.h"           // NukeUI::MergeIconFont
 #include "IconsLucide.h"      // ICON_LC_* toolbar icons
+#include "ImGuizmo.h"         // transform gizmo (lives in NukeImGui, shares the context)
 #include "config.h"
 #include "interface/AppInstance.h"
 #include "interface/Modular.h"
@@ -22,9 +23,23 @@
 #include <boost/bind/bind.hpp>
 #include <cstring>
 #include <cmath>
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
+#include <glm/gtx/quaternion.hpp>
+#include <glm/gtc/type_ptr.hpp>
+#include <glm/ext.hpp>   // lookAtLH / perspectiveLH_ZO (match the renderer's LH, z0..1)
 
 using namespace nuke;   // engine API lives in namespace nuke
 using namespace std;    // cout/endl (previously leaked from engine headers)
+
+// Row-major (renderer) -> column-major (ImGuizmo) 4x4 matrix layout.
+static inline void Transpose4(const float* s, float* d)
+{
+	for (int r = 0; r < 4; ++r)
+		for (int c = 0; c < 4; ++c)
+			d[c * 4 + r] = s[r * 4 + c];
+}
 
 class EditorUI
 {
@@ -353,6 +368,59 @@ public:
 			else
 				ImGui::TextDisabled("No scene texture.");
 
+			// Transform gizmo over the selected object (only when a manip tool is active).
+			{
+				AppInstance* gapp = AppInstance::GetSingleton();
+				Atom* gsel = gapp->selectedInHieararchy;
+				if (gsel && editorCam && gapp->manipulationMode != 0)
+				{
+					ImGuizmo::SetOrthographic(false);
+					ImGuizmo::SetDrawlist();
+					ImVec2 grmin = ImGui::GetItemRectMin();
+					ImVec2 gsz   = ImGui::GetItemRectSize();
+					ImGuizmo::SetRect(grmin.x, grmin.y, gsz.x, gsz.y);
+
+					// Build view/proj on the editor side in glm column-major, in the SAME
+					// convention as the renderer (Diligent: left-handed, depth 0..1), so the
+					// gizmo overlays the rendered image and ImGuizmo gets valid input.
+					float gview[16], gproj[16];
+					{
+						Transform* gcam = editorCam->transform;
+						Vector3 ge = gcam->globalPosition();
+						Vector3 gf = gcam->direction(), gu = gcam->up();
+						float gaspect = (gsz.y > 0.0f) ? gsz.x / gsz.y : 1.0f;
+						float gfovy   = (float)editorCam->fov * 0.01745329252f;
+						glm::mat4 v = glm::lookAtLH(
+							glm::vec3((float)ge.x, (float)ge.y, (float)ge.z),
+							glm::vec3((float)(ge.x + gf.x), (float)(ge.y + gf.y), (float)(ge.z + gf.z)),
+							glm::vec3((float)gu.x, (float)gu.y, (float)gu.z));
+						glm::mat4 p = glm::perspectiveLH_ZO(gfovy, gaspect, editorCam->_near, editorCam->_far);
+						memcpy(gview, glm::value_ptr(v), sizeof(gview));
+						memcpy(gproj, glm::value_ptr(p), sizeof(gproj));
+					}
+
+					Transform& gtt = gsel->GetTransform();
+					glm::quat gq((float)gtt.rotation.w, (float)gtt.rotation.x, (float)gtt.rotation.y, (float)gtt.rotation.z);
+					glm::mat4 gworld = glm::translate(glm::mat4(1.0f), glm::vec3((float)gtt.position.x, (float)gtt.position.y, (float)gtt.position.z))
+					                 * glm::mat4_cast(gq)
+					                 * glm::scale(glm::mat4(1.0f), glm::vec3((float)gtt.scale.x, (float)gtt.scale.y, (float)gtt.scale.z));
+					float gmodel[16];
+					memcpy(gmodel, glm::value_ptr(gworld), sizeof(gmodel));
+
+					ImGuizmo::OPERATION gop = (gapp->manipulationMode == 1) ? ImGuizmo::TRANSLATE
+					                        : (gapp->manipulationMode == 2) ? ImGuizmo::ROTATE
+					                                                        : ImGuizmo::SCALE;
+					if (ImGuizmo::Manipulate(gview, gproj, gop, ImGuizmo::WORLD, gmodel))
+					{
+						float gtr[3], gro[3], gsc[3];
+						ImGuizmo::DecomposeMatrixToComponents(gmodel, gtr, gro, gsc);
+						gtt.position = Vector3(gtr[0], gtr[1], gtr[2]);
+						gtt.SetEulerDeg(Vector3(gro[0], gro[1], gro[2]));
+						gtt.scale = Vector3(gsc[0], gsc[1], gsc[2]);
+					}
+				}
+			}
+
 			// Viewport camera control (while hovering the image):
 			//   RMB drag = orbit/look, MMB drag = pan, wheel = dolly.
 			if (editorCam && editorCam->transform && ImGui::IsItemHovered())
@@ -360,6 +428,27 @@ public:
 				ImGuiIO& io = ImGui::GetIO();
 				Transform* t = editorCam->transform;
 				const float rotSpeed = 0.005f, panSpeed = 0.01f, zoomSpeed = 0.5f;
+
+				// Left-click: pick the object under the cursor (null = deselect).
+				// Skip if the gizmo is being interacted with, so dragging it doesn't deselect.
+				if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGuizmo::IsUsing() && !ImGuizmo::IsOver())
+				{
+					ImVec2 rmin = ImGui::GetItemRectMin();
+					ImVec2 sz   = ImGui::GetItemRectSize();
+					ImVec2 mp   = io.MousePos;
+					float ndcx = ((mp.x - rmin.x) / sz.x) * 2.0f - 1.0f;
+					float ndcy = 1.0f - ((mp.y - rmin.y) / sz.y) * 2.0f;
+					Vector3 o = t->globalPosition();
+					Vector3 f = t->direction(), rr = t->right(), uu = t->up();
+					float aspect = (sz.y > 0.0f) ? sz.x / sz.y : 1.0f;
+					float thf = tanf((float)editorCam->fov * 0.5f * 0.01745329252f);
+					Vector3 dir(f.x + ndcx * thf * aspect * rr.x + ndcy * thf * uu.x,
+					            f.y + ndcx * thf * aspect * rr.y + ndcy * thf * uu.y,
+					            f.z + ndcx * thf * aspect * rr.z + ndcy * thf * uu.z);
+					AppInstance::GetSingleton()->selectedInHieararchy =
+						AppInstance::GetSingleton()->currentScene->Pick(o, dir);
+				}
+
 				if (ImGui::IsMouseDragging(ImGuiMouseButton_Right))
 				{
 					camYaw   += io.MouseDelta.x * rotSpeed;
@@ -532,6 +621,7 @@ public:
 
 	void Draw()
 	{
+		ImGuizmo::BeginFrame();   // must come right after ImGui::NewFrame (done by NukeUI)
 		// Order matters: main menu, then the toolbar side-bar, then the dock space —
 		// each reserves viewport work-area for the next, so panels sit below both bars.
 		EditorMenu();
