@@ -56,6 +56,7 @@ private:
 	uint64_t sceneRTId = 0;   // render target the editor camera draws into
 	float camYaw = 0.0f, camPitch = 0.0f;   // editor camera look angles (radians)
 	float gizmoMatrix[16] = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };   // persistent during a gizmo drag
+	std::string pieSnapshot;   // scene serialized on Play, restored on Stop (PIE)
 
 public:
 	static EditorUI* getSingleton()
@@ -741,9 +742,26 @@ public:
 			float centerW = bw * 3 + st.ItemSpacing.x * 2;
 			ImGui::SameLine();
 			ImGui::SetCursorPosX((winW - centerW) * 0.5f);
-			if (ToolBtn(ICON_LC_PLAY,   "Play",  app->playState == 1, bw)) app->playState = 1; ImGui::SameLine();
-			if (ToolBtn(ICON_LC_PAUSE,  "Pause", app->playState == 2, bw)) app->playState = 2; ImGui::SameLine();
-			if (ToolBtn(ICON_LC_SQUARE, "Stop",  app->playState == 0, bw)) app->playState = 0;
+			if (ToolBtn(ICON_LC_PLAY, "Play", app->playState == 1, bw))
+			{
+				if (app->playState == 0) pieSnapshot = app->currentScene->SaveToString();   // snapshot on entering play
+				app->playState = 1;
+			}
+			ImGui::SameLine();
+			if (ToolBtn(ICON_LC_PAUSE, "Pause", app->playState == 2, bw))
+			{
+				if (app->playState != 0) app->playState = 2;   // pause only while playing
+			}
+			ImGui::SameLine();
+			if (ToolBtn(ICON_LC_SQUARE, "Stop", app->playState == 0, bw))
+			{
+				if (app->playState != 0 && !pieSnapshot.empty())
+				{
+					app->selectedInHieararchy = nullptr;
+					app->currentScene->LoadFromString(pieSnapshot);   // restore scene on stop
+				}
+				app->playState = 0;
+			}
 
 			// RIGHT — viewport draw mode (Solid / Wireframe)
 			float rightW = bw * 2 + st.ItemSpacing.x;
@@ -759,6 +777,10 @@ public:
 	void Draw()
 	{
 		ImGuizmo::BeginFrame();   // must come right after ImGui::NewFrame (done by NukeUI)
+
+		// PIE: while playing, run game logic (component Update) each frame.
+		if (AppInstance::GetSingleton()->playState == 1)
+			AppInstance::GetSingleton()->currentScene->Update();
 		// Order matters: main menu, then the toolbar side-bar, then the dock space —
 		// each reserves viewport work-area for the next, so panels sit below both bars.
 		EditorMenu();
