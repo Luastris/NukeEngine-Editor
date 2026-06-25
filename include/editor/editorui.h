@@ -54,6 +54,7 @@ private:
 	Camera* editorCam = nullptr;
 	uint64_t sceneRTId = 0;   // render target the editor camera draws into
 	float camYaw = 0.0f, camPitch = 0.0f;   // editor camera look angles (radians)
+	float gizmoMatrix[16] = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };   // persistent during a gizmo drag
 
 public:
 	static EditorUI* getSingleton()
@@ -302,6 +303,30 @@ public:
 		ImGui::Checkbox("Free mode", &cam->freeMode);
 	}
 
+	// Vector3 editor with colored X/Y/Z axis labels (Unity-style). True if edited.
+	bool EditV3(const char* rowLabel, double v[3])
+	{
+		static const char* ax[3] = { "X", "Y", "Z" };
+		static const ImVec4 col[3] = { ImVec4(0.86f,0.34f,0.34f,1.0f), ImVec4(0.42f,0.74f,0.36f,1.0f), ImVec4(0.36f,0.55f,0.92f,1.0f) };
+		bool ch = false;
+		ImGui::PushID(rowLabel);
+		float w = (ImGui::GetContentRegionAvail().x - 150.0f) / 3.0f;
+		if (w < 36.0f) w = 36.0f;
+		for (int i = 0; i < 3; ++i)
+		{
+			ImGui::PushID(i);
+			ImGui::TextColored(col[i], "%s", ax[i]);
+			ImGui::SameLine();
+			ImGui::SetNextItemWidth(w);
+			ch |= ImGui::InputDouble("##v", &v[i], 0.0, 0.0, "%.3f");
+			ImGui::SameLine();
+			ImGui::PopID();
+		}
+		ImGui::TextUnformatted(rowLabel);
+		ImGui::PopID();
+		return ch;
+	}
+
 	void winInspector()
 	{
 		if (!win->inspector) return;
@@ -315,14 +340,14 @@ public:
 			ImGui::SeparatorText("Transform");
 			Transform& t = sltd->GetTransform();
 			double p[3] = { t.position.x, t.position.y, t.position.z };
-			if (ImGui::InputScalarN("Position", ImGuiDataType_Double, p, 3))
+			if (EditV3("Position", p))
 			{ t.position.x = p[0]; t.position.y = p[1]; t.position.z = p[2]; }
 			Vector3 er = t.EulerDeg();
 			double r[3] = { er.x, er.y, er.z };
-			if (ImGui::InputScalarN("Rotation (deg)", ImGuiDataType_Double, r, 3))
+			if (EditV3("Rotation (deg)", r))
 				t.SetEulerDeg(Vector3(r[0], r[1], r[2]));
 			double s[3] = { t.scale.x, t.scale.y, t.scale.z };
-			if (ImGui::InputScalarN("Scale", ImGuiDataType_Double, s, 3))
+			if (EditV3("Scale", s))
 			{ t.scale.x = s[0]; t.scale.y = s[1]; t.scale.z = s[2]; }
 
 			if (ImGui::CollapsingHeader("Components"))
@@ -349,6 +374,18 @@ public:
 	{
 		if (!win->render) return;
 		ImGui::Begin("Render", &win->render, window_flags);
+
+		// Hotkeys (when the viewport is focused and not typing): Q/W/E/R = tools, X = World/Local.
+		if (ImGui::IsWindowFocused() && !ImGui::GetIO().WantTextInput)
+		{
+			AppInstance* a = AppInstance::GetSingleton();
+			if (ImGui::IsKeyPressed(ImGuiKey_Q)) a->manipulationMode = 0;
+			if (ImGui::IsKeyPressed(ImGuiKey_W)) a->manipulationMode = 1;
+			if (ImGui::IsKeyPressed(ImGuiKey_E)) a->manipulationMode = 2;
+			if (ImGui::IsKeyPressed(ImGuiKey_R)) a->manipulationMode = 3;
+			if (ImGui::IsKeyPressed(ImGuiKey_X)) a->manipulationWorld = !a->manipulationWorld;
+		}
+
 		ImVec2 avail = ImGui::GetContentRegionAvail();
 		iRender* r = AppInstance::GetSingleton()->render;
 		if (r && avail.x >= 1.0f && avail.y >= 1.0f)
@@ -383,6 +420,9 @@ public:
 					// Build view/proj on the editor side in glm column-major, in the SAME
 					// convention as the renderer (Diligent: left-handed, depth 0..1), so the
 					// gizmo overlays the rendered image and ImGuizmo gets valid input.
+					// Feed ImGuizmo the renderer's EXACT view/proj (Diligent: row-major, LH,
+					// depth 0..1) so screen<->world matches the image precisely — per-axis
+					// scale needs an exact ray, and ImGuizmo then detects handedness right.
 					float gview[16], gproj[16];
 					{
 						Transform* gcam = editorCam->transform;
@@ -390,13 +430,14 @@ public:
 						Vector3 gf = gcam->direction(), gu = gcam->up();
 						float gaspect = (gsz.y > 0.0f) ? gsz.x / gsz.y : 1.0f;
 						float gfovy   = (float)editorCam->fov * 0.01745329252f;
-						glm::mat4 v = glm::lookAtLH(
+						glm::mat4 gv = glm::lookAtLH(
 							glm::vec3((float)ge.x, (float)ge.y, (float)ge.z),
 							glm::vec3((float)(ge.x + gf.x), (float)(ge.y + gf.y), (float)(ge.z + gf.z)),
 							glm::vec3((float)gu.x, (float)gu.y, (float)gu.z));
-						glm::mat4 p = glm::perspectiveLH_ZO(gfovy, gaspect, editorCam->_near, editorCam->_far);
-						memcpy(gview, glm::value_ptr(v), sizeof(gview));
-						memcpy(gproj, glm::value_ptr(p), sizeof(gproj));
+						glm::mat4 gp = glm::perspectiveLH_ZO(gfovy, gaspect, editorCam->_near, editorCam->_far);
+						// ImGuizmo uses ROW convention, glm uses COLUMN — transpose all matrices.
+						memcpy(gview, glm::value_ptr(gv), sizeof(gview));   // glm passed directly (no transpose)
+						memcpy(gproj, glm::value_ptr(gp), sizeof(gproj));
 					}
 
 					Transform& gtt = gsel->GetTransform();
@@ -404,19 +445,41 @@ public:
 					glm::mat4 gworld = glm::translate(glm::mat4(1.0f), glm::vec3((float)gtt.position.x, (float)gtt.position.y, (float)gtt.position.z))
 					                 * glm::mat4_cast(gq)
 					                 * glm::scale(glm::mat4(1.0f), glm::vec3((float)gtt.scale.x, (float)gtt.scale.y, (float)gtt.scale.z));
-					float gmodel[16];
-					memcpy(gmodel, glm::value_ptr(gworld), sizeof(gmodel));
+					(void)gworld;   // model is built via ImGuizmo's own compose below
+					if (!ImGuizmo::IsUsing())   // resync from the object only when NOT dragging
+					{
+						// Build the model with ImGuizmo's OWN compose so it's in exactly the
+						// convention ImGuizmo expects — this is what makes per-axis scale work.
+						Vector3 ep = gtt.position, ee = gtt.EulerDeg(), es = gtt.scale;
+						float t3[3] = { (float)ep.x, (float)ep.y, (float)ep.z };
+						float r3[3] = { (float)ee.x, (float)ee.y, (float)ee.z };
+						float s3[3] = { (float)es.x, (float)es.y, (float)es.z };
+						ImGuizmo::RecomposeMatrixFromComponents(t3, r3, s3, gizmoMatrix);
+					}
 
 					ImGuizmo::OPERATION gop = (gapp->manipulationMode == 1) ? ImGuizmo::TRANSLATE
 					                        : (gapp->manipulationMode == 2) ? ImGuizmo::ROTATE
 					                                                        : ImGuizmo::SCALE;
-					if (ImGuizmo::Manipulate(gview, gproj, gop, ImGuizmo::WORLD, gmodel))
+					ImGuizmo::MODE gmode = (gop != ImGuizmo::SCALE && gapp->manipulationWorld != 0) ? ImGuizmo::WORLD : ImGuizmo::LOCAL;
+					float gsnapv   = (gop == ImGuizmo::TRANSLATE) ? 0.5f : (gop == ImGuizmo::ROTATE) ? 15.0f : 0.1f;
+					float gsnap[3] = { gsnapv, gsnapv, gsnapv };
+					float* gsnapPtr = ImGui::GetIO().KeyCtrl ? gsnap : nullptr;   // hold Ctrl to snap
+					ImGuizmo::Manipulate(gview, gproj, gop, gmode, gizmoMatrix, nullptr, gsnapPtr);
+					if (ImGuizmo::IsUsing())
 					{
 						float gtr[3], gro[3], gsc[3];
-						ImGuizmo::DecomposeMatrixToComponents(gmodel, gtr, gro, gsc);
-						gtt.position = Vector3(gtr[0], gtr[1], gtr[2]);
-						gtt.SetEulerDeg(Vector3(gro[0], gro[1], gro[2]));
-						gtt.scale = Vector3(gsc[0], gsc[1], gsc[2]);
+						ImGuizmo::DecomposeMatrixToComponents(gizmoMatrix, gtr, gro, gsc);
+						bool gok = true;
+						for (int i = 0; i < 3; ++i)
+							gok = gok && std::isfinite(gtr[i]) && std::isfinite(gro[i]) && std::isfinite(gsc[i]);
+						if (gok)   // skip degenerate results (e.g. scale dragged through zero -> NaN)
+						{
+							for (int i = 0; i < 3; ++i)
+								if (fabsf(gsc[i]) < 1e-3f) gsc[i] = (gsc[i] < 0.0f) ? -1e-3f : 1e-3f;
+							gtt.position = Vector3(gtr[0], gtr[1], gtr[2]);
+							gtt.SetEulerDeg(Vector3(gro[0], gro[1], gro[2]));
+							gtt.scale = Vector3(gsc[0], gsc[1], gsc[2]);
+						}
 					}
 				}
 			}
@@ -598,6 +661,12 @@ public:
 				if (ImGui::MenuItem("Camera")) SpawnCamera();
 				ImGui::EndPopup();
 			}
+			// World/Local space toggle for the gizmo (also hotkey X).
+			ImGui::SameLine();
+			bool worldMode = (app->manipulationWorld != 0);
+			if (ToolBtn(worldMode ? ICON_LC_GLOBE : ICON_LC_AXIS_3D,
+			            worldMode ? "World space (X)" : "Local space (X)", false, bw))
+				app->manipulationWorld = !app->manipulationWorld;
 
 			// CENTER — PIE (Play / Pause / Stop)
 			float winW = ImGui::GetWindowWidth();
