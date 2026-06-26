@@ -19,15 +19,24 @@
 #include "interface/AppInstance.h"
 #include "interface/Modular.h"
 #include "API/Model/MeshRenderer.h"
+#include "API/Model/UnknownComponent.h"
+#include "API/Model/resdb.h"   // asset database (meshes by GUID, browser)
+#include "import/assimporter.h" // external model import -> native .numesh
+#include "API/Model/Prefab.h"   // instantiate .nuprefab assets
 #include "reflect/Reflect.h"   // auto-inspector: draw component fields from the schema
 #include "API/Model/Time.h"    // per-frame delta/elapsed
 #include <boost/container/list.hpp>
 #include <boost/bind/bind.hpp>
 #include <cstring>
 #include <nlohmann/json.hpp>   // editor_state.json (editor-side state, not world state)
-#include <fstream>
+#include <boost/filesystem/fstream.hpp>   // boost file streams (project's stack — not std)
 #include <map>
 #include <string>
+#include <vector>
+#include <cctype>
+#include <cstdio>
+#include <algorithm>
+#include <boost/filesystem.hpp>   // project content browser (bfs, matching the engine's stack)
 #include <cmath>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -38,6 +47,10 @@
 
 using namespace nuke;   // engine API lives in namespace nuke
 using namespace std;    // cout/endl (previously leaked from engine headers)
+
+// Native OS "open file" dialog for importing models. Defined in main.cpp (isolates <windows.h>).
+// Returns the picked path, or "" if cancelled.
+std::string EditorPickModelFile();
 
 // Row-major (renderer) -> column-major (ImGuizmo) 4x4 matrix layout.
 static inline void Transpose4(const float* s, float* d)
@@ -53,7 +66,7 @@ private:
 	EditorUI() {}
 	~EditorUI() {}
 	struct NukeWindow* win = nullptr;
-	boost::shared_ptr<NUKEModule> selectedPlugin = nullptr;
+	std::shared_ptr<NUKEModule> selectedPlugin = nullptr;
 	int  selectedPluginIndex = -1;
 	bool freezeWindows = true;
 	ImGuiWindowFlags window_flags = 0;
@@ -63,6 +76,17 @@ private:
 	nuke::Camera* previewCam = nullptr; // camera currently retargeted to the preview RT
 	std::map<std::string, bool> uiOpen; // persisted CollapsingHeader states (Components + per atom/component)
 	std::string pendingSelect;          // atom name to reselect after load (from editor_state.json)
+	int  browserView = 0;               // asset browser: 0 Tiles, 1 List, 2 Tree, 3 By Type
+	char browserSearch[128] = "";
+	bool fMesh = true, fMat = true, fTex = true, fPrefab = true;   // browser type filters
+	std::string contentDir = "project/content";   // project content root (imported assets live here)
+	std::string browserCwd;                        // current folder shown in the browser
+	std::string projectDir  = "project";           // project root
+	std::string projectFile = "project/game.nuproj";
+	std::string startupWorld = "scene.nuworld";    // from the .nuproj
+	std::vector<std::string> enabledPlugins;       // per-project plugin load list (dll names)
+	bool pluginListLoaded = false;                 // did the .nuproj specify a plugin list?
+	std::vector<std::pair<nuke::NUKEModule*, bool>> pendingPluginToggle;   // applied after the window loop
 	float camYaw = 0.0f, camPitch = 0.0f;   // editor camera look angles (radians)
 	float gizmoMatrix[16] = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };   // persistent during a gizmo drag
 	std::string pieSnapshot;   // scene serialized on Play, restored on Stop (PIE)
@@ -82,8 +106,68 @@ public:
 		return it->second;
 	}
 
-	// Editor state (NOT world state) -> editor_state.json next to the exe: editor-camera
-	// transform, selected object, and which inspector headers are expanded.
+	// The project manifest (project/game.nuproj): content dir, startup world, plugin load list.
+	// Projects have a file (like .sln/.uproject); this is ours, extension .nuproj. The plugin
+	// pool is shared (modules/); "plugins" is THIS project's chosen load list (dll names).
+	void SaveProject()
+	{
+		boost::system::error_code ec; bfs::create_directories(projectDir, ec);
+		nlohmann::json j;
+		j["name"]         = "NukeGame";
+		j["engine"]       = "NukeEngine";
+		j["content"]      = "content";          // relative to the project dir
+		j["startupWorld"] = startupWorld;
+		j["plugins"]      = enabledPlugins;     // which pooled plugins this project loads
+		bfs::ofstream f{bfs::path(projectFile)};
+		if (f) f << j.dump(2);
+	}
+	void LoadProject()
+	{
+		boost::system::error_code ec; bfs::create_directories(projectDir, ec);
+		bfs::ifstream f{bfs::path(projectFile)};
+		if (!f) { SaveProject(); return; }   // first run — create a default .nuproj
+		nlohmann::json j = nlohmann::json::parse(f, nullptr, false);
+		if (j.is_discarded()) return;
+		startupWorld = j.value("startupWorld", startupWorld);
+		contentDir   = projectDir + "/" + j.value("content", std::string("content"));
+		enabledPlugins.clear();
+		if (j.contains("plugins") && j["plugins"].is_array())
+		{
+			pluginListLoaded = true;
+			for (auto& p : j["plugins"]) enabledPlugins.push_back(p.get<std::string>());
+		}
+	}
+
+	// Activate the project's chosen plugins from the shared (already-discovered) pool. On a
+	// project with no list yet (first run), default every discovered plugin ON and persist it.
+	void ApplyProjectPlugins()
+	{
+		auto& mods = nuke::GetModules();
+		if (!pluginListLoaded)
+		{
+			enabledPlugins.clear();
+			for (auto& m : mods) enabledPlugins.push_back(m->moduleFile);
+			pluginListLoaded = true;
+			SaveProject();
+		}
+		for (auto& m : mods)
+		{
+			bool want = std::find(enabledPlugins.begin(), enabledPlugins.end(), m->moduleFile) != enabledPlugins.end();
+			if (want) nuke::EnablePlugin(m.get());
+		}
+	}
+
+	// Rebuild the project's plugin list from what's currently loaded, and persist it.
+	void SyncEnabledPlugins()
+	{
+		enabledPlugins.clear();
+		for (auto& m : nuke::GetModules())
+			if (m->loaded) enabledPlugins.push_back(m->moduleFile);
+		SaveProject();
+	}
+
+	// Editor state (NOT world state) -> project/editor_state.json: camera, selection, which
+	// inspector headers are expanded, the browser view/path/filters, and which panels are open.
 	void SaveEditorState()
 	{
 		nlohmann::json j;
@@ -97,14 +181,21 @@ public:
 			j["selected"] = sel->GetName();
 		nlohmann::json o = nlohmann::json::object();
 		for (auto& kv : uiOpen) o[kv.first] = kv.second;
-		j["uiOpen"] = o;
-		std::ofstream f("editor_state.json");
+		j["uiOpen"]  = o;
+		j["browser"] = { {"view", browserView}, {"cwd", browserCwd}, {"search", std::string(browserSearch)},
+		                 {"fMesh", fMesh}, {"fMat", fMat}, {"fTex", fTex}, {"fPrefab", fPrefab} };
+		if (win) j["panels"] = { {"hierarchy", win->hierarchy}, {"console", win->console}, {"browser", win->browser},
+		                         {"inspector", win->inspector}, {"render", win->render}, {"plugmgr", win->plugmgr}, {"about", win->about} };
+		nlohmann::json wo = nlohmann::json::object();   // host-owned window open flags (e.g. plugin windows)
+		for (auto& kv : AppInstance::GetSingleton()->windowOpen) wo[kv.first] = kv.second;
+		j["windowOpen"] = wo;
+		bfs::ofstream f{bfs::path(projectDir + "/editor_state.json")};
 		if (f) f << j.dump(2);
 	}
 
 	void LoadEditorState()
 	{
-		std::ifstream f("editor_state.json");
+		bfs::ifstream f{bfs::path(projectDir + "/editor_state.json")};
 		if (!f) return;
 		nlohmann::json j = nlohmann::json::parse(f, nullptr, false);
 		if (j.is_discarded()) return;
@@ -119,6 +210,31 @@ public:
 			if (jc.contains("pos")) { auto p = jc["pos"]; t.position.x = p[0]; t.position.y = p[1]; t.position.z = p[2]; }
 			if (jc.contains("rot")) { auto r = jc["rot"]; t.rotation.x = r[0]; t.rotation.y = r[1]; t.rotation.z = r[2]; t.rotation.w = r[3]; }
 		}
+		if (j.contains("browser"))
+		{
+			nlohmann::json& b = j["browser"];
+			browserView = b.value("view", browserView);
+			browserCwd  = b.value("cwd", browserCwd);
+			std::string s = b.value("search", std::string());
+			strncpy(browserSearch, s.c_str(), sizeof(browserSearch) - 1); browserSearch[sizeof(browserSearch) - 1] = 0;
+			fMesh = b.value("fMesh", true); fMat = b.value("fMat", true);
+			fTex  = b.value("fTex", true);  fPrefab = b.value("fPrefab", true);
+		}
+		if (j.contains("panels") && win)
+		{
+			nlohmann::json& p = j["panels"];
+			win->hierarchy = p.value("hierarchy", win->hierarchy);
+			win->console   = p.value("console",   win->console);
+			win->browser   = p.value("browser",   win->browser);
+			win->inspector = p.value("inspector", win->inspector);
+			win->render    = p.value("render",    win->render);
+			win->plugmgr   = p.value("plugmgr",   win->plugmgr);
+			win->about     = p.value("about",     win->about);
+		}
+		// Pre-populate host window flags so plugin windows (pushed later) restore their state.
+		if (j.contains("windowOpen") && j["windowOpen"].is_object())
+			for (auto& kv : j["windowOpen"].items())
+				AppInstance::GetSingleton()->windowOpen[kv.key()] = kv.value().get<bool>();
 	}
 
 	void SetUp()
@@ -164,14 +280,35 @@ public:
 			editorCam->fov = 60.0f;   // 90 vertical is too wide → strong edge distortion
 			// rotation defaults to identity quaternion (looks +Z, at the origin).
 		}
-		LoadEditorState();   // restore editor-camera transform + inspector open-states + pending selection
+		// meshGuid is edited via the Mesh asset picker (combo) below, not as a raw GUID string.
+		if (nuke::TypeInfo* ti = nuke::Registry_Find("MeshRenderer"))
+			for (nuke::Field& f : ti->fields)
+				if (f.name == "meshGuid" || f.name == "matGuid") f.hidden = true;
+
+		LoadProject();   // .nuproj: content dir, startup world, plugin load list (default if missing)
+
+		// Activate the project's chosen plugins from the shared pool (InitModules discovered
+		// them already). Types register here (OnLoad) BEFORE the world auto-loads, so a world's
+		// components resolve; plugins left off keep their components as inert placeholders.
+		ApplyProjectPlugins();
+
+		// Project content folder (imported assets live here). Create it + open the browser there.
+		boost::system::error_code ec;
+		bfs::create_directories(contentDir, ec);
+		browserCwd = contentDir;
+
+		// Load native assets (.numesh) from content/ so meshGuid refs in saved worlds resolve.
+		ResDB::getSingleton()->LoadContentDir(contentDir);
+
+		// Editor state (project-tied): camera, selection, inspector + browser + panel state.
+		LoadEditorState();
 		// Demo geometry via the spawn API so the viewport shows something.
 		{
 			Atom* cube = new Atom("Cube");
 			MeshRenderer* mr = new MeshRenderer();
 			cube->AddComponent(mr);
-			mr->mesh = Mesh::CreateCube();
-			mr->primitive = "cube";
+			mr->meshGuid = "builtin:cube";
+			mr->mesh = ResDB::getSingleton()->GetMesh("builtin:cube");
 			editor->currentScene->Add(cube);
 		}
 		cout << "[editorui]\t\t" << "EditorUI ready." << endl;
@@ -528,14 +665,70 @@ public:
 				for (auto cmp : sltd->components)
 				{
 					ImGui::PushID(cmp);   // unique ID per component (avoid "Enabled" ID clashes)
-					bool& st = OpenState(atomName + "/" + cmp->name);
+					nuke::UnknownComponent* uc = dynamic_cast<nuke::UnknownComponent*>(cmp);
+					std::string label = uc ? (uc->typeName.empty() ? std::string("Unknown") : uc->typeName)
+					                       : std::string(cmp->name);
+					bool& st = OpenState(atomName + "/" + label);
 					ImGui::SetNextItemOpen(st);
-					st = ImGui::CollapsingHeader(cmp->name);
+					std::string hdr = uc ? (label + "  (plugin not loaded)") : label;
+					st = ImGui::CollapsingHeader(hdr.c_str());
 					if (st)
 					{
-						ImGui::Checkbox("Enabled", &cmp->enabled);
-						DrawFields(cmp, cmp->GetType());   // auto fields from [[nuke::prop]] schema
-						DrawDynamicProps(cmp);             // dynamic props (e.g. Lua script vars)
+						if (uc)
+						{
+							// Component whose plugin isn't loaded: kept inert, data preserved.
+							ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.20f, 1.0f), ICON_LC_PLUG " Requires plugin: %s",
+								uc->requiredPlugin.empty() ? "(unknown)" : uc->requiredPlugin.c_str());
+							ImGui::TextDisabled("Enable it in the Plugins window to restore this component.");
+						}
+						else
+						{
+							ImGui::Checkbox("Enabled", &cmp->enabled);
+							if (nuke::TypeInfo* cti = cmp->GetType())   // which plugin provides this type
+							{
+								const char* pl = nuke::PluginForType(cti->name);
+								if (pl && pl[0]) ImGui::TextDisabled(ICON_LC_PLUG " %s", pl);
+							}
+							DrawFields(cmp, cmp->GetType());   // auto fields from [[nuke::prop]] schema
+							DrawDynamicProps(cmp);             // dynamic props (e.g. Lua script vars)
+
+							// Mesh asset picker (replaces the raw meshGuid string field).
+							if (auto* mr = dynamic_cast<nuke::MeshRenderer*>(cmp))
+							{
+								ResDB* db = ResDB::getSingleton();
+								const char* cur = mr->mesh ? mr->mesh->name
+								                : (mr->meshGuid.empty() ? "(none)" : mr->meshGuid.c_str());
+								if (ImGui::BeginCombo("Mesh", cur))
+								{
+									for (Mesh* msh : db->meshes)
+										if (msh && ImGui::Selectable(msh->name, mr->meshGuid == msh->guid))
+										{
+											mr->meshGuid = msh->guid;
+											mr->mesh     = msh;
+										}
+									ImGui::EndCombo();
+								}
+
+								// Material asset picker (replaces the raw matGuid string field).
+								const char* curMat = mr->mat
+								    ? (mr->mat->matName.empty() ? mr->mat->guid.c_str() : mr->mat->matName.c_str())
+								    : (mr->matGuid.empty() ? "(none)" : mr->matGuid.c_str());
+								if (ImGui::BeginCombo("Material", curMat))
+								{
+									for (Material* mt : db->materials)
+										if (mt)
+										{
+											const char* lbl = mt->matName.empty() ? mt->guid.c_str() : mt->matName.c_str();
+											if (ImGui::Selectable(lbl, mr->matGuid == mt->guid))
+											{
+												mr->matGuid = mt->guid;
+												mr->mat     = mt;
+											}
+										}
+									ImGui::EndCombo();
+								}
+							}
+						}
 					}
 					ImGui::PopID();
 				}
@@ -780,10 +973,208 @@ public:
 		ImGui::End();
 	}
 
+	// Icon for a (lowercased) file extension.
+	const char* ExtIcon(const std::string& ext)
+	{
+		if (ext == ".numesh") return ICON_LC_BOX;
+		if (ext == ".numat")  return ICON_LC_PALETTE;
+		if (ext == ".nutex" || ext == ".png" || ext == ".jpg" || ext == ".jpeg") return ICON_LC_IMAGE;
+		if (ext == ".nuprefab") return ICON_LC_PACKAGE;
+		if (ext == ".nuworld")  return ICON_LC_GLOBE;
+		if (ext == ".lua")      return ICON_LC_FILE_CODE;
+		return ICON_LC_FILE;
+	}
+	// Whether a file of this extension passes the current type filters.
+	bool ExtVisible(const std::string& ext)
+	{
+		if (ext == ".numesh") return fMesh;
+		if (ext == ".numat")  return fMat;
+		if (ext == ".nutex" || ext == ".png" || ext == ".jpg" || ext == ".jpeg") return fTex;
+		if (ext == ".nuprefab") return fPrefab;
+		return true;   // scripts, worlds, unknown — always shown
+	}
+	bool SearchMatch(const std::string& name)
+	{
+		std::string q = browserSearch; for (char& c : q) c = (char)tolower((unsigned char)c);
+		if (q.empty()) return true;
+		std::string s = name; for (char& c : s) c = (char)tolower((unsigned char)c);
+		return s.find(q) != std::string::npos;
+	}
+
+	// Recursive folder tree (Tree mode), rooted at the project content folder.
+	void BrowserTree(const std::string& dir)
+	{
+		boost::system::error_code ec;
+		for (auto& de : bfs::directory_iterator(bfs::path(dir), ec))
+		{
+			std::string name = de.path().filename().string();
+			if (bfs::is_directory(de.path()))
+			{
+				if (ImGui::TreeNode((std::string(ICON_LC_FOLDER) + " " + name).c_str()))
+				{
+					BrowserTree(de.path().string());
+					ImGui::TreePop();
+				}
+			}
+			else
+			{
+				std::string ext = de.path().extension().string();
+				for (char& c : ext) c = (char)tolower((unsigned char)c);
+				if (ExtVisible(ext) && SearchMatch(name))
+					ImGui::BulletText("%s %s", ExtIcon(ext), name.c_str());
+			}
+		}
+	}
+
+	// Reconstruct a .nuprefab into the current world and select it.
+	void InstantiatePrefab(const std::string& path)
+	{
+		if (Atom* a = nuke::LoadPrefab(path))
+		{
+			AppInstance* app = AppInstance::GetSingleton();
+			app->currentScene->Add(a);
+			app->selectedInHieararchy = a;
+			cout << "[editor]\tinstantiated prefab " << path << endl;
+		}
+	}
+
 	void winBrowser()
 	{
 		if (!win->browser) return;
 		ImGui::Begin("Browser", &win->browser, window_flags);
+
+		// --- toolbar: view mode | search | filters ---
+		const char* modes[] = { ICON_LC_LAYOUT_GRID " Tiles", ICON_LC_LIST " List",
+		                        ICON_LC_FOLDER_TREE " Tree", ICON_LC_BOXES " By Type" };
+		ImGui::SetNextItemWidth(130);
+		ImGui::Combo("##bview", &browserView, modes, 4);
+		ImGui::SameLine();
+		ImGui::SetNextItemWidth(180);
+		ImGui::InputTextWithHint("##bsearch", ICON_LC_SEARCH " Search", browserSearch, sizeof(browserSearch));
+		ImGui::SameLine();
+		if (ImGui::Button(ICON_LC_FILTER " Filters")) ImGui::OpenPopup("bfilters");
+		ImGui::SameLine();
+		if (ImGui::Button(ICON_LC_DOWNLOAD " Import"))
+		{
+			std::string src = EditorPickModelFile();   // OBJ/FBX/glTF/...
+			if (!src.empty())
+			{
+				std::string dest = browserCwd.empty() ? contentDir : browserCwd;
+				int n = AssImporter::getSingleton()->ImportToContent(src.c_str(), dest.c_str());
+				cout << "[editor]\timported " << n << " mesh(es) into " << dest << endl;
+			}
+		}
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Import a model (OBJ/FBX/glTF) -> .numesh in this folder");
+		if (ImGui::BeginPopup("bfilters"))
+		{
+			ImGui::Checkbox("Meshes", &fMesh);    ImGui::Checkbox("Materials", &fMat);
+			ImGui::Checkbox("Textures", &fTex);   ImGui::Checkbox("Prefabs", &fPrefab);
+			ImGui::EndPopup();
+		}
+
+		// --- By Type: in-memory ResDB dump (kept as a separate mode) ---
+		if (browserView == 3)
+		{
+			ImGui::Separator();
+			ResDB* db = ResDB::getSingleton();
+			if (ImGui::CollapsingHeader("Meshes", ImGuiTreeNodeFlags_DefaultOpen))
+				for (Mesh* m : db->meshes) if (m) ImGui::BulletText("%s  (%s)", m->name, m->guid.c_str());
+			if (ImGui::CollapsingHeader("Materials")) ImGui::Text("%d material(s)", (int)db->materials.size());
+			if (ImGui::CollapsingHeader("Textures"))  ImGui::Text("%d texture(s)", (int)db->textures.size());
+			if (ImGui::CollapsingHeader("Prefabs"))
+				for (Atom* p : db->prefabs) if (p) ImGui::BulletText("%s", p->GetName().c_str());
+			ImGui::End();
+			return;
+		}
+
+		bfs::path root = bfs::path(contentDir);
+		bfs::path cwd  = browserCwd.empty() ? root : bfs::path(browserCwd);
+
+		// --- path bar: Up + current location (relative to the content root) ---
+		ImGui::Separator();
+		boost::system::error_code rc;
+		bool atRoot = (cwd == root) || (bfs::exists(cwd, rc) && bfs::exists(root, rc) && bfs::equivalent(cwd, root, rc));
+		if (ImGui::Button(ICON_LC_CORNER_LEFT_UP "##up") && !atRoot)
+			browserCwd = cwd.parent_path().string();
+		ImGui::SameLine();
+		bfs::path rel = bfs::relative(cwd, root, rc);
+		std::string loc = "content";
+		if (!rc && !rel.empty() && rel.generic_string() != ".") loc += "/" + rel.generic_string();
+		ImGui::TextDisabled("%s", loc.c_str());
+		ImGui::Separator();
+
+		if (browserView == 2)   // Tree (recursive folders from the content root)
+		{
+			BrowserTree(root.string());
+			ImGui::End();
+			return;
+		}
+
+		// --- gather the current folder's entries (Tiles / List) ---
+		struct FEntry { std::string name, path, ext; bool isDir; const char* icon; };
+		std::vector<FEntry> entries;
+		boost::system::error_code ec;
+		const bool searching = (browserSearch[0] != 0);
+		if (searching)
+		{
+			// Recurse: a search spans the whole subtree under the current folder (files only).
+			for (auto& de : bfs::recursive_directory_iterator(cwd, ec))
+			{
+				if (bfs::is_directory(de.path())) continue;
+				std::string name = de.path().filename().string();
+				std::string ext  = de.path().extension().string();
+				for (char& c : ext) c = (char)tolower((unsigned char)c);
+				if (!ExtVisible(ext) || !SearchMatch(name)) continue;
+				entries.push_back({ name, de.path().string(), ext, false, ExtIcon(ext) });
+			}
+		}
+		else
+		{
+			for (auto& de : bfs::directory_iterator(cwd, ec))
+			{
+				bool dir = bfs::is_directory(de.path());
+				std::string name = de.path().filename().string();
+				std::string ext  = dir ? "" : de.path().extension().string();
+				for (char& c : ext) c = (char)tolower((unsigned char)c);
+				if (!dir && !ExtVisible(ext)) continue;
+				entries.push_back({ name, de.path().string(), ext, dir, dir ? ICON_LC_FOLDER : ExtIcon(ext) });
+			}
+		}
+		std::sort(entries.begin(), entries.end(), [](const FEntry& a, const FEntry& b) {
+			if (a.isDir != b.isDir) return a.isDir > b.isDir;
+			return a.name < b.name;
+		});
+
+		if (browserView == 0)            // Tiles
+		{
+			float cell = 84.0f, availW = ImGui::GetContentRegionAvail().x;
+			int per = (int)(availW / cell); if (per < 1) per = 1;
+			int i = 0;
+			for (FEntry& e : entries)
+			{
+				ImGui::PushID(i);
+				ImGui::BeginGroup();
+				if (ImGui::Button(e.icon, ImVec2(64, 64)) && e.isDir) browserCwd = e.path;
+				if (!e.isDir && e.ext == ".nuprefab" && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0))
+					InstantiatePrefab(e.path);
+				char nm[24]; snprintf(nm, sizeof(nm), "%.20s", e.name.c_str());
+				ImGui::TextUnformatted(nm);
+				ImGui::EndGroup();
+				ImGui::PopID();
+				if (++i % per != 0) ImGui::SameLine();
+			}
+		}
+		else                             // List
+		{
+			for (FEntry& e : entries)
+				if (ImGui::Selectable((std::string(e.icon) + "  " + e.name).c_str(), false,
+				                      ImGuiSelectableFlags_AllowDoubleClick)
+				    && ImGui::IsMouseDoubleClicked(0))
+				{
+					if (e.isDir)                       browserCwd = e.path;
+					else if (e.ext == ".nuprefab")     InstantiatePrefab(e.path);
+				}
+		}
 		ImGui::End();
 	}
 
@@ -795,14 +1186,22 @@ public:
 			// Left: the list of loaded plugins.
 			ImGui::BeginChild("pluglist", ImVec2(180, 0), ImGuiChildFlags_Borders);
 			int idx = 0;
-			for (auto& mod : nuke::GetModules())   // single instance owned by the engine DLL
+			for (auto& mod : nuke::GetModules())   // shared pool, single instance in the engine DLL
 			{
+				ImGui::PushID(idx);
+				bool on = mod->loaded;
+				if (ImGui::Checkbox("##en", &on))   // load / unload (applied + persisted after the frame)
+					pendingPluginToggle.push_back({ mod.get(), on });
+				ImGui::SameLine();
 				bool sel = (selectedPluginIndex == idx);
+				if (!mod->loaded) ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
 				if (ImGui::Selectable(mod->title, sel))
 				{
 					selectedPluginIndex = idx;
 					selectedPlugin = mod;
 				}
+				if (!mod->loaded) ImGui::PopStyleColor();
+				ImGui::PopID();
 				++idx;
 			}
 			ImGui::EndChild();
@@ -816,8 +1215,13 @@ public:
 				ImGui::TextUnformatted(selectedPlugin->title);
 				ImGui::TextUnformatted(selectedPlugin->author);
 				ImGui::TextUnformatted(selectedPlugin->version);
+				ImGui::TextDisabled("%s", selectedPlugin->moduleFile.c_str());
 				ImGui::TextWrapped("%s", selectedPlugin->description);
-				if (selectedPlugin->HasSettings())
+
+				bool on = selectedPlugin->loaded;
+				if (ImGui::Checkbox("Loaded for this project", &on))
+					pendingPluginToggle.push_back({ selectedPlugin.get(), on });
+				if (selectedPlugin->loaded && selectedPlugin->HasSettings())
 				{
 					ImGui::SeparatorText("Settings");
 					selectedPlugin->Settings();   // plugin draws its settings inline (a panel here)
@@ -855,17 +1259,18 @@ public:
 		app->currentScene->Add(go);
 		app->selectedInHieararchy = go;
 	}
-	void SpawnCube()
+	void SpawnPrimitive(const char* atomName, const char* guid)
 	{
 		AppInstance* app = AppInstance::GetSingleton();
-		Atom* go = new Atom("Cube");
+		Atom* go = new Atom(atomName);
 		MeshRenderer* mr = new MeshRenderer();
 		go->AddComponent(mr);
-		mr->mesh = Mesh::CreateCube();
-		mr->primitive = "cube";
+		mr->meshGuid = guid;
+		mr->mesh = ResDB::getSingleton()->GetMesh(guid);
 		app->currentScene->Add(go);
 		app->selectedInHieararchy = go;
 	}
+	void SpawnCube() { SpawnPrimitive("Cube", "builtin:cube"); }
 	void SpawnCamera()
 	{
 		AppInstance* app = AppInstance::GetSingleton();
@@ -902,7 +1307,9 @@ public:
 			if (ImGui::BeginPopup("##nuke-create"))
 			{
 				if (ImGui::MenuItem("Empty"))  SpawnEmpty();
-				if (ImGui::MenuItem("Cube"))   SpawnCube();
+				if (ImGui::MenuItem("Cube"))   SpawnPrimitive("Cube",   "builtin:cube");
+				if (ImGui::MenuItem("Sphere")) SpawnPrimitive("Sphere", "builtin:sphere");
+				if (ImGui::MenuItem("Plane"))  SpawnPrimitive("Plane",  "builtin:plane");
 				if (ImGui::MenuItem("Camera")) SpawnCamera();
 				ImGui::EndPopup();
 			}
@@ -977,6 +1384,19 @@ public:
 		window_flags = 0; // panels are dockable/movable now
 		for (auto tup : *AppInstance::GetSingleton()->editorWindows)
 			tup.second();
+
+		// Apply queued plugin toggles AFTER the window loop: DisablePlugin()'s Shutdown may
+		// PopWindow (mutating editorWindows), which would invalidate the iterator above.
+		if (!pendingPluginToggle.empty())
+		{
+			for (auto& pt : pendingPluginToggle)
+			{
+				if (pt.second) nuke::EnablePlugin(pt.first);
+				else           nuke::DisablePlugin(pt.first);
+			}
+			pendingPluginToggle.clear();
+			SyncEnabledPlugins();   // persist the new load list to the .nuproj
+		}
 	}
 };
 

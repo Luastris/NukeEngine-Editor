@@ -15,9 +15,31 @@
 #include <lodepng/lodepng.h>
 
 #include <iostream>
-#include <fstream>
+#include <boost/filesystem/fstream.hpp>
+namespace bfs = boost::filesystem;
 using namespace std;
 using namespace nuke;   // engine API now lives in namespace nuke
+
+// Native "open file" dialog for model import. Isolated here so <windows.h> doesn't pollute
+// the editor header. Declared in editor/editorui.h.
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#include <commdlg.h>
+#pragma comment(lib, "comdlg32.lib")
+std::string EditorPickModelFile()
+{
+	char file[1024] = "";
+	OPENFILENAMEA ofn = {};
+	ofn.lStructSize = sizeof(ofn);
+	ofn.lpstrFilter = "Models\0*.obj;*.fbx;*.dae;*.gltf;*.glb;*.3ds;*.ply;*.stl\0All files\0*.*\0";
+	ofn.lpstrFile   = file;
+	ofn.nMaxFile    = sizeof(file);
+	ofn.lpstrTitle  = "Import model";
+	ofn.Flags       = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+	if (GetOpenFileNameA(&ofn)) return std::string(file);
+	return std::string();
+}
 
 //void CreateDemoObjects(){
 //    Atom* root = new Atom("root");
@@ -279,12 +301,13 @@ int main()
 	// Bring up the UI module (ImGui) — it renders through the renderer's neutral
 	// seam, so this works regardless of which renderer module is loaded.
 	NukeUI::Init(render);
-	editorinit();                       // sets up editor panels (style, menu, windows)
+
+	cout << "[main]\t\t\t" << "Discovering plugins..." << endl;
+    InitModules(instance);              // discover the shared plugin pool (no activation yet)
+
+	editorinit();                       // SetUp: loads the project + activates its chosen plugins
 	NukeUI::AddDrawCallback(editorDraw); // editor draws via the UI module each frame
 	cout << "[main]\t\t\t" << "Editor UI initialized." << endl;
-
-	cout << "[main]\t\t\t" << "Modules initialization..." << endl;
-    InitModules(instance);
 
     //CreateDemoObjects();
     //cubepositions();
@@ -307,15 +330,15 @@ int main()
     }
 
     // Restore the last-saved scene if present (replaces the startup demo geometry). Safe
-    // here: InitModules already loaded the plugins, whose DLL-load static initializers
-    // registered their component types (e.g. ScriptComponent) — so the world deserializes
-    // with all components intact.
+    // here: editorinit() already activated the project's plugins (OnLoad registered their
+    // component types), so the world deserializes with enabled components intact; types from
+    // disabled plugins load as inert UnknownComponent placeholders.
     {
-        std::ifstream sceneChk("scene.nuworld");
+        bfs::ifstream sceneChk(bfs::path("scene.nuworld"));
         if (sceneChk.good())
         {
             sceneChk.close();
-            cout << "[main]\t\t\t" << "Restoring last scene (scene.nuworld)..." << endl;
+            cout << "[main]\t\t\t" << "Restoring last world (scene.nuworld)..." << endl;
             AppInstance::GetSingleton()->currentScene->LoadFromFile("scene.nuworld");
         }
     }
