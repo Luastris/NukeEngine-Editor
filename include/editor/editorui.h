@@ -25,6 +25,7 @@
 #include "API/Model/Prefab.h"   // instantiate .nuprefab assets
 #include "reflect/Reflect.h"   // auto-inspector: draw component fields from the schema
 #include "API/Model/Time.h"    // per-frame delta/elapsed
+#include "input/Hotkeys.h"     // centralized hotkey pool (editor + plugins)
 #include <boost/container/list.hpp>
 #include <boost/bind/bind.hpp>
 #include <cstring>
@@ -52,6 +53,10 @@ using namespace std;    // cout/endl (previously leaked from engine headers)
 // Native OS "open file" dialog for importing models. Defined in main.cpp (isolates <windows.h>).
 // Returns the picked path, or "" if cancelled.
 std::string EditorPickModelFile();
+
+// Register the .nuproj file extension (HKEY_CURRENT_USER) so double-clicking a project opens it in
+// this editor. User-scope + reversible; defined in main.cpp (isolates <windows.h>). Returns success.
+bool RegisterProjectFileAssociation();
 
 // Row-major (renderer) -> column-major (ImGuizmo) 4x4 matrix layout.
 static inline void Transpose4(const float* s, float* d)
@@ -82,11 +87,15 @@ private:
 	bool fMesh = true, fMat = true, fTex = true, fPrefab = true;   // browser type filters
 	std::string contentDir = "project/content";   // project content root (imported assets live here)
 	std::string browserCwd;                        // current folder shown in the browser
+	std::vector<std::string> browserBack, browserFwd;   // folder navigation history (M4=back, M5=forward)
 	std::string renamePath;                        // browser: full path being renamed ("" = none)
 	char        renameBuf[256] = "";               // edited name
 	bool        openRenamePopup = false;           // request to open the rename modal next frame
 	int         hotReloadTick = 0;                  // throttles shader hot-reload checks
 	std::map<std::string, std::function<void(nuke::Component*)>> inspectorOverrides;  // per-type custom inspector drawing
+	std::string rebindId;                          // hotkey id currently being rebound ("" = none)
+	bool        settingsOpen = false;              // Project Settings window open?
+	std::map<std::string, int> pendingHotkeyBinds; // hotkey bindings from the .nuproj, applied after plugins load
 	std::string projectDir  = "project";           // project root
 	std::string projectFile = "project/game.nuproj";
 	std::string startupWorld = "scene.nuworld";    // from the .nuproj
@@ -127,6 +136,15 @@ public:
 	bool EditorSubMenu(MenuItem* item);
 	void EditorMenu();
 	static void TogglePluginMGR();   // menu callback (static → plain fn pointer)
+	// Hotkeys + world commands + project settings.
+	void RegisterHotkeys();          // register the editor's built-in hotkeys in the shared pool
+	void DispatchHotkeys();          // fire bound hotkeys whose chord is pressed (one per chord)
+	void MenuHotkeyItem(const char* label, const char* id);   // menu entry driven by a pooled hotkey
+	void SetProjectFile(const std::string& path);   // point the editor at a specific .nuproj (CLI/open-with)
+	void NewWorldCmd();              // New World (keeps the editor camera)
+	void SaveWorldCmd();             // save the current world (to its path, or the project default)
+	void OpenWorldCmd(const std::string& relPath);            // open a world from project content
+	void winSettings();              // Project Settings window (default world + hotkeys)
 	// hierarchy
 	void DisplayRecursiveAtomHierarchy(bc::list<Atom*>& gos);
 	void winHierarchy();
@@ -154,6 +172,9 @@ public:
 	void EntryContextMenu(const std::string& path, bool isDir);
 	void DrawRenamePopup();
 	void winBrowser();
+	void BrowserNavigate(const std::string& path);   // change folder + push history (clears forward)
+	void BrowserBack();                              // M4 / back button
+	void BrowserForward();                           // M5 / forward button
 	// plugins
 	void PluginMGRWindow();
 	// toolbar

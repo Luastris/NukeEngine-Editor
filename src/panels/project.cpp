@@ -4,6 +4,13 @@
 // The project manifest (project/game.nuproj): content dir, startup world, plugin load list.
 // Projects have a file (like .sln/.uproject); this is ours, extension .nuproj. The plugin
 // pool is shared (modules/); "plugins" is THIS project's chosen load list (dll names).
+void EditorUI::SetProjectFile(const std::string& path)
+{
+	bfs::path p = bfs::absolute(bfs::path(path));   // absolute, so it stays valid after cwd = editor dir
+	projectFile = p.string();
+	projectDir  = p.has_parent_path() ? p.parent_path().string() : std::string(".");
+}
+
 void EditorUI::SaveProject()
 {
 	boost::system::error_code ec; bfs::create_directories(projectDir, ec);
@@ -11,8 +18,11 @@ void EditorUI::SaveProject()
 	j["name"]         = "NukeGame";
 	j["engine"]       = "NukeEngine";
 	j["content"]      = "content";          // relative to the project dir
-	j["startupWorld"] = startupWorld;
+	j["startupWorld"] = startupWorld;        // the default world the game loads
 	j["plugins"]      = enabledPlugins;     // which pooled plugins this project loads
+	nlohmann::json hk = nlohmann::json::object();   // hotkey bindings (id -> chord), saved with the project
+	for (auto& kv : nuke::Hotkeys::Get()->ExportBindings()) hk[kv.first] = kv.second;
+	j["hotkeys"] = hk;
 	bfs::ofstream f{bfs::path(projectFile)};
 	if (f) f << j.dump(2);
 }
@@ -31,6 +41,11 @@ void EditorUI::LoadProject()
 		pluginListLoaded = true;
 		for (auto& p : j["plugins"]) enabledPlugins.push_back(p.get<std::string>());
 	}
+	// Hotkey bindings are applied AFTER plugins load (so plugin-registered hotkeys exist) — stash them.
+	pendingHotkeyBinds.clear();
+	if (j.contains("hotkeys") && j["hotkeys"].is_object())
+		for (auto& kv : j["hotkeys"].items())
+			if (kv.value().is_number_integer()) pendingHotkeyBinds[kv.key()] = kv.value().get<int>();
 }
 
 // Activate the project's chosen plugins from the shared (already-discovered) pool. On a

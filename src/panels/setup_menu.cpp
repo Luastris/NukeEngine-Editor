@@ -46,13 +46,17 @@ void EditorUI::SetUp()
 	}
 	// (meshGuid/matGuid now render as asset pickers via their [[nuke::prop(asset=...)]] metadata.)
 	RegisterInspectorOverrides();   // per-type custom inspector drawing (e.g. MeshRenderer material panel)
+	RegisterHotkeys();              // editor's built-in hotkeys (plugins add their own on load)
 
-	LoadProject();   // .nuproj: content dir, startup world, plugin load list (default if missing)
+	LoadProject();   // .nuproj: content dir, startup world, plugin load list, hotkey bindings (default if missing)
 
 	// Activate the project's chosen plugins from the shared pool (InitModules discovered
 	// them already). Types register here (OnLoad) BEFORE the world auto-loads, so a world's
 	// components resolve; plugins left off keep their components as inert placeholders.
 	ApplyProjectPlugins();
+
+	// Now that plugin hotkeys are registered too, apply the project's saved bindings over the defaults.
+	nuke::Hotkeys::Get()->ApplyBindings(pendingHotkeyBinds);
 
 	// Project content folder (imported assets live here). Create it + open the browser there.
 	boost::system::error_code ec;
@@ -82,6 +86,12 @@ void EditorUI::SetUp()
 		mr->mesh = ResDB::getSingleton()->GetMesh("builtin:cube");
 		editor->currentScene->Add(cube);
 	}
+
+	// Open the project's default world from content (replaces the demo cube if present). Plugins are
+	// already active, so its components deserialize correctly.
+	if (editor->OpenWorld(startupWorld))
+		cout << "[editorui]\t\t" << "Opened default world '" << startupWorld << "'." << endl;
+
 	cout << "[editorui]\t\t" << "EditorUI ready." << endl;
 }
 
@@ -188,14 +198,11 @@ void EditorUI::EditorMenu()
 	{
 		if (ImGui::BeginMenu("File"))
 		{
-			if (ImGui::MenuItem("New")) {}
-			if (ImGui::MenuItem("Open", "Ctrl+O"))
-			{
-				AppInstance::GetSingleton()->selectedInHieararchy = nullptr;
-				AppInstance::GetSingleton()->currentScene->LoadFromFile("scene.nuworld");
-			}
-			if (ImGui::MenuItem("Save", "Ctrl+S"))
-				AppInstance::GetSingleton()->currentScene->SaveToFile("scene.nuworld");
+			MenuHotkeyItem("New World",           "editor.world.new");
+			MenuHotkeyItem("Open Default World",  "editor.world.open");
+			MenuHotkeyItem("Save World",          "editor.world.save");
+			ImGui::Separator();
+			MenuHotkeyItem("Project Settings...", "editor.settings");
 			ImGui::Separator();
 			if (ImGui::MenuItem("Quit", "Alt+F4")) {}
 			ImGui::EndMenu();
@@ -223,6 +230,8 @@ void EditorUI::EditorMenu()
 			ImGui::MenuItem("Render", nullptr, &win->render);
 			ImGui::MenuItem("Plugins", nullptr, &win->plugmgr);
 			ImGui::MenuItem("About", nullptr, &win->about);
+			ImGui::Separator();
+			ImGui::MenuItem("Project Settings", nullptr, &settingsOpen);
 			ImGui::EndMenu();
 		}
 		ImGui::EndMainMenuBar();

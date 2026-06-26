@@ -118,10 +118,46 @@ void EditorUI::DrawRenamePopup()
 	}
 }
 
+// Folder navigation history (file-explorer style). NavigateTo pushes the current folder onto the
+// back stack and clears forward; Back/Forward walk between them (driven by buttons + mouse M4/M5).
+void EditorUI::BrowserNavigate(const std::string& path)
+{
+	if (path == browserCwd) return;
+	browserBack.push_back(browserCwd);
+	browserFwd.clear();
+	browserCwd = path;
+}
+void EditorUI::BrowserBack()
+{
+	if (browserBack.empty()) return;
+	browserFwd.push_back(browserCwd);
+	browserCwd = browserBack.back();
+	browserBack.pop_back();
+}
+void EditorUI::BrowserForward()
+{
+	if (browserFwd.empty()) return;
+	browserBack.push_back(browserCwd);
+	browserCwd = browserFwd.back();
+	browserFwd.pop_back();
+}
+
 void EditorUI::winBrowser()
 {
 	if (!win->browser) return;
 	ImGui::Begin("Browser", &win->browser, window_flags);
+
+	// Back/Forward navigate the folder history while the browser is hovered. The chords come from the
+	// centralized hotkey pool (rebindable in Project Settings, conflict-aware); default M4/M5. They're
+	// dispatched HERE (context-sensitive) rather than globally, so they only act over the browser.
+	if (ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows))
+	{
+		nuke::Hotkeys* hk = nuke::Hotkeys::Get();
+		nuke::Hotkey* b = hk->Find("editor.browser.back");
+		nuke::Hotkey* f = hk->Find("editor.browser.forward");
+		if (b && b->bound && ImGui::IsKeyChordPressed((ImGuiKeyChord)b->chord)) BrowserBack();
+		if (f && f->bound && ImGui::IsKeyChordPressed((ImGuiKeyChord)f->chord)) BrowserForward();
+	}
 
 	// --- toolbar: view mode | search | filters ---
 	const char* modes[] = { ICON_LC_LAYOUT_GRID " Tiles", ICON_LC_LIST " List",
@@ -187,8 +223,24 @@ void EditorUI::winBrowser()
 	ImGui::Separator();
 	boost::system::error_code rc;
 	bool atRoot = (cwd == root) || (bfs::exists(cwd, rc) && bfs::exists(root, rc) && bfs::equivalent(cwd, root, rc));
+	nuke::Hotkeys* nav = nuke::Hotkeys::Get();
+	auto navTip = [&](const char* label, const char* id) {
+		nuke::Hotkey* h = nav->Find(id);
+		if (h && h->bound) ImGui::SetTooltip("%s (%s)", label, ImGui::GetKeyChordName((ImGuiKeyChord)h->chord));
+		else               ImGui::SetTooltip("%s", label);
+	};
+	ImGui::BeginDisabled(browserBack.empty());
+	if (ImGui::Button(ICON_LC_ARROW_LEFT "##back")) BrowserBack();
+	ImGui::EndDisabled();
+	if (ImGui::IsItemHovered()) navTip("Back", "editor.browser.back");
+	ImGui::SameLine();
+	ImGui::BeginDisabled(browserFwd.empty());
+	if (ImGui::Button(ICON_LC_ARROW_RIGHT "##fwd")) BrowserForward();
+	ImGui::EndDisabled();
+	if (ImGui::IsItemHovered()) navTip("Forward", "editor.browser.forward");
+	ImGui::SameLine();
 	if (ImGui::Button(ICON_LC_CORNER_LEFT_UP "##up") && !atRoot)
-		browserCwd = cwd.parent_path().string();
+		BrowserNavigate(cwd.parent_path().string());
 	ImGui::SameLine();
 	bfs::path rel = bfs::relative(cwd, root, rc);
 	std::string loc = "content";
@@ -247,7 +299,7 @@ void EditorUI::winBrowser()
 		{
 			ImGui::PushID(i);
 			ImGui::BeginGroup();
-			if (ImGui::Button(e.icon, ImVec2(64, 64)) && e.isDir) browserCwd = e.path;
+			if (ImGui::Button(e.icon, ImVec2(64, 64)) && e.isDir) BrowserNavigate(e.path);
 			if (!e.isDir && e.ext == ".nuprefab" && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0))
 				InstantiatePrefab(e.path);
 			EntryContextMenu(e.path, e.isDir);   // right-click: Rename / Delete
@@ -268,7 +320,7 @@ void EditorUI::winBrowser()
 			                      ImGuiSelectableFlags_AllowDoubleClick)
 			    && ImGui::IsMouseDoubleClicked(0))
 			{
-				if (e.isDir)                       browserCwd = e.path;
+				if (e.isDir)                       BrowserNavigate(e.path);
 				else if (e.ext == ".nuprefab")     InstantiatePrefab(e.path);
 			}
 			EntryContextMenu(e.path, e.isDir);   // right-click: Rename / Delete

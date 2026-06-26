@@ -15,31 +15,18 @@
 #include <lodepng/lodepng.h>
 
 #include <iostream>
+#include <boost/filesystem.hpp>
 #include <boost/filesystem/fstream.hpp>
+#include <boost/dll/runtime_symbol_info.hpp>   // program_location() -> exe dir
+#include <boost/thread.hpp>
+#include <boost/chrono.hpp>
 namespace bfs = boost::filesystem;
 using namespace std;
 using namespace nuke;   // engine API now lives in namespace nuke
 
-// Native "open file" dialog for model import. Isolated here so <windows.h> doesn't pollute
-// the editor header. Declared in editor/editorui.h.
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
-#include <commdlg.h>
-#pragma comment(lib, "comdlg32.lib")
-std::string EditorPickModelFile()
-{
-	char file[1024] = "";
-	OPENFILENAMEA ofn = {};
-	ofn.lStructSize = sizeof(ofn);
-	ofn.lpstrFilter = "Models\0*.obj;*.fbx;*.dae;*.gltf;*.glb;*.3ds;*.ply;*.stl\0All files\0*.*\0";
-	ofn.lpstrFile   = file;
-	ofn.nMaxFile    = sizeof(file);
-	ofn.lpstrTitle  = "Import model";
-	ofn.Flags       = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
-	if (GetOpenFileNameA(&ofn)) return std::string(file);
-	return std::string();
-}
+// OS integration (file dialog, .nuproj association) is declared neutrally in editor/editorui.h and
+// implemented per-platform in src/platform/platform_win32.cpp / platform_other.cpp — no platform API
+// is baked into this shared host code.
 
 //void CreateDemoObjects(){
 //    Atom* root = new Atom("root");
@@ -204,11 +191,7 @@ void InitEngine()
 
 void Unload()
 {
-#ifdef WIN32
-	Sleep(1000);
-#else
-    usleep(1000);
-#endif // WIN32
+    boost::this_thread::sleep_for(boost::chrono::milliseconds(1000));   // let module threads wind down
     UnloadModules();
 }
 
@@ -258,11 +241,41 @@ void InitInput(KeyBoard *keyboard){
 }
 
 
-int main()
+int main(int argc, char** argv)
 {
+	// Capture + absolutize a .nuproj argument against the ORIGINAL cwd, BEFORE we change cwd below.
+	std::string projectArg;
+	if (argc > 1 && argv[1])
+	{
+		std::string a = argv[1];
+		if (a.size() >= 7 && a.compare(a.size() - 7, 7, ".nuproj") == 0)
+		{
+			boost::system::error_code ec;
+			projectArg = bfs::absolute(bfs::path(a)).string();
+		}
+	}
+
+	// Always run with cwd = the editor's own directory. Engine resources (config, modules, shaders,
+	// fonts) are cwd-relative, so they must resolve from the install dir regardless of how we were
+	// launched — double-clicking a .nuproj otherwise sets cwd to the project folder, which breaks
+	// every dependency and spawns empty config/ + modules/ there.
+	{
+		boost::system::error_code ec;
+		bfs::path exeDir = boost::dll::program_location(ec).parent_path();
+		if (!ec && !exeDir.empty()) bfs::current_path(exeDir, ec);
+	}
+
 	AppInstance* instance = AppInstance::GetSingleton();
 	instance->setEditor(true);
 	cout << "[main]\t\t\t" << "NukeEngine starting... Welcome!" << endl;
+
+	// "Open with" / double-click a .nuproj: point the editor at that project (absolute path; cwd stays
+	// the editor dir). The project folder = where the .nuproj lives; its content resolves from there.
+	if (!projectArg.empty())
+	{
+		cout << "[main]\t\t\t" << "Opening project: " << projectArg << endl;
+		EditorUI::getSingleton()->SetProjectFile(projectArg);
+	}
 
 	// The renderer is loaded as a module (plugin), selected by id, with fallback
 	// to the first render module found in modules/.
@@ -330,19 +343,8 @@ int main()
 //        }
     }
 
-    // Restore the last-saved scene if present (replaces the startup demo geometry). Safe
-    // here: editorinit() already activated the project's plugins (OnLoad registered their
-    // component types), so the world deserializes with enabled components intact; types from
-    // disabled plugins load as inert UnknownComponent placeholders.
-    {
-        bfs::ifstream sceneChk(bfs::path("scene.nuworld"));
-        if (sceneChk.good())
-        {
-            sceneChk.close();
-            cout << "[main]\t\t\t" << "Restoring last world (scene.nuworld)..." << endl;
-            AppInstance::GetSingleton()->currentScene->LoadFromFile("scene.nuworld");
-        }
-    }
+    // The project's default world is opened from content by editorinit() (SetUp) — after the
+    // project's plugins are active, so components deserialize correctly. Nothing to restore here.
 
 	cout << "[main]\t\t\t" << "Hierarchy: " << &AppInstance::GetSingleton()->currentScene->GetHierarchy() << endl;
 	/*if(AppInstance::GetSingleton()->currentScene->GetHierarchy().size() > 0)

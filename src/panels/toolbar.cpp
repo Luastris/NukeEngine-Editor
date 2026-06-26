@@ -154,6 +154,9 @@ void EditorUI::Draw()
 	for (auto tup : *AppInstance::GetSingleton()->editorWindows)
 		tup.second();
 
+	winSettings();        // Project Settings window (default world + hotkeys)
+	DispatchHotkeys();    // fire any pressed hotkey chord (after the UI, so fields take input first)
+
 	// Apply queued plugin toggles AFTER the window loop: DisablePlugin()'s Shutdown may
 	// PopWindow (mutating editorWindows), which would invalidate the iterator above.
 	if (!pendingPluginToggle.empty())
