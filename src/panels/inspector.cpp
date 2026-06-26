@@ -88,9 +88,16 @@ void EditorUI::RegisterInspectorOverrides()
 void EditorUI::DrawMeshRendererInspector(nuke::MeshRenderer* mr)
 {
 	ResDB* db = ResDB::getSingleton();
-	// Keep resolved runtime pointers in sync with the picker-edited GUIDs.
 	if (!mr->mesh || mr->mesh->guid != mr->meshGuid) mr->mesh = db->GetMesh(mr->meshGuid);
-	if (!mr->mat  || mr->mat->guid  != mr->matGuid)  mr->mat  = db->GetMaterial(mr->matGuid);
+	// Material picker changed -> (re)clone the asset into this object's OWNED instance. Editing the
+	// instance below never touches the original .numat asset.
+	std::string curMat = mr->mat ? mr->mat->guid : std::string();
+	if (curMat != mr->matGuid)
+	{
+		Material* asset = db->GetMaterial(mr->matGuid);
+		if (mr->mat) delete mr->mat;
+		mr->mat = asset ? asset->Clone() : nullptr;
+	}
 
 	if (Material* m = mr->mat)
 	{
@@ -101,6 +108,36 @@ void EditorUI::DrawMeshRendererInspector(nuke::MeshRenderer* mr)
 		if (!m->diffuseGuid.empty())  ImGui::TextDisabled("diffuse:  %s", m->diffuseGuid.c_str());
 		if (!m->normalGuid.empty())   ImGui::TextDisabled("normal:   %s", m->normalGuid.c_str());
 		if (!m->specularGuid.empty()) ImGui::TextDisabled("specular: %s", m->specularGuid.c_str());
+
+		// Shader params: schema from the instance's shader, VALUES on the instance (m->props),
+		// saved with the world. Unset shows the shader's default.
+		if (m->shader && !m->shader->props.empty())
+		{
+			ImGui::SeparatorText("Shader Params");
+			for (const nuke::ShaderProp& sp : m->shader->props)
+			{
+				float v[4] = { sp.def[0], sp.def[1], sp.def[2], sp.def[3] };
+				auto it = m->props.find(sp.name);
+				if (it != m->props.end())
+					for (int i = 0; i < 4; ++i) v[i] = it->second[i];
+				const char* lbl = sp.name.c_str();
+				if (sp.name.rfind("g_", 0) == 0) lbl += 2;   // strip g_ prefix for display
+				bool ch = false;
+				switch (sp.components)
+				{
+				case 1:  ch = ImGui::DragFloat(lbl, v, 0.01f); break;
+				case 2:  ch = ImGui::DragFloat2(lbl, v, 0.01f); break;
+				case 3:  ch = ImGui::DragFloat3(lbl, v, 0.01f); break;
+				default: ch = ImGui::DragFloat4(lbl, v, 0.01f); break;
+				}
+				if (ch)
+				{
+					std::array<float, 4>& a = m->props[sp.name];
+					a = { 0, 0, 0, 0 };
+					for (int i = 0; i < sp.components; ++i) a[i] = v[i];
+				}
+			}
+		}
 	}
 }
 
