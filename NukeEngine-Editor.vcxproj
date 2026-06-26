@@ -175,6 +175,15 @@ xcopy "$(SolutionDir)shaders" "$(OutDir)shaders\" /s /e /i /y /d</Command>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="src\panels\project.cpp" />
+    <ClCompile Include="src\panels\setup_menu.cpp" />
+    <ClCompile Include="src\panels\hierarchy.cpp" />
+    <ClCompile Include="src\panels\inspector.cpp" />
+    <ClCompile Include="src\panels\viewport.cpp" />
+    <ClCompile Include="src\panels\dialogs.cpp" />
+    <ClCompile Include="src\panels\browser.cpp" />
+    <ClCompile Include="src\panels\plugins.cpp" />
+    <ClCompile Include="src\panels\toolbar.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="include\editor\editorui.h" />
