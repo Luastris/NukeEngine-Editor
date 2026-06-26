@@ -81,6 +81,10 @@ private:
 	bool fMesh = true, fMat = true, fTex = true, fPrefab = true;   // browser type filters
 	std::string contentDir = "project/content";   // project content root (imported assets live here)
 	std::string browserCwd;                        // current folder shown in the browser
+	std::string renamePath;                        // browser: full path being renamed ("" = none)
+	char        renameBuf[256] = "";               // edited name
+	bool        openRenamePopup = false;           // request to open the rename modal next frame
+	int         hotReloadTick = 0;                  // throttles shader hot-reload checks
 	std::string projectDir  = "project";           // project root
 	std::string projectFile = "project/game.nuproj";
 	std::string startupWorld = "scene.nuworld";    // from the .nuproj
@@ -297,8 +301,17 @@ public:
 		bfs::create_directories(contentDir, ec);
 		browserCwd = contentDir;
 
+		// Content relative paths (scripts etc.) resolve against the project, not the exe root.
+		AppInstance::GetSingleton()->contentRoot = contentDir;
+
 		// Load native assets (.numesh) from content/ so meshGuid refs in saved worlds resolve.
 		ResDB::getSingleton()->LoadContentDir(contentDir);
+		// Shaders from two roots: engine built-in (shaders/) then project (content/). Engine wins
+		// on name clashes, so a project can't shadow the built-in "world" default by accident.
+		ResDB::getSingleton()->LoadShadersDir("shaders");
+		ResDB::getSingleton()->LoadShadersDir(contentDir);
+		// Build a renderer pipeline per shader (render is already init'd before editorinit()).
+		ResDB::getSingleton()->BuildShaderPipelines(AppInstance::GetSingleton()->render);
 
 		// Editor state (project-tied): camera, selection, inspector + browser + panel state.
 		LoadEditorState();
@@ -367,7 +380,7 @@ public:
 		c[ImGuiCol_PlotHistogram]        = ImVec4(0.40f, 0.39f, 0.38f, 0.63f);
 		c[ImGuiCol_PlotHistogramHovered] = ImVec4(0.25f, 1.00f, 0.00f, 1.00f);
 		c[ImGuiCol_TextSelectedBg]       = ImVec4(0.25f, 1.00f, 0.00f, 0.43f);
-		c[ImGuiCol_ModalWindowDimBg]     = ImVec4(1.00f, 0.98f, 0.95f, 0.73f);
+		c[ImGuiCol_ModalWindowDimBg]     = ImVec4(0.00f, 0.00f, 0.00f, 0.55f);   // dark dim, not a white flash
 		// Docking-branch tab / dock colors (kept dark so the light label text reads).
 		c[ImGuiCol_Tab]                       = ImVec4(0.10f, 0.09f, 0.12f, 1.00f);
 		c[ImGuiCol_TabHovered]                = ImVec4(0.24f, 0.23f, 0.29f, 1.00f);
@@ -727,6 +740,28 @@ public:
 										}
 									ImGui::EndCombo();
 								}
+
+								// Material properties of the selected material (shader + color + textures).
+								if (Material* m = mr->mat)
+								{
+									ImGui::SeparatorText("Material");
+									const char* curSh = (m->shader && !m->shader->name.empty()) ? m->shader->name.c_str()
+									                  : (m->shaderGuid.empty() ? "(none)" : m->shaderGuid.c_str());
+									if (ImGui::BeginCombo("Shader", curSh))
+									{
+										for (Shader* s : db->shaders)
+											if (s && ImGui::Selectable(s->name.c_str(), m->shaderGuid == s->guid))
+											{
+												m->shaderGuid = s->guid;
+												m->shader     = s;   // renderObject uses its pipeline next frame
+											}
+										ImGui::EndCombo();
+									}
+									ImGui::ColorEdit4("Color", m->color);
+									if (!m->diffuseGuid.empty())  ImGui::TextDisabled("diffuse:  %s", m->diffuseGuid.c_str());
+									if (!m->normalGuid.empty())   ImGui::TextDisabled("normal:   %s", m->normalGuid.c_str());
+									if (!m->specularGuid.empty()) ImGui::TextDisabled("specular: %s", m->specularGuid.c_str());
+								}
 							}
 						}
 					}
@@ -982,6 +1017,7 @@ public:
 		if (ext == ".nuprefab") return ICON_LC_PACKAGE;
 		if (ext == ".nuworld")  return ICON_LC_GLOBE;
 		if (ext == ".lua")      return ICON_LC_FILE_CODE;
+		if (ext == ".hlsl" || ext == ".nushader") return ICON_LC_FILE_CODE;
 		return ICON_LC_FILE;
 	}
 	// Whether a file of this extension passes the current type filters.
@@ -1038,6 +1074,57 @@ public:
 		}
 	}
 
+	// Begin renaming a browser entry: stash its path + current name, open the modal next frame.
+	void StartRename(const std::string& path)
+	{
+		renamePath = path;
+		std::string nm = bfs::path(path).filename().string();
+		strncpy(renameBuf, nm.c_str(), sizeof(renameBuf) - 1);
+		renameBuf[sizeof(renameBuf) - 1] = 0;
+		openRenamePopup = true;
+	}
+
+	// Right-click context menu for a browser entry (call right after rendering the item).
+	void EntryContextMenu(const std::string& path, bool isDir)
+	{
+		if (ImGui::BeginPopupContextItem())
+		{
+			if (ImGui::MenuItem(ICON_LC_PENCIL " Rename")) StartRename(path);
+			if (ImGui::MenuItem(ICON_LC_TRASH_2 " Delete"))
+			{
+				boost::system::error_code ec;
+				if (isDir) bfs::remove_all(path, ec); else bfs::remove(path, ec);
+			}
+			ImGui::EndPopup();
+		}
+	}
+
+	// Rename modal (InputText + OK/Cancel). Performs bfs::rename within the same folder.
+	void DrawRenamePopup()
+	{
+		if (openRenamePopup) { ImGui::OpenPopup("Rename##browser"); openRenamePopup = false; }
+		if (ImGui::BeginPopupModal("Rename##browser", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+		{
+			ImGui::TextDisabled("%s", renamePath.c_str());
+			ImGui::SetNextItemWidth(320);
+			bool enter = ImGui::InputText("##rn", renameBuf, sizeof(renameBuf), ImGuiInputTextFlags_EnterReturnsTrue);
+			if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere(-1);
+			bool ok = ImGui::Button("OK") || enter;
+			ImGui::SameLine();
+			bool cancel = ImGui::Button("Cancel");
+			if (ok && renameBuf[0])
+			{
+				boost::system::error_code ec;
+				bfs::path src = renamePath;
+				bfs::path dst = src.parent_path() / renameBuf;
+				if (src != dst) bfs::rename(src, dst, ec);
+				ImGui::CloseCurrentPopup();
+			}
+			if (cancel) ImGui::CloseCurrentPopup();
+			ImGui::EndPopup();
+		}
+	}
+
 	void winBrowser()
 	{
 		if (!win->browser) return;
@@ -1065,12 +1152,25 @@ public:
 			}
 		}
 		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Import a model (OBJ/FBX/glTF) -> .numesh in this folder");
+		ImGui::SameLine();
+		if (ImGui::Button(ICON_LC_FOLDER_PLUS " New Folder"))
+		{
+			boost::system::error_code fec;
+			bfs::path base = browserCwd.empty() ? bfs::path(contentDir) : bfs::path(browserCwd);
+			bfs::path dir  = base / "New Folder";
+			for (int n = 1; bfs::exists(dir, fec); ++n) dir = base / ("New Folder (" + std::to_string(n) + ")");
+			bfs::create_directory(dir, fec);
+			StartRename(dir.string());   // immediately let the user name it
+		}
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Create a new folder here");
 		if (ImGui::BeginPopup("bfilters"))
 		{
 			ImGui::Checkbox("Meshes", &fMesh);    ImGui::Checkbox("Materials", &fMat);
 			ImGui::Checkbox("Textures", &fTex);   ImGui::Checkbox("Prefabs", &fPrefab);
 			ImGui::EndPopup();
 		}
+
+		DrawRenamePopup();   // rename modal (works in all views; before the mode early-returns)
 
 		// --- By Type: in-memory ResDB dump (kept as a separate mode) ---
 		if (browserView == 3)
@@ -1157,6 +1257,7 @@ public:
 				if (ImGui::Button(e.icon, ImVec2(64, 64)) && e.isDir) browserCwd = e.path;
 				if (!e.isDir && e.ext == ".nuprefab" && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0))
 					InstantiatePrefab(e.path);
+				EntryContextMenu(e.path, e.isDir);   // right-click: Rename / Delete
 				char nm[24]; snprintf(nm, sizeof(nm), "%.20s", e.name.c_str());
 				ImGui::TextUnformatted(nm);
 				ImGui::EndGroup();
@@ -1166,7 +1267,10 @@ public:
 		}
 		else                             // List
 		{
+			int i = 0;
 			for (FEntry& e : entries)
+			{
+				ImGui::PushID(i++);
 				if (ImGui::Selectable((std::string(e.icon) + "  " + e.name).c_str(), false,
 				                      ImGuiSelectableFlags_AllowDoubleClick)
 				    && ImGui::IsMouseDoubleClicked(0))
@@ -1174,6 +1278,9 @@ public:
 					if (e.isDir)                       browserCwd = e.path;
 					else if (e.ext == ".nuprefab")     InstantiatePrefab(e.path);
 				}
+				EntryContextMenu(e.path, e.isDir);   // right-click: Rename / Delete
+				ImGui::PopID();
+			}
 		}
 		ImGui::End();
 	}
@@ -1362,6 +1469,10 @@ public:
 		ImGuizmo::BeginFrame();   // must come right after ImGui::NewFrame (done by NukeUI)
 
 		nuke::Time::getSingleton()->NewFrame();   // real frame delta/elapsed (scripts & systems)
+
+		// Hot-reload shaders edited on disk (~twice a second; cheap mtime checks).
+		if ((++hotReloadTick % 30) == 0)
+			ResDB::getSingleton()->HotReloadShaders(AppInstance::GetSingleton()->render);
 
 		// PIE: while playing, run game logic (component Update) each frame.
 		if (AppInstance::GetSingleton()->playState == 1)

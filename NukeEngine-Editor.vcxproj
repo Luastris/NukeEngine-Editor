@@ -146,7 +146,9 @@ copy /y "%VCPKGBIN%\minizip.dll" "$(OutDir)"
 copy /y "%VCPKGBIN%\poly2tri.dll" "$(OutDir)"
 copy /y "%VCPKGBIN%\pugixml.dll" "$(OutDir)"
 copy /y "%VCPKGBIN%\lua.dll" "$(OutDir)"
-copy /y "%VCPKGBIN%\glfw3.dll" "$(OutDir)"</Command>
+copy /y "%VCPKGBIN%\glfw3.dll" "$(OutDir)"
+rem Engine built-in shaders (loaded at runtime by the engine, fed to the renderer).
+xcopy "$(SolutionDir)shaders" "$(OutDir)shaders\" /s /e /i /y /d</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">

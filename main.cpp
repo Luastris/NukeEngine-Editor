@@ -287,7 +287,7 @@ int main()
 	cout << "[main]\t\t\t" << ">> Window size: w(" << config->window.w << "), h(" << config->window.h << ")" << endl;
     WindowDesc wd;
     wd.w = config->window.w; wd.h = config->window.h;
-    wd.title       = config->window.title.c_str();
+    wd.title       = "NukeEngine Editor";   // editor's OWN title; config.title is the game/Player window
     wd.decorated   = config->window.decorated;
     wd.resizable   = config->window.resizable;
     wd.floating    = config->window.floating;
@@ -295,6 +295,7 @@ int main()
     wd.fullscreen  = config->window.fullscreen;
     wd.transparent = config->window.transparent;
     wd.opacity     = config->window.opacity;
+    LoadBuiltinShaders(render, "shaders");   // engine loads built-in shaders + feeds the renderer
     render->init(wd);
     cout << "[main]\t\t\t" << "> Render: " << render << endl;
 
