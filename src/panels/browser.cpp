@@ -135,7 +135,20 @@ void EditorUI::DrawRenamePopup()
 		bool cancel = ImGui::Button("Cancel");
 		if (ok && renameBuf[0] && !clash)
 		{
-			if (src != dst) bfs::rename(src, dst, ec);
+			if (src != dst)
+			{
+				bfs::rename(src, dst, ec);
+				ResDB* db = ResDB::getSingleton();
+				db->MoveAssetPath(src.string(), dst.string());   // keep guid<->path in sync
+				// Keep a material's internal name == its file name: rename + re-save the .numat.
+				if (renameExt == ".numat")
+					if (Material* m = db->GetMaterial(db->GuidForPath(dst.string())))
+					{
+						m->matName = dst.stem().string();
+						m->SaveToFile(dst.string());
+					}
+				if (browserSel == src.string()) browserSel = dst.string();
+			}
 			ImGui::CloseCurrentPopup();
 		}
 		if (cancel) ImGui::CloseCurrentPopup();
@@ -208,6 +221,7 @@ void EditorUI::BrowserFolderDropTarget(const std::string& folderPath)
 			bfs::path dst = UniquePath(dstDir / src.filename());   // never clobber a same-named entry
 			boost::system::error_code ec;
 			bfs::rename(src, dst, ec);
+			ResDB::getSingleton()->MoveAssetPath(src.string(), dst.string());   // keep guid<->path in sync
 			if (browserSel == srcStr) browserSel = dst.string();
 		}
 	}

@@ -56,17 +56,21 @@ bool EditorUI::AssetPicker(const char* label, std::string& guid, const std::stri
 	ResDB* db = ResDB::getSingleton();
 	bool changed = false;
 
-	auto nameOf = [&](const std::string& g) -> std::string {
+	// Display name = the asset's FILE name (so it tracks renames); fall back to the internal name for
+	// built-ins that have no file. Shaders are keyed by name, so just show that.
+	auto disp = [&](const std::string& g) -> std::string {
 		if (g.empty()) return "(none)";
+		if (kind == "shader") { Shader* s = db->GetShader(g); return s ? s->name : g; }
+		std::string p = db->PathForGuid(g);
+		if (!p.empty()) return bfs::path(p).stem().string();
 		if (kind == "mesh")     { Mesh* m = db->GetMesh(g);     return m ? std::string(m->name) : g; }
-		if (kind == "material") { Material* m = db->GetMaterial(g); return m ? (m->matName.empty() ? m->guid : m->matName) : g; }
-		if (kind == "shader")   { Shader* s = db->GetShader(g); return s ? s->name : g; }
+		if (kind == "material") { Material* m = db->GetMaterial(g); return m ? (m->matName.empty() ? g : m->matName) : g; }
 		return g;   // texture
 	};
 
 	ImGui::PushID(label);
 	float full = ImGui::CalcItemWidth();
-	std::string cur = nameOf(guid);
+	std::string cur = disp(guid);
 	if (ImGui::Button((cur + "##cur").c_str(), ImVec2(full - 52, 0))) { assetFilter[0] = 0; ImGui::OpenPopup("##assetpop"); }
 
 	// Drag from the browser — only accepted if the file's type matches this field's kind.
@@ -110,10 +114,10 @@ bool EditorUI::AssetPicker(const char* label, std::string& guid, const std::stri
 		};
 		if (ciContains("(none)", flt))
 			if (ImGui::Selectable("(none)", guid.empty())) { guid.clear(); changed = true; ImGui::CloseCurrentPopup(); }
-		if      (kind == "mesh")     for (Mesh* m : db->meshes)      { if (m) item(m->guid, m->name); }
-		else if (kind == "material") for (Material* m : db->materials) { if (m) item(m->guid, m->matName.empty() ? m->guid : m->matName); }
-		else if (kind == "shader")   for (Shader* s : db->shaders)   { if (s) item(s->guid, s->name); }
-		else if (kind == "texture")  for (Texture* t : db->textures) { if (t) item(t->guid, t->guid); }
+		if      (kind == "mesh")     for (Mesh* m : db->meshes)      { if (m) item(m->guid, disp(m->guid)); }
+		else if (kind == "material") for (Material* m : db->materials) { if (m) item(m->guid, disp(m->guid)); }
+		else if (kind == "shader")   for (Shader* s : db->shaders)   { if (s) item(s->guid, disp(s->guid)); }
+		else if (kind == "texture")  for (Texture* t : db->textures) { if (t) item(t->guid, disp(t->guid)); }
 		ImGui::EndChild();
 		ImGui::EndPopup();
 	}
