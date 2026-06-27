@@ -16,60 +16,108 @@ void EditorUI::CamComponent(Camera* cam)
 	ImGui::Checkbox("Free mode", &cam->freeMode);
 }
 
-// Generic asset-reference picker: a combo over the ResDB collection named by `kind`
-// ("mesh"/"material"/"shader"/"texture"), editing an asset GUID string in place. Driven by
-// the field's [[nuke::prop(asset="...")]] metadata — no per-component hardcode.
-bool EditorUI::AssetCombo(const char* label, std::string& guid, const std::string& kind)
+// --- reusable asset picker -------------------------------------------------------------------
+static bool ciContains(const std::string& hay, const std::string& needle)
+{
+	if (needle.empty()) return true;
+	auto lower = [](std::string s) { for (char& c : s) c = (char)tolower((unsigned char)c); return s; };
+	return lower(hay).find(lower(needle)) != std::string::npos;
+}
+static bool EndsWithCI(const std::string& s, const char* suf)
+{
+	size_t n = strlen(suf);
+	if (s.size() < n) return false;
+	for (size_t i = 0; i < n; ++i)
+		if (tolower((unsigned char)s[s.size() - n + i]) != tolower((unsigned char)suf[i])) return false;
+	return true;
+}
+// Does a dropped file path match the field's asset kind? (rejects everything else)
+static bool KindMatchesFile(const std::string& kind, const std::string& path)
+{
+	std::string e = bfs::path(path).extension().string();
+	for (char& c : e) c = (char)tolower((unsigned char)c);
+	if (kind == "mesh")     return e == ".numesh";
+	if (kind == "material") return e == ".numat";
+	if (kind == "texture")  return e == ".nutex";
+	if (kind == "shader")   { std::string fn = bfs::path(path).filename().string(); return EndsWithCI(fn, ".vs.hlsl") || EndsWithCI(fn, ".ps.hlsl"); }
+	return false;
+}
+// Shader guid == base name (strip ".vs.hlsl" / ".ps.hlsl").
+static std::string ShaderGuidFromPath(const std::string& path)
+{
+	std::string fn = bfs::path(path).filename().string();
+	for (const char* suf : { ".vs.hlsl", ".ps.hlsl" })
+		if (EndsWithCI(fn, suf)) return fn.substr(0, fn.size() - strlen(suf));
+	return std::string();
+}
+
+bool EditorUI::AssetPicker(const char* label, std::string& guid, const std::string& kind, const std::string& defGuid)
 {
 	ResDB* db = ResDB::getSingleton();
 	bool changed = false;
-	auto cur = [&](const char* nm) -> const char* {
-		return guid.empty() ? "(none)" : (nm && nm[0] ? nm : guid.c_str());
+
+	auto nameOf = [&](const std::string& g) -> std::string {
+		if (g.empty()) return "(none)";
+		if (kind == "mesh")     { Mesh* m = db->GetMesh(g);     return m ? std::string(m->name) : g; }
+		if (kind == "material") { Material* m = db->GetMaterial(g); return m ? (m->matName.empty() ? m->guid : m->matName) : g; }
+		if (kind == "shader")   { Shader* s = db->GetShader(g); return s ? s->name : g; }
+		return g;   // texture
 	};
-	if (kind == "mesh")
+
+	ImGui::PushID(label);
+	float full = ImGui::CalcItemWidth();
+	std::string cur = nameOf(guid);
+	if (ImGui::Button((cur + "##cur").c_str(), ImVec2(full - 52, 0))) { assetFilter[0] = 0; ImGui::OpenPopup("##assetpop"); }
+
+	// Drag from the browser — only accepted if the file's type matches this field's kind.
+	if (ImGui::BeginDragDropTarget())
 	{
-		Mesh* m = db->GetMesh(guid);
-		if (ImGui::BeginCombo(label, cur(m ? m->name : nullptr)))
+		if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("NUKE_ASSET"))
 		{
-			for (Mesh* msh : db->meshes)
-				if (msh && ImGui::Selectable(msh->name, guid == msh->guid)) { guid = msh->guid; changed = true; }
-			ImGui::EndCombo();
+			std::string path((const char*)p->Data);
+			if (KindMatchesFile(kind, path))
+			{
+				std::string g = (kind == "shader") ? ShaderGuidFromPath(path) : db->GuidForPath(path);
+				if (!g.empty()) { guid = g; changed = true; }
+			}
 		}
+		ImGui::EndDragDropTarget();
 	}
-	else if (kind == "material")
+
+	ImGui::SameLine(0, 2);
+	if (ImGui::Button(ICON_LC_FOLDER_SEARCH "##loc"))   // locate the original file in the browser
 	{
-		Material* m = db->GetMaterial(guid);
-		if (ImGui::BeginCombo(label, cur(m ? (m->matName.empty() ? m->guid.c_str() : m->matName.c_str()) : nullptr)))
-		{
-			for (Material* mt : db->materials)
-				if (mt)
-				{
-					const char* l = mt->matName.empty() ? mt->guid.c_str() : mt->matName.c_str();
-					if (ImGui::Selectable(l, guid == mt->guid)) { guid = mt->guid; changed = true; }
-				}
-			ImGui::EndCombo();
-		}
+		std::string path = (kind == "shader" && db->GetShader(guid)) ? db->GetShader(guid)->vsPath : db->PathForGuid(guid);
+		if (!path.empty()) { BrowserNavigate(bfs::path(path).parent_path().string()); browserSel = path; if (win) win->browser = true; }
 	}
-	else if (kind == "shader")
+	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Go to file");
+	ImGui::SameLine(0, 2);
+	if (ImGui::Button(ICON_LC_ROTATE_CCW "##rst")) { guid = defGuid; changed = true; }   // reset to default
+	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Reset to default");
+	ImGui::SameLine(0, 6); ImGui::TextUnformatted(label);
+
+	if (ImGui::BeginPopup("##assetpop"))
 	{
-		Shader* s = db->GetShader(guid);
-		if (ImGui::BeginCombo(label, cur(s ? s->name.c_str() : nullptr)))
-		{
-			for (Shader* sh : db->shaders)
-				if (sh && ImGui::Selectable(sh->name.c_str(), guid == sh->guid)) { guid = sh->guid; changed = true; }
-			ImGui::EndCombo();
-		}
+		ImGui::SetNextItemWidth(260);
+		ImGui::InputTextWithHint("##flt", ICON_LC_SEARCH " Filter", assetFilter, sizeof(assetFilter));
+		std::string flt = assetFilter;
+		ImGui::Separator();
+		ImGui::BeginChild("##lst", ImVec2(280, 260));
+		auto item = [&](const std::string& g, const std::string& n) {
+			if (!ciContains(n, flt)) return;
+			// "##<guid>" keeps the visible text but gives same-named assets distinct IDs (no ID clash).
+			if (ImGui::Selectable((n + "##" + g).c_str(), g == guid)) { guid = g; changed = true; ImGui::CloseCurrentPopup(); }
+		};
+		if (ciContains("(none)", flt))
+			if (ImGui::Selectable("(none)", guid.empty())) { guid.clear(); changed = true; ImGui::CloseCurrentPopup(); }
+		if      (kind == "mesh")     for (Mesh* m : db->meshes)      { if (m) item(m->guid, m->name); }
+		else if (kind == "material") for (Material* m : db->materials) { if (m) item(m->guid, m->matName.empty() ? m->guid : m->matName); }
+		else if (kind == "shader")   for (Shader* s : db->shaders)   { if (s) item(s->guid, s->name); }
+		else if (kind == "texture")  for (Texture* t : db->textures) { if (t) item(t->guid, t->guid); }
+		ImGui::EndChild();
+		ImGui::EndPopup();
 	}
-	else if (kind == "texture")
-	{
-		Texture* t = db->GetTexture(guid);
-		if (ImGui::BeginCombo(label, cur(t ? t->guid.c_str() : nullptr)))
-		{
-			for (Texture* tx : db->textures)
-				if (tx && ImGui::Selectable(tx->guid.c_str(), guid == tx->guid)) { guid = tx->guid; changed = true; }
-			ImGui::EndCombo();
-		}
-	}
+	ImGui::PopID();
 	return changed;
 }
 
@@ -102,7 +150,7 @@ void EditorUI::DrawMeshRendererInspector(nuke::MeshRenderer* mr)
 	if (Material* m = mr->mat)
 	{
 		ImGui::SeparatorText("Material");
-		AssetCombo("Shader", m->shaderGuid, "shader");
+		AssetPicker("Shader", m->shaderGuid, "shader", "world");
 		if (!m->shader || m->shader->guid != m->shaderGuid) m->shader = db->GetShader(m->shaderGuid);
 		ImGui::ColorEdit4("Color", m->color);
 		if (!m->diffuseGuid.empty())  ImGui::Text("diffuse:  %s", m->diffuseGuid.c_str());
@@ -160,7 +208,7 @@ bool EditorUI::DrawFields(void* obj, nuke::TypeInfo* ti)
 		case nuke::FT::String:
 		{
 			std::string* s = (std::string*)a;
-			if (!f.asset.empty()) { changed |= AssetCombo(n, *s, f.asset); break; }   // metadata-driven picker
+			if (!f.asset.empty()) { changed |= AssetPicker(n, *s, f.asset); break; }   // metadata-driven picker
 			char buf[256]; strncpy(buf, s->c_str(), 255); buf[255] = 0;
 			if (ImGui::InputText(n, buf, sizeof(buf))) { *s = buf; changed = true; }
 			break;

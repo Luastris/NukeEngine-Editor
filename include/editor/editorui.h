@@ -95,6 +95,7 @@ private:
 	bool        openRenamePopup = false;           // request to open the rename modal next frame
 	int         hotReloadTick = 0;                  // throttles shader hot-reload checks
 	std::map<std::string, std::function<void(nuke::Component*)>> inspectorOverrides;  // per-type custom inspector drawing
+	char        assetFilter[128] = "";             // filter text in the asset-picker popup
 	std::string rebindId;                          // hotkey id currently being rebound ("" = none)
 	bool        settingsOpen = false;              // Project Settings window open?
 	bool        openSaveAsPopup = false;           // request to open the "Save World As" modal
@@ -159,7 +160,11 @@ public:
 	void winHierarchy();
 	// inspector
 	void CamComponent(Camera* cam);
-	bool AssetCombo(const char* label, std::string& guid, const std::string& kind);
+	// Reusable asset-reference picker (mesh/material/shader/texture). Type-locked (rejects other
+	// kinds), DnD target from the browser, "locate original" + "reset to default" buttons, and a
+	// filterable popup list of every asset of that type in the project. Same-named files in different
+	// folders are fine — assets are keyed by GUID. Returns true when the value changed.
+	bool AssetPicker(const char* label, std::string& guid, const std::string& kind, const std::string& defGuid = "");
 	void RegisterInspectorOverrides();
 	void DrawMeshRendererInspector(nuke::MeshRenderer* mr);
 	bool DrawFields(void* obj, nuke::TypeInfo* ti);

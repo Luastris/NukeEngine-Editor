@@ -273,6 +273,7 @@ void EditorUI::CreateMaterialAsset(const std::string& folder)
 	m->matName = "New Material";
 	m->SaveToFile(path.string());
 	ResDB::getSingleton()->RegisterMaterial(m);   // show up in material pickers immediately
+	ResDB::getSingleton()->SetAssetPath(m->guid, path.string());
 	browserSel = path.string();
 	StartRename(path.string());
 }
@@ -294,6 +295,7 @@ void EditorUI::CreateShaderAsset(const std::string& folder)
 	if (Shader* s = Shader::LoadPair(base, vsp.string(), psp.string()))
 	{
 		ResDB::getSingleton()->RegisterShader(s);
+		ResDB::getSingleton()->SetAssetPath(base, vsp.string());
 		if (iRender* r = AppInstance::GetSingleton()->render)
 			s->rendererHandle = r->createShaderPipeline(s->vsSource.c_str(), s->psSource.c_str());
 	}
