@@ -155,6 +155,7 @@ void EditorUI::Draw()
 		tup.second();
 
 	winSettings();        // Project Settings window (default world + hotkeys)
+	DrawSaveAsPopup();    // "Save World As" modal
 	DispatchHotkeys();    // fire any pressed hotkey chord (after the UI, so fields take input first)
 
 	// Apply queued plugin toggles AFTER the window loop: DisablePlugin()'s Shutdown may

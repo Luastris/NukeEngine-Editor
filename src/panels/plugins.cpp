@@ -38,7 +38,7 @@ void EditorUI::PluginMGRWindow()
 			ImGui::TextUnformatted(selectedPlugin->title);
 			ImGui::TextUnformatted(selectedPlugin->author);
 			ImGui::TextUnformatted(selectedPlugin->version);
-			ImGui::TextDisabled("%s", selectedPlugin->moduleFile.c_str());
+			ImGui::Text("%s", selectedPlugin->moduleFile.c_str());
 			ImGui::TextWrapped("%s", selectedPlugin->description);
 
 			bool on = selectedPlugin->loaded;

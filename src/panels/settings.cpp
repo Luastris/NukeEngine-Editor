@@ -10,6 +10,7 @@ void EditorUI::RegisterHotkeys()
 	nuke::Hotkeys* hk = nuke::Hotkeys::Get();
 	hk->Register("editor.world.new",  "New World",            ImGuiMod_Ctrl | ImGuiKey_N,     [this] { NewWorldCmd(); });
 	hk->Register("editor.world.save", "Save World",           ImGuiMod_Ctrl | ImGuiKey_S,     [this] { SaveWorldCmd(); });
+	hk->Register("editor.world.saveas", "Save World As",     ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_S, [this] { SaveWorldAsCmd(); });
 	hk->Register("editor.world.open", "Open Default World",   ImGuiMod_Ctrl | ImGuiKey_O,     [this] { OpenWorldCmd(startupWorld); });
 	hk->Register("editor.settings",   "Project Settings",     ImGuiMod_Ctrl | ImGuiKey_Comma, [this] { settingsOpen = true; });
 	// Context hotkeys: registered in the pool (rebindable, shown in settings, conflict-aware) but
@@ -56,6 +57,89 @@ void EditorUI::OpenWorldCmd(const std::string& relPath)
 	AppInstance::GetSingleton()->OpenWorld(relPath);
 }
 
+// Open the "Save World As" modal; default the folder to the one currently open in the browser.
+void EditorUI::SaveWorldAsCmd()
+{
+	AppInstance* app = AppInstance::GetSingleton();
+	saveAsDir = browserCwd.empty() ? contentDir : browserCwd;
+	std::string name = !app->currentWorldPath.empty() ? bfs::path(app->currentWorldPath).filename().string()
+	                                                   : std::string("untitled.nuworld");
+	strncpy(saveAsBuf, name.c_str(), sizeof(saveAsBuf) - 1); saveAsBuf[sizeof(saveAsBuf) - 1] = 0;
+	openSaveAsPopup = true;
+}
+
+// Recursive folder tree for the save dialog — click a folder to select it as the save target.
+void EditorUI::SaveAsFolderTree(const std::string& dir)
+{
+	boost::system::error_code ec;
+	for (auto& de : bfs::directory_iterator(bfs::path(dir), ec))
+	{
+		if (!bfs::is_directory(de.path())) continue;
+		std::string full = de.path().string();
+		ImGuiTreeNodeFlags fl = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth;
+		if (full == saveAsDir) fl |= ImGuiTreeNodeFlags_Selected;
+		bool open = ImGui::TreeNodeEx((std::string(ICON_LC_FOLDER) + " " + de.path().filename().string()).c_str(), fl);
+		if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) saveAsDir = full;
+		if (open) { SaveAsFolderTree(full); ImGui::TreePop(); }
+	}
+}
+
+void EditorUI::DrawSaveAsPopup()
+{
+	if (openSaveAsPopup) { ImGui::OpenPopup("Save World As"); openSaveAsPopup = false; }
+	if (ImGui::BeginPopupModal("Save World As", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+	{
+		ImGui::Text("Folder (under project content):");
+		ImGui::BeginChild("##satree", ImVec2(400, 220), true);
+		ImGuiTreeNodeFlags rf = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_SpanAvailWidth;
+		if (saveAsDir == contentDir) rf |= ImGuiTreeNodeFlags_Selected;
+		bool rootOpen = ImGui::TreeNodeEx(ICON_LC_FOLDER " content", rf);
+		if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) saveAsDir = contentDir;
+		if (rootOpen) { SaveAsFolderTree(contentDir); ImGui::TreePop(); }
+		ImGui::EndChild();
+
+		ImGui::SetNextItemWidth(400);
+		bool enter = ImGui::InputText("Name", saveAsBuf, sizeof(saveAsBuf), ImGuiInputTextFlags_EnterReturnsTrue);
+
+		// Build the target path = chosen folder / name(.nuworld), then a content-relative path for SaveWorld.
+		std::string name = saveAsBuf;
+		const std::string ext = ".nuworld";
+		if (!name.empty() && (name.size() < ext.size() || name.compare(name.size() - ext.size(), ext.size(), ext) != 0)) name += ext;
+		boost::system::error_code ec;
+		std::string folder = saveAsDir.empty() ? contentDir : saveAsDir;
+		bfs::path   full    = bfs::path(folder) / name;
+		bfs::path   relp    = bfs::relative(full, bfs::path(contentDir), ec);
+		std::string rel     = (!ec && !relp.empty()) ? relp.generic_string() : name;
+		bool        exists  = !name.empty() && bfs::exists(full, ec);
+		bool        empty   = (saveAsBuf[0] == 0);
+
+		ImGui::Text("-> content/%s", rel.c_str());
+		if (exists) ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.2f, 1), ICON_LC_TRIANGLE_ALERT " Already exists — will be overwritten.");
+
+		const char* label = exists ? "Overwrite" : "Save";
+		ImGui::BeginDisabled(empty);
+		// Enter saves a NEW file directly; an overwrite requires the explicit button (confirmation).
+		if (ImGui::Button(label, ImVec2(120, 0)) || (enter && !exists && !empty))
+		{
+			AppInstance::GetSingleton()->SaveWorld(rel);   // forced into project content
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::EndDisabled();
+		ImGui::SameLine();
+		if (ImGui::Button("Cancel", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
+		ImGui::EndPopup();
+	}
+}
+
+// Open a .nuworld that was double-clicked in the browser (its full path -> content-relative).
+void EditorUI::OpenWorldFromBrowser(const std::string& fullPath)
+{
+	boost::system::error_code ec;
+	bfs::path rel = bfs::relative(bfs::path(fullPath), bfs::path(contentDir), ec);
+	std::string r = (!ec && !rel.empty()) ? rel.generic_string() : fullPath;
+	AppInstance::GetSingleton()->OpenWorld(r);
+}
+
 void EditorUI::winSettings()
 {
 	if (!settingsOpen) return;
@@ -87,7 +171,7 @@ void EditorUI::winSettings()
 
 		// --- Hotkeys (centralized pool: rebind, see conflicts) ---
 		ImGui::SeparatorText("Hotkeys");
-		ImGui::TextDisabled("Rebind, then press a key combo. Conflicting hotkeys stay unbound — assign manually.");
+		ImGui::Text("Rebind, then press a key combo. Conflicting hotkeys stay unbound — assign manually.");
 		nuke::Hotkeys* hk = nuke::Hotkeys::Get();
 		if (ImGui::BeginTable("hk", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingStretchProp))
 		{
@@ -118,7 +202,7 @@ void EditorUI::winSettings()
 		if (ImGui::Button("Register .nuproj file association"))
 			RegisterProjectFileAssociation();   // HKCU: double-clicking a .nuproj opens this editor
 		ImGui::SameLine();
-		ImGui::TextDisabled("(current user; open .nuproj files in this editor)");
+		ImGui::Text("(current user; open .nuproj files in this editor)");
 
 		// Capture a chord for the hotkey being rebound (first non-modifier key press + current mods).
 		if (!rebindId.empty())

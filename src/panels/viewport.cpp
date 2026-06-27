@@ -32,9 +32,12 @@ void EditorUI::winRender()
 		}
 		uint64_t tex = r->getRenderTargetTexture(sceneRTId);
 		if (tex)
+		{
 			ImGui::Image((ImTextureID)tex, avail); // the live scene viewport
+			AcceptAssetDropTarget();               // drag assets from the browser into the scene
+		}
 		else
-			ImGui::TextDisabled("No scene texture.");
+			ImGui::Text("No scene texture.");
 
 		// --- selected-camera preview: a small overlay in the viewport's bottom-right ---
 		if (previewCam) { previewCam->renderTarget = 0; previewCam = nullptr; }   // release last frame's
@@ -167,6 +170,14 @@ void EditorUI::winRender()
 					AppInstance::GetSingleton()->currentScene->Pick(o, dir);
 			}
 
+			// Sync the orbit angles from the camera when the drag STARTS — otherwise the first
+			// rotation after a load (camYaw/camPitch stale) snaps the camera to a bogus angle.
+			if (ImGui::IsMouseClicked(ImGuiMouseButton_Right))
+			{
+				Vector3 e = t->EulerDeg();
+				camPitch = (float)e.x * 0.01745329252f;
+				camYaw   = (float)e.y * 0.01745329252f;
+			}
 			if (ImGui::IsMouseDragging(ImGuiMouseButton_Right))
 			{
 				camYaw   += io.MouseDelta.x * rotSpeed;

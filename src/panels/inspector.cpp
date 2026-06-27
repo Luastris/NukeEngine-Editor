@@ -105,9 +105,9 @@ void EditorUI::DrawMeshRendererInspector(nuke::MeshRenderer* mr)
 		AssetCombo("Shader", m->shaderGuid, "shader");
 		if (!m->shader || m->shader->guid != m->shaderGuid) m->shader = db->GetShader(m->shaderGuid);
 		ImGui::ColorEdit4("Color", m->color);
-		if (!m->diffuseGuid.empty())  ImGui::TextDisabled("diffuse:  %s", m->diffuseGuid.c_str());
-		if (!m->normalGuid.empty())   ImGui::TextDisabled("normal:   %s", m->normalGuid.c_str());
-		if (!m->specularGuid.empty()) ImGui::TextDisabled("specular: %s", m->specularGuid.c_str());
+		if (!m->diffuseGuid.empty())  ImGui::Text("diffuse:  %s", m->diffuseGuid.c_str());
+		if (!m->normalGuid.empty())   ImGui::Text("normal:   %s", m->normalGuid.c_str());
+		if (!m->specularGuid.empty()) ImGui::Text("specular: %s", m->specularGuid.c_str());
 
 		// Shader params: schema from the instance's shader, VALUES on the instance (m->props),
 		// saved with the world. Unset shows the shader's default.
@@ -315,7 +315,7 @@ void EditorUI::winInspector()
 						// Component whose plugin isn't loaded: kept inert, data preserved.
 						ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.20f, 1.0f), ICON_LC_PLUG " Requires plugin: %s",
 							uc->requiredPlugin.empty() ? "(unknown)" : uc->requiredPlugin.c_str());
-						ImGui::TextDisabled("Enable it in the Plugins window to restore this component.");
+						ImGui::Text("Enable it in the Plugins window to restore this component.");
 					}
 					else
 					{
@@ -323,7 +323,7 @@ void EditorUI::winInspector()
 						if (nuke::TypeInfo* cti = cmp->GetType())   // which plugin provides this type
 						{
 							const char* pl = nuke::PluginForType(cti->name);
-							if (pl && pl[0]) ImGui::TextDisabled(ICON_LC_PLUG " %s", pl);
+							if (pl && pl[0]) ImGui::Text(ICON_LC_PLUG " %s", pl);
 						}
 						DrawFields(cmp, cmp->GetType());   // auto fields from [[nuke::prop]] schema
 						DrawDynamicProps(cmp);             // dynamic props (e.g. Lua script vars)

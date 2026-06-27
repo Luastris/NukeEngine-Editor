@@ -82,6 +82,18 @@ void EditorUI::EntryContextMenu(const std::string& path, bool isDir)
 {
 	if (ImGui::BeginPopupContextItem())
 	{
+		// World-specific actions: open it, or make it the project's default.
+		if (!isDir && bfs::path(path).extension() == ".nuworld")
+		{
+			if (ImGui::MenuItem(ICON_LC_GLOBE " Open World")) OpenWorldFromBrowser(path);
+			if (ImGui::MenuItem(ICON_LC_STAR " Set as Default"))
+			{
+				boost::system::error_code ec;
+				bfs::path rel = bfs::relative(bfs::path(path), bfs::path(contentDir), ec);
+				if (!ec && !rel.empty()) { startupWorld = rel.generic_string(); SaveProject(); }
+			}
+			ImGui::Separator();
+		}
 		if (ImGui::MenuItem(ICON_LC_PENCIL " Rename")) StartRename(path);
 		if (ImGui::MenuItem(ICON_LC_TRASH_2 " Delete"))
 		{
@@ -98,18 +110,25 @@ void EditorUI::DrawRenamePopup()
 	if (openRenamePopup) { ImGui::OpenPopup("Rename##browser"); openRenamePopup = false; }
 	if (ImGui::BeginPopupModal("Rename##browser", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
 	{
-		ImGui::TextDisabled("%s", renamePath.c_str());
+		ImGui::Text("%s", renamePath.c_str());
 		ImGui::SetNextItemWidth(320);
 		bool enter = ImGui::InputText("##rn", renameBuf, sizeof(renameBuf), ImGuiInputTextFlags_EnterReturnsTrue);
 		if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere(-1);
-		bool ok = ImGui::Button("OK") || enter;
+
+		boost::system::error_code ec;
+		bfs::path src = renamePath;
+		bfs::path dst = src.parent_path() / renameBuf;
+		// Block if a DIFFERENT entry with that name already exists (no silent overwrite).
+		bool clash = renameBuf[0] && dst != src && bfs::exists(dst, ec);
+		if (clash) ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1), ICON_LC_TRIANGLE_ALERT " A file/folder with that name already exists here.");
+
+		ImGui::BeginDisabled(!renameBuf[0] || clash);
+		bool ok = ImGui::Button("OK") || (enter && renameBuf[0] && !clash);
+		ImGui::EndDisabled();
 		ImGui::SameLine();
 		bool cancel = ImGui::Button("Cancel");
-		if (ok && renameBuf[0])
+		if (ok && renameBuf[0] && !clash)
 		{
-			boost::system::error_code ec;
-			bfs::path src = renamePath;
-			bfs::path dst = src.parent_path() / renameBuf;
 			if (src != dst) bfs::rename(src, dst, ec);
 			ImGui::CloseCurrentPopup();
 		}
@@ -140,6 +159,85 @@ void EditorUI::BrowserForward()
 	browserBack.push_back(browserCwd);
 	browserCwd = browserFwd.back();
 	browserFwd.pop_back();
+}
+
+// Return `desired` if free, else append " (n)" before the extension until the name is unused —
+// so moving/creating never silently overwrites an existing file or folder of the same name.
+static bfs::path UniquePath(const bfs::path& desired)
+{
+	boost::system::error_code ec;
+	if (!bfs::exists(desired, ec)) return desired;
+	bfs::path dir = desired.parent_path();
+	std::string stem = desired.stem().string(), ext = desired.extension().string();
+	for (int n = 2; ; ++n)
+	{
+		bfs::path cand = dir / (stem + " (" + std::to_string(n) + ")" + ext);
+		if (!bfs::exists(cand, ec)) return cand;
+	}
+}
+
+// Make the last-drawn item a drag source carrying an asset path (payload "NUKE_ASSET").
+void EditorUI::BrowserDragSource(const std::string& path)
+{
+	if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_None))
+	{
+		ImGui::SetDragDropPayload("NUKE_ASSET", path.c_str(), path.size() + 1);
+		ImGui::TextUnformatted(bfs::path(path).filename().string().c_str());
+		ImGui::EndDragDropSource();
+	}
+}
+
+// Make the last-drawn item (a folder) a drop target: move the dragged file/folder into it.
+void EditorUI::BrowserFolderDropTarget(const std::string& folderPath)
+{
+	if (!ImGui::BeginDragDropTarget()) return;
+	if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("NUKE_ASSET"))
+	{
+		std::string srcStr((const char*)p->Data);
+		bfs::path src(srcStr), dstDir(folderPath);
+		// Skip no-ops and moving a folder into itself / its own subtree.
+		bool intoSelf = dstDir.string().rfind(src.string(), 0) == 0;
+		if (src.parent_path() != dstDir && !intoSelf)
+		{
+			bfs::path dst = UniquePath(dstDir / src.filename());   // never clobber a same-named entry
+			boost::system::error_code ec;
+			bfs::rename(src, dst, ec);
+			if (browserSel == srcStr) browserSel = dst.string();
+		}
+	}
+	ImGui::EndDragDropTarget();
+}
+
+// Viewport / hierarchy drop: accept an asset and instantiate it.
+void EditorUI::AcceptAssetDropTarget()
+{
+	if (!ImGui::BeginDragDropTarget()) return;
+	if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("NUKE_ASSET"))
+		DropAsset(std::string((const char*)p->Data));
+	ImGui::EndDragDropTarget();
+}
+
+void EditorUI::DropAsset(const std::string& path)
+{
+	std::string ext = bfs::path(path).extension().string();
+	if      (ext == ".nuprefab") InstantiatePrefab(path);
+	else if (ext == ".numesh")   SpawnMeshAsset(path);
+	else if (ext == ".nuworld")  OpenWorldFromBrowser(path);
+}
+
+void EditorUI::SpawnMeshAsset(const std::string& path)
+{
+	Mesh* m = Mesh::LoadFromFile(path);
+	if (!m) return;
+	ResDB* db = ResDB::getSingleton();
+	if (Mesh* ex = db->GetMesh(m->guid)) { delete m; m = ex; }   // reuse the already-loaded asset
+	else                                  db->RegisterMesh(m);
+	Atom* go = new Atom(bfs::path(path).stem().string().c_str());
+	MeshRenderer* mr = new MeshRenderer();
+	go->AddComponent(mr);
+	mr->meshGuid = m->guid; mr->mesh = m;
+	AppInstance::GetSingleton()->currentScene->Add(go);
+	AppInstance::GetSingleton()->selectedInHieararchy = go;
 }
 
 void EditorUI::winBrowser()
@@ -245,7 +343,7 @@ void EditorUI::winBrowser()
 	bfs::path rel = bfs::relative(cwd, root, rc);
 	std::string loc = "content";
 	if (!rc && !rel.empty() && rel.generic_string() != ".") loc += "/" + rel.generic_string();
-	ImGui::TextDisabled("%s", loc.c_str());
+	ImGui::Text("%s", loc.c_str());
 	ImGui::Separator();
 
 	if (browserView == 2)   // Tree (recursive folders from the content root)
@@ -299,9 +397,19 @@ void EditorUI::winBrowser()
 		{
 			ImGui::PushID(i);
 			ImGui::BeginGroup();
-			if (ImGui::Button(e.icon, ImVec2(64, 64)) && e.isDir) BrowserNavigate(e.path);
-			if (!e.isDir && e.ext == ".nuprefab" && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0))
-				InstantiatePrefab(e.path);
+			bool seld = (e.path == browserSel);
+			if (seld) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.42f, 0.68f, 1.0f));
+			bool clicked = ImGui::Button(e.icon, ImVec2(64, 64));
+			if (seld) ImGui::PopStyleColor();
+			BrowserDragSource(e.path);                       // drag this entry
+			if (e.isDir) BrowserFolderDropTarget(e.path);    // drop a file onto this folder = move
+			if (clicked) browserSel = e.path;
+			if (clicked && e.isDir) BrowserNavigate(e.path);
+			if (!e.isDir && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0))
+			{
+				if      (e.ext == ".nuprefab") InstantiatePrefab(e.path);
+				else if (e.ext == ".nuworld")  OpenWorldFromBrowser(e.path);
+			}
 			EntryContextMenu(e.path, e.isDir);   // right-click: Rename / Delete
 			char nm[24]; snprintf(nm, sizeof(nm), "%.20s", e.name.c_str());
 			ImGui::TextUnformatted(nm);
@@ -316,12 +424,19 @@ void EditorUI::winBrowser()
 		for (FEntry& e : entries)
 		{
 			ImGui::PushID(i++);
-			if (ImGui::Selectable((std::string(e.icon) + "  " + e.name).c_str(), false,
-			                      ImGuiSelectableFlags_AllowDoubleClick)
-			    && ImGui::IsMouseDoubleClicked(0))
+			bool clicked = ImGui::Selectable((std::string(e.icon) + "  " + e.name).c_str(),
+			                                 e.path == browserSel, ImGuiSelectableFlags_AllowDoubleClick);
+			BrowserDragSource(e.path);                       // drag this entry
+			if (e.isDir) BrowserFolderDropTarget(e.path);    // drop a file onto this folder = move
+			if (clicked)
 			{
-				if (e.isDir)                       BrowserNavigate(e.path);
-				else if (e.ext == ".nuprefab")     InstantiatePrefab(e.path);
+				browserSel = e.path;
+				if (ImGui::IsMouseDoubleClicked(0))
+				{
+					if (e.isDir)                   BrowserNavigate(e.path);
+					else if (e.ext == ".nuprefab") InstantiatePrefab(e.path);
+					else if (e.ext == ".nuworld")  OpenWorldFromBrowser(e.path);
+				}
 			}
 			EntryContextMenu(e.path, e.isDir);   // right-click: Rename / Delete
 			ImGui::PopID();

@@ -87,6 +87,7 @@ private:
 	bool fMesh = true, fMat = true, fTex = true, fPrefab = true;   // browser type filters
 	std::string contentDir = "project/content";   // project content root (imported assets live here)
 	std::string browserCwd;                        // current folder shown in the browser
+	std::string browserSel;                        // selected entry (full path; "" = none)
 	std::vector<std::string> browserBack, browserFwd;   // folder navigation history (M4=back, M5=forward)
 	std::string renamePath;                        // browser: full path being renamed ("" = none)
 	char        renameBuf[256] = "";               // edited name
@@ -95,6 +96,9 @@ private:
 	std::map<std::string, std::function<void(nuke::Component*)>> inspectorOverrides;  // per-type custom inspector drawing
 	std::string rebindId;                          // hotkey id currently being rebound ("" = none)
 	bool        settingsOpen = false;              // Project Settings window open?
+	bool        openSaveAsPopup = false;           // request to open the "Save World As" modal
+	char        saveAsBuf[256] = "";               // edited world FILE name
+	std::string saveAsDir;                         // chosen target folder (full path) in the save dialog
 	std::map<std::string, int> pendingHotkeyBinds; // hotkey bindings from the .nuproj, applied after plugins load
 	std::string projectDir  = "project";           // project root
 	std::string projectFile = "project/game.nuproj";
@@ -143,7 +147,11 @@ public:
 	void SetProjectFile(const std::string& path);   // point the editor at a specific .nuproj (CLI/open-with)
 	void NewWorldCmd();              // New World (keeps the editor camera)
 	void SaveWorldCmd();             // save the current world (to its path, or the project default)
+	void SaveWorldAsCmd();           // open the "Save World As" modal (pick name/location)
+	void DrawSaveAsPopup();          // the modal itself (drawn each frame)
+	void SaveAsFolderTree(const std::string& dir);   // recursive folder tree (pick the save folder)
 	void OpenWorldCmd(const std::string& relPath);            // open a world from project content
+	void OpenWorldFromBrowser(const std::string& fullPath);   // open a .nuworld picked in the browser
 	void winSettings();              // Project Settings window (default world + hotkeys)
 	// hierarchy
 	void DisplayRecursiveAtomHierarchy(bc::list<Atom*>& gos);
@@ -175,6 +183,13 @@ public:
 	void BrowserNavigate(const std::string& path);   // change folder + push history (clears forward)
 	void BrowserBack();                              // M4 / back button
 	void BrowserForward();                           // M5 / forward button
+	// Drag & drop: drag a browser entry (payload "NUKE_ASSET" = full path); drop on a folder to move,
+	// or on the viewport / hierarchy to instantiate.
+	void BrowserDragSource(const std::string& path);
+	void BrowserFolderDropTarget(const std::string& folderPath);
+	void AcceptAssetDropTarget();                    // viewport/hierarchy: accept an asset drop
+	void DropAsset(const std::string& path);         // instantiate by extension (mesh/prefab/world)
+	void SpawnMeshAsset(const std::string& path);    // .numesh -> new Atom + MeshRenderer
 	// plugins
 	void PluginMGRWindow();
 	// toolbar

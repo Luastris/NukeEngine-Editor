@@ -31,5 +31,10 @@ void EditorUI::winHierarchy()
 	if (!win->hierarchy) return;
 	ImGui::Begin("Hierarchy", &win->hierarchy, window_flags);
 	DisplayRecursiveAtomHierarchy(AppInstance::GetSingleton()->currentScene->GetHierarchy());
+	// Empty area below the tree is an asset drop target (drag from the browser to instantiate).
+	ImVec2 rest = ImGui::GetContentRegionAvail();
+	if (rest.y < 24.0f) rest.y = 24.0f;
+	ImGui::InvisibleButton("##hierarchy-drop", rest);
+	AcceptAssetDropTarget();
 	ImGui::End();
 }

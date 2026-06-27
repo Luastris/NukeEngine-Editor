@@ -112,7 +112,7 @@ void EditorUI::ApplyStyle()
 	s->GrabRounding      = 3.0f;
 	ImVec4* c = s->Colors;
 	c[ImGuiCol_Text]                 = ImVec4(0.80f, 0.80f, 0.83f, 1.00f);
-	c[ImGuiCol_TextDisabled]         = ImVec4(0.24f, 0.23f, 0.29f, 1.00f);
+	c[ImGuiCol_TextDisabled]         = ImVec4(0.55f, 0.55f, 0.60f, 1.00f);   // readable grey, not near-black
 	c[ImGuiCol_WindowBg]             = ImVec4(0.06f, 0.05f, 0.07f, 1.00f);
 	c[ImGuiCol_ChildBg]              = ImVec4(0.07f, 0.07f, 0.09f, 1.00f);
 	c[ImGuiCol_PopupBg]              = ImVec4(0.07f, 0.07f, 0.09f, 1.00f);
@@ -201,6 +201,7 @@ void EditorUI::EditorMenu()
 			MenuHotkeyItem("New World",           "editor.world.new");
 			MenuHotkeyItem("Open Default World",  "editor.world.open");
 			MenuHotkeyItem("Save World",          "editor.world.save");
+			MenuHotkeyItem("Save World As...",    "editor.world.saveas");
 			ImGui::Separator();
 			MenuHotkeyItem("Project Settings...", "editor.settings");
 			ImGui::Separator();
