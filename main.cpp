@@ -12,7 +12,6 @@
 #else
 #include <interface/AppInstance.h>
 #endif
-#include <lodepng/lodepng.h>
 
 #include <iostream>
 #include <boost/filesystem.hpp>
