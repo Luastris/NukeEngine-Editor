@@ -190,12 +190,15 @@ void EditorUI::DrawConflictPopup()
 		ImGui::PopStyleColor();
 		ImGui::Separator();
 		if (ImGui::Button("Reload (lose editor changes)"))  { ReloadWorld(pendingDisk); pendingDisk.clear(); ImGui::CloseCurrentPopup(); }
+		ImGui::SameLine();
 		if (ImGui::Button("Overwrite (lose disk changes)")) { OverwriteWorld();          pendingDisk.clear(); ImGui::CloseCurrentPopup(); }
+		ImGui::SameLine();
 		if (ImGui::Button("Merge…"))   // open the resolve window
 		{
 			OpenMerge(AppInstance::GetSingleton()->currentScene->SaveToString(), pendingDisk);
 			pendingDisk.clear(); ImGui::CloseCurrentPopup();
 		}
+		ImGui::SameLine();
 		if (ImGui::Button("Ignore")) { pendingDisk.clear(); ImGui::CloseCurrentPopup(); }
 		ImGui::EndPopup();
 	}
