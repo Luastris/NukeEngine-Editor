@@ -212,6 +212,8 @@ public:
 	void BrowserDragSource(const std::string& path);
 	void BrowserFolderDropTarget(const std::string& folderPath);
 	void SaveAtomAsPrefab(Atom* a, const std::string& folder);   // drag an atom into the browser -> .nuprefab
+	void ApplyToPrefab(Atom* a);                                 // push this instance's state into its prefab file
+	void ResetToPrefab(Atom* a);                                 // revert this instance to the prefab's saved state
 	void BrowserPaste();                                          // paste the clipboard into the current folder (cut=move, copy=duplicate)
 	void AcceptAssetDropTarget();                    // viewport/hierarchy: accept an asset drop
 	Atom* DropAsset(const std::string& path);        // instantiate by extension; returns the new atom (or null)

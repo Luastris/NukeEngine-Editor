@@ -330,6 +330,40 @@ bool EditorUI::EditV3(const char* rowLabel, double v[3])
 	return ch;
 }
 
+// Push this instance's current state into its prefab file (manual; overwrites the .nuprefab, keeps its guid).
+void EditorUI::ApplyToPrefab(Atom* a)
+{
+	if (!a || a->prefabGuid.empty()) return;
+	std::string path = ResDB::getSingleton()->PathForGuid(a->prefabGuid);
+	if (path.empty()) return;
+	nuke::SavePrefab(a, path);
+	std::cout << "[editor]\tapplied instance to prefab " << path << std::endl;
+}
+
+// Revert this instance to the prefab's saved state (drops its individual overrides). Keeps the atom's
+// id + placement + prefab link; undoable as one delta. The old instance object is replaced.
+void EditorUI::ResetToPrefab(Atom* a)
+{
+	if (!a || a->prefabGuid.empty()) return;
+	AppInstance* app = AppInstance::GetSingleton();
+	World* w = app->currentScene;
+	std::string path = ResDB::getSingleton()->PathForGuid(a->prefabGuid);
+	if (path.empty()) return;
+	Atom* fresh = nuke::LoadPrefab(path);   // prefab defaults (fresh ids; prefabGuid from the file)
+	if (!fresh) return;
+	long id = a->id.id, parent = a->parent ? a->parent->id.id : 0;
+	int index = 0; { auto& lst = a->parent ? a->parent->children : w->GetHierarchy(); int i = 0; for (Atom* s : lst) { if (s == a) { index = i; break; } ++i; } }
+	std::string before = nuke::SaveAtomToString(a);
+	fresh->id.id = id;                      // keep this instance's identity + placement
+	w->RemoveAtomById(id);
+	w->InsertAtom(fresh, parent, index);
+	app->selectedInHieararchy = fresh;
+	std::string after = nuke::SaveAtomToString(fresh);
+	PushUndo("Reset to prefab",
+		[this, id, parent, index, before]{ ApplyAtomState(id, parent, index, before); },
+		[this, id, parent, index, after ]{ ApplyAtomState(id, parent, index, after ); });
+}
+
 void EditorUI::winInspector()
 {
 	if (!win->inspector) return;
@@ -339,6 +373,21 @@ void EditorUI::winInspector()
 		char name[128];
 		strncpy(name, sltd->GetName().c_str(), 127); name[127] = 0;
 		if (ImGui::InputText("Name", name, 128)) sltd->SetName(name);
+
+		// Prefab instance bar: this atom IS an instance (a prefab with individual params). Manual sync only.
+		if (!sltd->prefabGuid.empty())
+		{
+			std::string ppath = ResDB::getSingleton()->PathForGuid(sltd->prefabGuid);
+			if (!ppath.empty())
+			{
+				ImGui::Text(ICON_LC_BOX " Prefab: %s", bfs::path(ppath).stem().string().c_str());
+				if (ImGui::Button("Apply to prefab")) ApplyToPrefab(sltd);
+				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Overwrite the prefab file with this instance's values");
+				ImGui::SameLine();
+				if (ImGui::Button("Reset to prefab")) { ResetToPrefab(sltd); ImGui::End(); return; }   // sltd is replaced
+				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Discard this instance's overrides; reload from the prefab");
+			}
+		}
 
 		ImGui::SeparatorText("Transform");
 		Transform& t = sltd->GetTransform();

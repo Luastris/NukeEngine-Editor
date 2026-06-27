@@ -239,10 +239,12 @@ void EditorUI::SaveAtomAsPrefab(Atom* a, const std::string& folder)
 {
 	if (!a) return;
 	bfs::path path = UniquePath(bfs::path(folder) / (a->GetName() + ".nuprefab"));
+	a->prefabGuid = ResDB::NewGuid();   // the source atom becomes an instance of this new prefab
 	if (nuke::SavePrefab(a, path.string()))
 	{
+		ResDB::getSingleton()->SetAssetPath(a->prefabGuid, path.string());   // resolve guid -> file
 		browserSel = path.string();
-		cout << "[editor]\tsaved prefab " << path.string() << endl;
+		cout << "[editor]\tsaved prefab " << path.string() << " (" << a->prefabGuid << ")" << endl;
 	}
 }
 
