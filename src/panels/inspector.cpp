@@ -39,6 +39,7 @@ static bool KindMatchesFile(const std::string& kind, const std::string& path)
 	if (kind == "mesh")     return e == ".numesh";
 	if (kind == "material") return e == ".numat";
 	if (kind == "texture")  return e == ".nutex";
+	if (kind == "script")   return e == ".lua";
 	if (kind == "shader")   { std::string fn = bfs::path(path).filename().string(); return EndsWithCI(fn, ".vs.hlsl") || EndsWithCI(fn, ".ps.hlsl"); }
 	return false;
 }
@@ -60,6 +61,7 @@ bool EditorUI::AssetPicker(const char* label, std::string& guid, const std::stri
 	// built-ins that have no file. Shaders are keyed by name, so just show that.
 	auto disp = [&](const std::string& g) -> std::string {
 		if (g.empty()) return "(none)";
+		if (kind == "script") return bfs::path(g).stem().string();   // value is a content-relative path
 		if (kind == "shader") { Shader* s = db->GetShader(g); return s ? s->name : g; }
 		std::string p = db->PathForGuid(g);
 		if (!p.empty()) return bfs::path(p).stem().string();
@@ -81,7 +83,10 @@ bool EditorUI::AssetPicker(const char* label, std::string& guid, const std::stri
 			std::string path((const char*)p->Data);
 			if (KindMatchesFile(kind, path))
 			{
-				std::string g = (kind == "shader") ? ShaderGuidFromPath(path) : db->GuidForPath(path);
+				std::string g;
+				if      (kind == "script") { boost::system::error_code ec; g = bfs::relative(bfs::path(path), bfs::path(contentDir), ec).generic_string(); }
+				else if (kind == "shader") g = ShaderGuidFromPath(path);
+				else                       g = db->GuidForPath(path);
 				if (!g.empty()) { guid = g; changed = true; }
 			}
 		}
@@ -91,7 +96,10 @@ bool EditorUI::AssetPicker(const char* label, std::string& guid, const std::stri
 	ImGui::SameLine(0, 2);
 	if (ImGui::Button(ICON_LC_FOLDER_SEARCH "##loc"))   // locate the original file in the browser
 	{
-		std::string path = (kind == "shader" && db->GetShader(guid)) ? db->GetShader(guid)->vsPath : db->PathForGuid(guid);
+		std::string path;
+		if      (kind == "script") { if (!guid.empty()) path = (bfs::path(contentDir) / guid).string(); }
+		else if (kind == "shader" && db->GetShader(guid)) path = db->GetShader(guid)->vsPath;
+		else                       path = db->PathForGuid(guid);
 		if (!path.empty()) { BrowserNavigate(bfs::path(path).parent_path().string()); browserSel = path; if (win) win->browser = true; }
 	}
 	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Go to file");
@@ -118,6 +126,22 @@ bool EditorUI::AssetPicker(const char* label, std::string& guid, const std::stri
 		else if (kind == "material") for (Material* m : db->materials) { if (m) item(m->guid, disp(m->guid)); }
 		else if (kind == "shader")   for (Shader* s : db->shaders)   { if (s) item(s->guid, disp(s->guid)); }
 		else if (kind == "texture")  for (Texture* t : db->textures) { if (t) item(t->guid, disp(t->guid)); }
+		else if (kind == "script")   // scan the project content for .lua files (value = content-relative path)
+		{
+			boost::system::error_code ec;
+			bfs::path croot(contentDir);
+			if (bfs::exists(croot, ec))
+				for (bfs::recursive_directory_iterator it(croot, ec), end; it != end; it.increment(ec))
+				{
+					if (ec) break;
+					if (bfs::is_directory(it->path())) continue;
+					std::string e = it->path().extension().string();
+					for (char& c : e) c = (char)tolower((unsigned char)c);
+					if (e != ".lua") continue;
+					std::string rel = bfs::relative(it->path(), croot, ec).generic_string();
+					item(rel, bfs::path(rel).stem().string());
+				}
+		}
 		ImGui::EndChild();
 		ImGui::EndPopup();
 	}

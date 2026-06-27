@@ -15,6 +15,7 @@ void EditorUI::winRender()
 		if (ImGui::IsKeyPressed(ImGuiKey_E)) a->manipulationMode = 2;
 		if (ImGui::IsKeyPressed(ImGuiKey_R)) a->manipulationMode = 3;
 		if (ImGui::IsKeyPressed(ImGuiKey_X)) a->manipulationWorld = !a->manipulationWorld;
+		if (ImGui::IsKeyPressed(ImGuiKey_F)) FocusSelected();   // frame the selected object
 	}
 
 	ImVec2 avail = ImGui::GetContentRegionAvail();

@@ -56,7 +56,7 @@ void EditorUI::BrowserTree(const std::string& dir)
 }
 
 // Reconstruct a .nuprefab into the current world and select it.
-void EditorUI::InstantiatePrefab(const std::string& path)
+Atom* EditorUI::InstantiatePrefab(const std::string& path)
 {
 	if (Atom* a = nuke::LoadPrefab(path))
 	{
@@ -64,7 +64,9 @@ void EditorUI::InstantiatePrefab(const std::string& path)
 		app->currentScene->Add(a);
 		app->selectedInHieararchy = a;
 		cout << "[editor]\tinstantiated prefab " << path << endl;
+		return a;
 	}
+	return nullptr;
 }
 
 // Begin renaming a browser entry: edit only the NAME — the extension is locked (changing it would
@@ -206,7 +208,21 @@ void EditorUI::BrowserDragSource(const std::string& path)
 	}
 }
 
-// Make the last-drawn item (a folder) a drop target: move the dragged file/folder into it.
+// Save a scene atom (with its children) as a .nuprefab in `folder`. The prefab is a snapshot —
+// later edits to the world atom don't change the file (no live link yet).
+void EditorUI::SaveAtomAsPrefab(Atom* a, const std::string& folder)
+{
+	if (!a) return;
+	bfs::path path = UniquePath(bfs::path(folder) / (a->GetName() + ".nuprefab"));
+	if (nuke::SavePrefab(a, path.string()))
+	{
+		browserSel = path.string();
+		cout << "[editor]\tsaved prefab " << path.string() << endl;
+	}
+}
+
+// Make the last-drawn item (a folder) a drop target: move a dragged file/folder into it, or save a
+// dragged scene atom into it as a prefab.
 void EditorUI::BrowserFolderDropTarget(const std::string& folderPath)
 {
 	if (!ImGui::BeginDragDropTarget()) return;
@@ -225,6 +241,8 @@ void EditorUI::BrowserFolderDropTarget(const std::string& folderPath)
 			if (browserSel == srcStr) browserSel = dst.string();
 		}
 	}
+	if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("NUKE_ATOM"))
+		SaveAtomAsPrefab(*(Atom**)p->Data, folderPath);
 	ImGui::EndDragDropTarget();
 }
 
@@ -237,18 +255,19 @@ void EditorUI::AcceptAssetDropTarget()
 	ImGui::EndDragDropTarget();
 }
 
-void EditorUI::DropAsset(const std::string& path)
+Atom* EditorUI::DropAsset(const std::string& path)
 {
 	std::string ext = bfs::path(path).extension().string();
-	if      (ext == ".nuprefab") InstantiatePrefab(path);
-	else if (ext == ".numesh")   SpawnMeshAsset(path);
-	else if (ext == ".nuworld")  OpenWorldFromBrowser(path);
+	if      (ext == ".nuprefab") return InstantiatePrefab(path);
+	else if (ext == ".numesh")   return SpawnMeshAsset(path);
+	else if (ext == ".nuworld")  { OpenWorldFromBrowser(path); return nullptr; }
+	return nullptr;
 }
 
-void EditorUI::SpawnMeshAsset(const std::string& path)
+Atom* EditorUI::SpawnMeshAsset(const std::string& path)
 {
 	Mesh* m = Mesh::LoadFromFile(path);
-	if (!m) return;
+	if (!m) return nullptr;
 	ResDB* db = ResDB::getSingleton();
 	if (Mesh* ex = db->GetMesh(m->guid)) { delete m; m = ex; }   // reuse the already-loaded asset
 	else                                  db->RegisterMesh(m);
@@ -258,6 +277,7 @@ void EditorUI::SpawnMeshAsset(const std::string& path)
 	mr->meshGuid = m->guid; mr->mesh = m;
 	AppInstance::GetSingleton()->currentScene->Add(go);
 	AppInstance::GetSingleton()->selectedInHieararchy = go;
+	return go;
 }
 
 void EditorUI::CreateFolderAsset(const std::string& folder)
@@ -519,6 +539,17 @@ void EditorUI::winBrowser()
 			EntryContextMenu(e.path, e.isDir);   // right-click: Rename / Delete
 			ImGui::PopID();
 		}
+	}
+
+	// Empty area below the entries: drag a scene atom here to save it as a prefab in this folder.
+	ImVec2 rest = ImGui::GetContentRegionAvail();
+	if (rest.y < 24.0f) rest.y = 24.0f;
+	ImGui::InvisibleButton("##browser-drop", rest);
+	if (ImGui::BeginDragDropTarget())
+	{
+		if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("NUKE_ATOM"))
+			SaveAtomAsPrefab(*(Atom**)p->Data, browserCwd.empty() ? contentDir : browserCwd);
+		ImGui::EndDragDropTarget();
 	}
 	ImGui::End();
 }

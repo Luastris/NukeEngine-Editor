@@ -96,6 +96,10 @@ private:
 	int         hotReloadTick = 0;                  // throttles shader hot-reload checks
 	std::map<std::string, std::function<void(nuke::Component*)>> inspectorOverrides;  // per-type custom inspector drawing
 	char        assetFilter[128] = "";             // filter text in the asset-picker popup
+	char        hierSearch[128] = "";              // hierarchy search (atom name / component type)
+	// Deferred reparent (applied AFTER the tree is drawn — mutating the lists mid-iteration corrupts it).
+	Atom* dndAtom = nullptr; Atom* dndBefore = nullptr; Atom* dndParent = nullptr; bool dndPending = false;
+	std::string dndAsset; Atom* dndAssetParent = nullptr;   // deferred: instantiate a browser asset (then parent)
 	std::string rebindId;                          // hotkey id currently being rebound ("" = none)
 	bool        settingsOpen = false;              // Project Settings window open?
 	bool        openSaveAsPopup = false;           // request to open the "Save World As" modal
@@ -156,8 +160,13 @@ public:
 	void OpenWorldFromBrowser(const std::string& fullPath);   // open a .nuworld picked in the browser
 	void winSettings();              // Project Settings window (default world + hotkeys)
 	// hierarchy
-	void DisplayRecursiveAtomHierarchy(bc::list<Atom*>& gos);
 	void winHierarchy();
+	void DrawAtomNode(Atom* go);                 // one tree row + DnD (recurses children)
+	void HierGap(Atom* before);  // thin insertion zone overlaid on a row's top edge (only while dragging an atom)
+	bool HierMatch(Atom* go);                    // search: atom name OR a component type matches
+	bool HierMatchDeep(Atom* go);                // this atom or any descendant matches
+	const char* AtomIcon(Atom* go);              // icon by the atom's components
+	void FocusSelected();                        // frame the selected atom with the editor camera
 	// inspector
 	void CamComponent(Camera* cam);
 	// Reusable asset-reference picker (mesh/material/shader/texture). Type-locked (rejects other
@@ -181,7 +190,7 @@ public:
 	bool ExtVisible(const std::string& ext);
 	bool SearchMatch(const std::string& name);
 	void BrowserTree(const std::string& dir);
-	void InstantiatePrefab(const std::string& path);
+	Atom* InstantiatePrefab(const std::string& path);
 	void StartRename(const std::string& path);
 	void EntryContextMenu(const std::string& path, bool isDir);
 	void DrawRenamePopup();
@@ -193,9 +202,10 @@ public:
 	// or on the viewport / hierarchy to instantiate.
 	void BrowserDragSource(const std::string& path);
 	void BrowserFolderDropTarget(const std::string& folderPath);
+	void SaveAtomAsPrefab(Atom* a, const std::string& folder);   // drag an atom into the browser -> .nuprefab
 	void AcceptAssetDropTarget();                    // viewport/hierarchy: accept an asset drop
-	void DropAsset(const std::string& path);         // instantiate by extension (mesh/prefab/world)
-	void SpawnMeshAsset(const std::string& path);    // .numesh -> new Atom + MeshRenderer
+	Atom* DropAsset(const std::string& path);        // instantiate by extension; returns the new atom (or null)
+	Atom* SpawnMeshAsset(const std::string& path);   // .numesh -> new Atom + MeshRenderer
 	// Create new assets in a content folder (from the browser's "New" menu).
 	void CreateFolderAsset(const std::string& folder);
 	void CreateWorldAsset(const std::string& folder);    // empty .nuworld
