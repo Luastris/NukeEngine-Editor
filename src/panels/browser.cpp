@@ -67,12 +67,17 @@ void EditorUI::InstantiatePrefab(const std::string& path)
 	}
 }
 
-// Begin renaming a browser entry: stash its path + current name, open the modal next frame.
+// Begin renaming a browser entry: edit only the NAME — the extension is locked (changing it would
+// make the engine unable to load the asset). Folders have no extension, so the whole name is edited.
 void EditorUI::StartRename(const std::string& path)
 {
 	renamePath = path;
-	std::string nm = bfs::path(path).filename().string();
-	strncpy(renameBuf, nm.c_str(), sizeof(renameBuf) - 1);
+	bfs::path p(path);
+	boost::system::error_code ec;
+	std::string stem;
+	if (bfs::is_directory(p, ec)) { stem = p.filename().string(); renameExt = ""; }
+	else                          { stem = p.stem().string();     renameExt = p.extension().string(); }
+	strncpy(renameBuf, stem.c_str(), sizeof(renameBuf) - 1);
 	renameBuf[sizeof(renameBuf) - 1] = 0;
 	openRenamePopup = true;
 }
@@ -111,13 +116,14 @@ void EditorUI::DrawRenamePopup()
 	if (ImGui::BeginPopupModal("Rename##browser", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
 	{
 		ImGui::Text("%s", renamePath.c_str());
-		ImGui::SetNextItemWidth(320);
+		ImGui::SetNextItemWidth(280);
 		bool enter = ImGui::InputText("##rn", renameBuf, sizeof(renameBuf), ImGuiInputTextFlags_EnterReturnsTrue);
 		if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere(-1);
+		if (!renameExt.empty()) { ImGui::SameLine(0, 0); ImGui::Text("%s", renameExt.c_str()); }   // locked extension
 
 		boost::system::error_code ec;
 		bfs::path src = renamePath;
-		bfs::path dst = src.parent_path() / renameBuf;
+		bfs::path dst = src.parent_path() / (std::string(renameBuf) + renameExt);   // name + locked ext
 		// Block if a DIFFERENT entry with that name already exists (no silent overwrite).
 		bool clash = renameBuf[0] && dst != src && bfs::exists(dst, ec);
 		if (clash) ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1), ICON_LC_TRIANGLE_ALERT " A file/folder with that name already exists here.");
@@ -240,6 +246,60 @@ void EditorUI::SpawnMeshAsset(const std::string& path)
 	AppInstance::GetSingleton()->selectedInHieararchy = go;
 }
 
+void EditorUI::CreateFolderAsset(const std::string& folder)
+{
+	boost::system::error_code ec;
+	bfs::path dir = UniquePath(bfs::path(folder) / "New Folder");
+	bfs::create_directory(dir, ec);
+	browserSel = dir.string();
+	StartRename(dir.string());   // immediately let the user name it
+}
+
+void EditorUI::CreateWorldAsset(const std::string& folder)
+{
+	bfs::path path = UniquePath(bfs::path(folder) / "New World.nuworld");
+	World* w = new World();           // empty world -> canonical JSON
+	w->SaveToFile(path.string());
+	delete w;
+	browserSel = path.string();
+	StartRename(path.string());
+}
+
+void EditorUI::CreateMaterialAsset(const std::string& folder)
+{
+	bfs::path path = UniquePath(bfs::path(folder) / "New Material.numat");
+	Material* m = new Material();
+	m->guid    = ResDB::NewGuid();
+	m->matName = "New Material";
+	m->SaveToFile(path.string());
+	ResDB::getSingleton()->RegisterMaterial(m);   // show up in material pickers immediately
+	browserSel = path.string();
+	StartRename(path.string());
+}
+
+void EditorUI::CreateShaderAsset(const std::string& folder)
+{
+	// A shader is a "<base>.vs.hlsl" + "<base>.ps.hlsl" pair — find a base where neither exists.
+	boost::system::error_code ec;
+	std::string base = "NewShader";
+	for (int n = 1; bfs::exists(bfs::path(folder) / (base + ".vs.hlsl"), ec) ||
+	                bfs::exists(bfs::path(folder) / (base + ".ps.hlsl"), ec); )
+		base = "NewShader" + std::to_string(++n);
+	bfs::path vsp = bfs::path(folder) / (base + ".vs.hlsl");
+	bfs::path psp = bfs::path(folder) / (base + ".ps.hlsl");
+	// Seed from the built-in "world" shader so it compiles out of the box.
+	Shader* w = ResDB::getSingleton()->GetShader("world");
+	{ bfs::ofstream f(vsp); if (f) f << (w ? w->vsSource : std::string()); }
+	{ bfs::ofstream f(psp); if (f) f << (w ? w->psSource : std::string()); }
+	if (Shader* s = Shader::LoadPair(base, vsp.string(), psp.string()))
+	{
+		ResDB::getSingleton()->RegisterShader(s);
+		if (iRender* r = AppInstance::GetSingleton()->render)
+			s->rendererHandle = r->createShaderPipeline(s->vsSource.c_str(), s->psSource.c_str());
+	}
+	browserSel = vsp.string();
+}
+
 void EditorUI::winBrowser()
 {
 	if (!win->browser) return;
@@ -280,16 +340,18 @@ void EditorUI::winBrowser()
 	}
 	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Import a model (OBJ/FBX/glTF) -> .numesh in this folder");
 	ImGui::SameLine();
-	if (ImGui::Button(ICON_LC_FOLDER_PLUS " New Folder"))
+	if (ImGui::Button(ICON_LC_FILE_PLUS " New")) ImGui::OpenPopup("bnew");
+	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Create a new asset/folder here");
+	if (ImGui::BeginPopup("bnew"))
 	{
-		boost::system::error_code fec;
-		bfs::path base = browserCwd.empty() ? bfs::path(contentDir) : bfs::path(browserCwd);
-		bfs::path dir  = base / "New Folder";
-		for (int n = 1; bfs::exists(dir, fec); ++n) dir = base / ("New Folder (" + std::to_string(n) + ")");
-		bfs::create_directory(dir, fec);
-		StartRename(dir.string());   // immediately let the user name it
+		std::string folder = browserCwd.empty() ? contentDir : browserCwd;
+		if (ImGui::MenuItem(ICON_LC_FOLDER " Folder"))     CreateFolderAsset(folder);
+		ImGui::Separator();
+		if (ImGui::MenuItem(ICON_LC_GLOBE " World"))       CreateWorldAsset(folder);
+		if (ImGui::MenuItem(ICON_LC_PALETTE " Material"))  CreateMaterialAsset(folder);
+		if (ImGui::MenuItem(ICON_LC_FILE_CODE " Shader"))  CreateShaderAsset(folder);
+		ImGui::EndPopup();
 	}
-	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Create a new folder here");
 	if (ImGui::BeginPopup("bfilters"))
 	{
 		ImGui::Checkbox("Meshes", &fMesh);    ImGui::Checkbox("Materials", &fMat);

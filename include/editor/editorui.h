@@ -90,7 +90,8 @@ private:
 	std::string browserSel;                        // selected entry (full path; "" = none)
 	std::vector<std::string> browserBack, browserFwd;   // folder navigation history (M4=back, M5=forward)
 	std::string renamePath;                        // browser: full path being renamed ("" = none)
-	char        renameBuf[256] = "";               // edited name
+	char        renameBuf[256] = "";               // edited NAME (without extension)
+	std::string renameExt;                         // locked extension (kept as-is; "" for folders)
 	bool        openRenamePopup = false;           // request to open the rename modal next frame
 	int         hotReloadTick = 0;                  // throttles shader hot-reload checks
 	std::map<std::string, std::function<void(nuke::Component*)>> inspectorOverrides;  // per-type custom inspector drawing
@@ -190,6 +191,11 @@ public:
 	void AcceptAssetDropTarget();                    // viewport/hierarchy: accept an asset drop
 	void DropAsset(const std::string& path);         // instantiate by extension (mesh/prefab/world)
 	void SpawnMeshAsset(const std::string& path);    // .numesh -> new Atom + MeshRenderer
+	// Create new assets in a content folder (from the browser's "New" menu).
+	void CreateFolderAsset(const std::string& folder);
+	void CreateWorldAsset(const std::string& folder);    // empty .nuworld
+	void CreateMaterialAsset(const std::string& folder); // default .numat (registered in ResDB)
+	void CreateShaderAsset(const std::string& folder);   // .vs/.ps.hlsl pair (registered + pipeline built)
 	// plugins
 	void PluginMGRWindow();
 	// toolbar
