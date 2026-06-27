@@ -169,6 +169,18 @@ void EditorUI::winHierarchy()
 	if (ImGui::IsWindowFocused() && !ImGui::GetIO().WantTextInput && ImGui::IsKeyPressed(ImGuiKey_F))
 		FocusSelected();
 
+	// Delete (or Shift+Delete) removes the selected atom while the hierarchy is focused. Behaviour is
+	// per-active-window; the chords come from the shared pool (rebindable). Atom deletes are undoable.
+	if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) && !ImGui::GetIO().WantTextInput)
+	{
+		nuke::Hotkeys* hk = nuke::Hotkeys::Get();
+		nuke::Hotkey* d  = hk->Find("editor.delete");
+		nuke::Hotkey* df = hk->Find("editor.delete.force");
+		if ((d  && d->bound  && ImGui::IsKeyChordPressed((ImGuiKeyChord)d->chord)) ||
+		    (df && df->bound && ImGui::IsKeyChordPressed((ImGuiKeyChord)df->chord)))
+			DeleteSelectedAtom();
+	}
+
 	// Apply deferred DnD now that the whole tree is drawn (mutating the lists mid-iteration corrupts it).
 	if (dndPending && dndAtom)
 	{

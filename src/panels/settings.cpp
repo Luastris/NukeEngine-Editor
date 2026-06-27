@@ -20,6 +20,8 @@ void EditorUI::RegisterHotkeys()
 	// null-action entries). Default to the mouse back/forward buttons (M4/M5).
 	hk->Register("editor.browser.back",    "Browser: Back",    ImGuiKey_MouseX1, nullptr);
 	hk->Register("editor.browser.forward", "Browser: Forward", ImGuiKey_MouseX2, nullptr);
+	hk->Register("editor.delete",          "Delete",           ImGuiKey_Delete, nullptr);
+	hk->Register("editor.delete.force",    "Delete (no confirm)", ImGuiMod_Shift | ImGuiKey_Delete, nullptr);
 	hk->Register("editor.browser.cut",     "Browser: Cut",     ImGuiMod_Ctrl | ImGuiKey_X, nullptr);
 	hk->Register("editor.browser.copy",    "Browser: Copy",    ImGuiMod_Ctrl | ImGuiKey_C, nullptr);
 	hk->Register("editor.browser.paste",   "Browser: Paste",   ImGuiMod_Ctrl | ImGuiKey_V, nullptr);
@@ -45,7 +47,7 @@ void EditorUI::MenuHotkeyItem(const char* label, const char* id)
 	if (ImGui::MenuItem(label, sc) && h && h->action) h->action();
 }
 
-void EditorUI::NewWorldCmd() { AppInstance::GetSingleton()->NewWorld(); ResetUndo(); }
+void EditorUI::NewWorldCmd() { AppInstance::GetSingleton()->NewWorld(); ResetUndo(); UpdateWindowTitle(); }
 
 void EditorUI::SaveWorldCmd()
 {
@@ -61,6 +63,7 @@ void EditorUI::OpenWorldCmd(const std::string& relPath)
 	if (relPath.empty()) return;
 	AppInstance::GetSingleton()->OpenWorld(relPath);
 	ResetUndo();
+	UpdateWindowTitle();
 }
 
 // Open the "Save World As" modal; default the folder to the one currently open in the browser.
@@ -128,6 +131,7 @@ void EditorUI::DrawSaveAsPopup()
 		if (ImGui::Button(label, ImVec2(120, 0)) || (enter && !exists && !empty))
 		{
 			AppInstance::GetSingleton()->SaveWorld(rel);   // forced into project content
+			UpdateWindowTitle();   // path may have changed
 			ImGui::CloseCurrentPopup();
 		}
 		ImGui::EndDisabled();
@@ -145,6 +149,7 @@ void EditorUI::OpenWorldFromBrowser(const std::string& fullPath)
 	std::string r = (!ec && !rel.empty()) ? rel.generic_string() : fullPath;
 	AppInstance::GetSingleton()->OpenWorld(r);
 	ResetUndo();
+	UpdateWindowTitle();
 }
 
 void EditorUI::winSettings()

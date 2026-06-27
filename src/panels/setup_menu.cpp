@@ -92,6 +92,7 @@ void EditorUI::SetUp()
 	if (editor->OpenWorld(startupWorld))
 		cout << "[editorui]\t\t" << "Opened default world '" << startupWorld << "'." << endl;
 
+	UpdateWindowTitle();   // "NukeEngine Editor - <project> - <world>"
 	cout << "[editorui]\t\t" << "EditorUI ready." << endl;
 }
 

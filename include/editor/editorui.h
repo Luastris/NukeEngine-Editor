@@ -91,6 +91,10 @@ private:
 	std::vector<std::string> browserBack, browserFwd;   // folder navigation history (M4=back, M5=forward)
 	std::vector<std::string> clipboard;            // browser cut/copy buffer (full paths)
 	bool        clipboardCut = false;              // true: paste MOVES (cut); false: paste COPIES
+	std::string pendingDelete;                     // browser: path awaiting delete-confirm ("" = none)
+	bool        openDeletePopup = false;           // request to open the delete-confirm modal next frame
+	std::vector<std::string> deleteDeps;           // resources depending on pendingDelete (shown in the modal)
+	bool        unlinkOnDelete = false;            // project setting: break refs to a deleted resource
 	std::string renamePath;                        // browser: full path being renamed ("" = none)
 	char        renameBuf[256] = "";               // edited NAME (without extension)
 	std::string renameExt;                         // locked extension (kept as-is; "" for folders)
@@ -215,6 +219,13 @@ public:
 	void ApplyToPrefab(Atom* a);                                 // push this instance's state into its prefab file
 	void ResetToPrefab(Atom* a);                                 // revert this instance to the prefab's saved state
 	void BrowserPaste();                                          // paste the clipboard into the current folder (cut=move, copy=duplicate)
+	void BrowserDelete(const std::string& path);                 // delete a file/folder from disk (immediate)
+	void DrawDeletePopup();                                       // browser delete-confirm modal (Enter=Yes, Esc=Cancel)
+	void RequestDelete(const std::string& path);                 // compute dependents + open the confirm modal
+	void PerformDelete(const std::string& path);                 // (optionally unlink) + delete
+	std::vector<std::string> FindDependents(const std::string& guid);   // content files referencing a guid
+	void UnlinkResource(const std::string& guid);                // reset refs to a guid -> defaults (all worlds/assets)
+	void UpdateWindowTitle();                                     // "NukeEngine Editor — <project> — <world>"
 	void AcceptAssetDropTarget();                    // viewport/hierarchy: accept an asset drop
 	Atom* DropAsset(const std::string& path);        // instantiate by extension; returns the new atom (or null)
 	Atom* SpawnMeshAsset(const std::string& path);   // .numesh -> new Atom + MeshRenderer
@@ -242,6 +253,8 @@ public:
 	void ApplyAtomState(long id, long parentId, int index, const std::string& json);   // undo primitive
 	void RecordAdd(Atom* a);                                       // an atom was created
 	void RecordReparent(Atom* a, long oldParent, int oldIndex);   // an atom moved in the hierarchy
+	void RecordDelete(Atom* a);                                   // an atom was deleted
+	void DeleteSelectedAtom();                                    // hierarchy: delete the selected atom (undoable)
 	void RecordFileMove(const std::string& from, const std::string& to);   // a file/folder was renamed or moved
 	// Generic value edit (settings, paths, flags…): records before/after of any comparable value.
 	template<class T> void RecordChange(const std::string& label, T* slot, const T& before, const T& after)

@@ -3,6 +3,10 @@
 #include "API/Model/Material.h"   // regen GUIDs of copied assets
 #include "API/Model/Mesh.h"
 #include "API/Model/Texture.h"
+#include <nlohmann/json.hpp>      // dependency scan + unlink (rewrite reference fields)
+#include <boost/filesystem/fstream.hpp>
+#include <algorithm>
+#include <iterator>
 
 // Rename/move a file or folder on disk + keep ResDB's guid<->path in sync; a renamed .numat also
 // gets its internal name re-synced. One canonical operation so undo can replay it in either direction.
@@ -135,11 +139,7 @@ void EditorUI::EntryContextMenu(const std::string& path, bool isDir)
 		if (ImGui::MenuItem(ICON_LC_CLIPBOARD_PASTE " Paste", "Ctrl+V", false, !clipboard.empty())) BrowserPaste();
 		ImGui::Separator();
 		if (ImGui::MenuItem(ICON_LC_PENCIL " Rename")) StartRename(path);
-		if (ImGui::MenuItem(ICON_LC_TRASH_2 " Delete"))
-		{
-			boost::system::error_code ec;
-			if (isDir) bfs::remove_all(path, ec); else bfs::remove(path, ec);
-		}
+		if (ImGui::MenuItem(ICON_LC_TRASH_2 " Delete")) RequestDelete(path);   // confirm (+ dependents list)
 		ImGui::EndPopup();
 	}
 }
@@ -293,6 +293,152 @@ static void RegenGuidsIn(const bfs::path& path)
 			if (!bfs::is_directory(it->path(), ec)) RegenAssetGuid(it->path());
 	}
 	else RegenAssetGuid(path);
+}
+
+// Delete a file or folder from disk (immediate; no confirm — callers gate that).
+void EditorUI::BrowserDelete(const std::string& path)
+{
+	boost::system::error_code ec;
+	if (bfs::is_directory(path, ec)) bfs::remove_all(path, ec);
+	else                             bfs::remove(path, ec);
+	if (browserSel == path) browserSel.clear();
+}
+
+// Content files (worlds/prefabs/materials = JSON) that reference `guid` as text + the live world.
+std::vector<std::string> EditorUI::FindDependents(const std::string& guid)
+{
+	std::vector<std::string> deps;
+	if (guid.empty()) return deps;
+	boost::system::error_code ec;
+	bfs::path root(contentDir);
+	if (bfs::exists(root, ec))
+		for (bfs::recursive_directory_iterator it(root, ec), end; it != end && !ec; it.increment(ec))
+		{
+			if (bfs::is_directory(it->path())) continue;
+			std::string e = it->path().extension().string();
+			for (char& c : e) c = (char)tolower((unsigned char)c);
+			if (e != ".nuworld" && e != ".nuprefab" && e != ".numat") continue;
+			if (it->path().string() == pendingDelete) continue;            // skip the file being deleted
+			bfs::ifstream f(it->path()); if (!f) continue;
+			std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+			if (text.find(guid) != std::string::npos)
+				deps.push_back(bfs::relative(it->path(), root, ec).generic_string());
+		}
+	if (AppInstance::GetSingleton()->currentScene->SaveToString().find(guid) != std::string::npos)
+		deps.push_back("(current world)");
+	return deps;
+}
+
+// Replace every reference to `guid` with its default, recursively, by the field it sits under.
+static bool UnlinkInJson(nlohmann::json& n, const std::string& guid)
+{
+	bool changed = false;
+	if (n.is_object())
+		for (auto it = n.begin(); it != n.end(); ++it)
+		{
+			nlohmann::json& v = it.value();
+			if (v.is_string() && v.get<std::string>() == guid)
+			{
+				const std::string& k = it.key();
+				if      (k == "matGuid") { v = "builtin:default"; changed = true; }
+				else if (k == "shader")  { v = "world";           changed = true; }
+				else if (k == "prefab" || k == "meshGuid" || k == "diffuse" || k == "normal" || k == "specular") { v = ""; changed = true; }
+			}
+			else changed |= UnlinkInJson(v, guid);
+		}
+	else if (n.is_array())
+		for (auto& e : n) changed |= UnlinkInJson(e, guid);
+	return changed;
+}
+
+// Reset every reference to `guid` to defaults across the live world + all content files (irreversible).
+void EditorUI::UnlinkResource(const std::string& guid)
+{
+	if (guid.empty()) return;
+	AppInstance* app = AppInstance::GetSingleton();
+	ResDB::getSingleton()->UnlinkGuid(guid);   // fix LOADED material templates first (shader/texture refs + Resolve)
+	// 1) live world (may be unsaved) — re-clones instances from the now-fixed templates
+	{
+		nlohmann::json j = nlohmann::json::parse(app->currentScene->SaveToString(), nullptr, false);
+		if (!j.is_discarded() && UnlinkInJson(j, guid))
+		{
+			app->selectedInHieararchy = nullptr;
+			app->currentScene->LoadFromString(j.dump());
+			if (!app->currentWorldPath.empty()) app->SaveWorld(app->currentWorldPath);
+		}
+	}
+	// 2) every other world / prefab / material file on disk
+	boost::system::error_code ec;
+	bfs::path root(contentDir);
+	std::string curFull = app->currentWorldPath.empty() ? std::string() : app->WorldFullPath(app->currentWorldPath);
+	if (bfs::exists(root, ec))
+		for (bfs::recursive_directory_iterator it(root, ec), end; it != end && !ec; it.increment(ec))
+		{
+			if (bfs::is_directory(it->path())) continue;
+			std::string e = it->path().extension().string();
+			for (char& c : e) c = (char)tolower((unsigned char)c);
+			if (e != ".nuworld" && e != ".nuprefab" && e != ".numat") continue;
+			if (it->path().string() == pendingDelete) continue;
+			if (!curFull.empty() && bfs::equivalent(it->path(), bfs::path(curFull), ec)) continue;   // done in memory
+			bfs::ifstream f(it->path()); if (!f) continue;
+			nlohmann::json j = nlohmann::json::parse(f, nullptr, false); f.close();
+			if (j.is_discarded()) continue;
+			if (UnlinkInJson(j, guid)) { bfs::ofstream o(it->path()); if (o) o << j.dump(2); }
+		}
+}
+
+// Open the confirm modal, listing what depends on the resource.
+void EditorUI::RequestDelete(const std::string& path)
+{
+	pendingDelete   = path;
+	deleteDeps      = FindDependents(ResDB::getSingleton()->GuidForPath(path));
+	openDeletePopup = true;
+}
+
+// Optionally break references, then delete the file from disk.
+void EditorUI::PerformDelete(const std::string& path)
+{
+	ResDB* db = ResDB::getSingleton();
+	std::string guid = db->GuidForPath(path);
+	if (unlinkOnDelete && !guid.empty()) UnlinkResource(guid);   // reset refs in files + live world + DB templates
+	if (!guid.empty()) db->RemoveByGuid(guid);                   // drop the deleted asset from the live DB (pickers)
+	BrowserDelete(path);
+}
+
+// Delete-confirm modal: dependents list + irreversible warning + the persisted "Unlink?" toggle.
+void EditorUI::DrawDeletePopup()
+{
+	if (openDeletePopup) { ImGui::OpenPopup("Delete?##browser"); openDeletePopup = false; }
+	if (ImGui::BeginPopupModal("Delete?##browser", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+	{
+		ImGui::Text("Delete \"%s\"?", bfs::path(pendingDelete).filename().string().c_str());
+		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.30f, 0.25f, 1.0f));
+		ImGui::TextUnformatted(ICON_LC_TRIANGLE_ALERT " This is irreversible.");
+		ImGui::PopStyleColor();
+		if (!deleteDeps.empty())
+		{
+			ImGui::Spacing();
+			ImGui::Text("Used by %d resource(s):", (int)deleteDeps.size());
+			int rows = std::min((int)deleteDeps.size(), 8);
+			ImGui::BeginChild("##deps", ImVec2(380, rows * ImGui::GetTextLineHeightWithSpacing() + 8), true);
+			for (auto& d : deleteDeps) ImGui::BulletText("%s", d.c_str());
+			ImGui::EndChild();
+			if (!unlinkOnDelete)
+			{
+				ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.30f, 0.25f, 1.0f));
+				ImGui::TextWrapped("These will keep dangling references unless Unlink is on.");
+				ImGui::PopStyleColor();
+			}
+		}
+		if (ImGui::Checkbox("Unlink? (reset those refs to defaults)", &unlinkOnDelete)) SaveProject();   // persisted
+		ImGui::Separator();
+		bool yes    = ImGui::Button("Yes") || ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter);
+		ImGui::SameLine();
+		bool cancel = ImGui::Button("Cancel") || ImGui::IsKeyPressed(ImGuiKey_Escape);
+		if (yes)         { PerformDelete(pendingDelete); pendingDelete.clear(); deleteDeps.clear(); ImGui::CloseCurrentPopup(); }
+		else if (cancel) { pendingDelete.clear(); deleteDeps.clear(); ImGui::CloseCurrentPopup(); }
+		ImGui::EndPopup();
+	}
 }
 
 // Paste the clipboard into the current folder. Cut = move (and clear the clipboard); copy = duplicate.
@@ -463,6 +609,17 @@ void EditorUI::winBrowser()
 		}
 	}
 
+	// Delete: behaviour is per-active-window — only act when the Browser is FOCUSED. Shift+Delete deletes
+	// immediately; plain Delete asks for confirmation. Chords come from the shared pool.
+	if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) && !ImGui::GetIO().WantTextInput && !browserSel.empty())
+	{
+		nuke::Hotkeys* hk = nuke::Hotkeys::Get();
+		nuke::Hotkey* d  = hk->Find("editor.delete");
+		nuke::Hotkey* df = hk->Find("editor.delete.force");
+		if (df && df->bound && ImGui::IsKeyChordPressed((ImGuiKeyChord)df->chord)) PerformDelete(browserSel);            // Shift+Del: no confirm
+		else if (d && d->bound && ImGui::IsKeyChordPressed((ImGuiKeyChord)d->chord)) RequestDelete(browserSel);          // Del: confirm
+	}
+
 	// --- toolbar: view mode | search | filters ---
 	const char* modes[] = { ICON_LC_LAYOUT_GRID " Tiles", ICON_LC_LIST " List",
 	                        ICON_LC_FOLDER_TREE " Tree", ICON_LC_BOXES " By Type" };
@@ -506,6 +663,7 @@ void EditorUI::winBrowser()
 	}
 
 	DrawRenamePopup();   // rename modal (works in all views; before the mode early-returns)
+	DrawDeletePopup();   // delete-confirm modal
 
 	// --- By Type: in-memory ResDB dump (kept as a separate mode) ---
 	if (browserView == 3)

@@ -19,6 +19,7 @@ void EditorUI::SaveProject()
 	j["engine"]       = "NukeEngine";
 	j["content"]      = "content";          // relative to the project dir
 	j["startupWorld"] = startupWorld;        // the default world the game loads
+	j["unlinkOnDelete"] = unlinkOnDelete;   // break refs to a deleted resource (vs leave dangling)
 	j["plugins"]      = enabledPlugins;     // which pooled plugins this project loads
 	nlohmann::json hk = nlohmann::json::object();   // hotkey bindings (id -> chord), saved with the project
 	for (auto& kv : nuke::Hotkeys::Get()->ExportBindings()) hk[kv.first] = kv.second;
@@ -33,7 +34,8 @@ void EditorUI::LoadProject()
 	if (!f) { SaveProject(); return; }   // first run — create a default .nuproj
 	nlohmann::json j = nlohmann::json::parse(f, nullptr, false);
 	if (j.is_discarded()) return;
-	startupWorld = j.value("startupWorld", startupWorld);
+	startupWorld   = j.value("startupWorld", startupWorld);
+	unlinkOnDelete = j.value("unlinkOnDelete", false);
 	contentDir   = projectDir + "/" + j.value("content", std::string("content"));
 	enabledPlugins.clear();
 	if (j.contains("plugins") && j["plugins"].is_array())
@@ -46,6 +48,18 @@ void EditorUI::LoadProject()
 	if (j.contains("hotkeys") && j["hotkeys"].is_object())
 		for (auto& kv : j["hotkeys"].items())
 			if (kv.value().is_number_integer()) pendingHotkeyBinds[kv.key()] = kv.value().get<int>();
+}
+
+// Window title: "NukeEngine Editor - <project> - <world>".
+void EditorUI::UpdateWindowTitle()
+{
+	AppInstance* app = AppInstance::GetSingleton();
+	if (!app->render) return;
+	std::string proj = bfs::path(projectDir).filename().string();
+	if (proj.empty()) proj = "Untitled";
+	std::string title = "NukeEngine Editor - " + proj;
+	if (!app->currentWorldPath.empty()) title += " - " + bfs::path(app->currentWorldPath).stem().string();
+	app->render->setWindowTitle(title.c_str());
 }
 
 // Activate the project's chosen plugins from the shared (already-discovered) pool. On a

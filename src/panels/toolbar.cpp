@@ -282,3 +282,25 @@ void EditorUI::RecordReparent(Atom* a, long oldParent, int oldIndex)
 		[this, id, oldParent, oldIndex, json]{ ApplyAtomState(id, oldParent, oldIndex, json); },
 		[this, id, newParent, newIndex, json]{ ApplyAtomState(id, newParent, newIndex, json); });
 }
+
+void EditorUI::RecordDelete(Atom* a)
+{
+	if (!a) return;
+	World* w = AppInstance::GetSingleton()->currentScene;
+	long id = a->id.id, parent = AtomParentId(a); int index = AtomIndex(w, a);
+	std::string json = SaveAtomToString(a);   // capture BEFORE the atom is removed
+	PushUndo("Delete " + a->GetName(),
+		[this, id, parent, index, json]{ ApplyAtomState(id, parent, index, json); },          // undo: re-create
+		[this, id, parent, index]      { ApplyAtomState(id, parent, index, std::string()); }); // redo: remove
+}
+
+void EditorUI::DeleteSelectedAtom()
+{
+	AppInstance* app = AppInstance::GetSingleton();
+	Atom* a = app->selectedInHieararchy;
+	if (!a || a->GetName() == "Editor Camera") return;   // never delete the editor camera
+	RecordDelete(a);                                     // serialize for undo first
+	long id = a->id.id;
+	app->selectedInHieararchy = nullptr;
+	app->currentScene->RemoveAtomById(id);               // deletes the atom + its subtree
+}
