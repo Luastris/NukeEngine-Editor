@@ -23,6 +23,7 @@ void EditorUI::SpawnEmpty()
 	Atom* go = new Atom("Empty");
 	app->currentScene->Add(go);
 	app->selectedInHieararchy = go;
+	RecordAdd(go);
 }
 void EditorUI::SpawnPrimitive(const char* atomName, const char* guid)
 {
@@ -34,6 +35,7 @@ void EditorUI::SpawnPrimitive(const char* atomName, const char* guid)
 	mr->mesh = ResDB::getSingleton()->GetMesh(guid);
 	app->currentScene->Add(go);
 	app->selectedInHieararchy = go;
+	RecordAdd(go);
 }
 void EditorUI::SpawnCube() { SpawnPrimitive("Cube", "builtin:cube"); }
 void EditorUI::SpawnCamera()
@@ -45,6 +47,7 @@ void EditorUI::SpawnCamera()
 	go->AddComponent(c);
 	app->currentScene->Add(go);
 	app->selectedInHieararchy = go;
+	RecordAdd(go);
 }
 
 // Second row under the main menu: tools (left) | PIE (center) | viewport mode (right).
@@ -105,8 +108,12 @@ void EditorUI::Toolbar()
 		{
 			if (app->playState != 0 && !pieSnapshot.empty())
 			{
+				// Remember the selection by id — LoadFromString recreates every atom (the old
+				// pointer dies), so re-resolve it by its stable id on the restored scene.
+				long selId = app->selectedInHieararchy ? app->selectedInHieararchy->id.id : 0;
 				app->selectedInHieararchy = nullptr;
 				app->currentScene->LoadFromString(pieSnapshot);   // restore scene on stop
+				if (selId) app->selectedInHieararchy = app->currentScene->GetById(selId);
 			}
 			app->playState = 0;
 		}
@@ -156,6 +163,7 @@ void EditorUI::Draw()
 
 	winSettings();        // Project Settings window (default world + hotkeys)
 	DrawSaveAsPopup();    // "Save World As" modal
+	TrackUndo();          // capture a selected-atom edit for undo when the UI settles
 	DispatchHotkeys();    // fire any pressed hotkey chord (after the UI, so fields take input first)
 
 	// Apply queued plugin toggles AFTER the window loop: DisablePlugin()'s Shutdown may
@@ -170,4 +178,107 @@ void EditorUI::Draw()
 		pendingPluginToggle.clear();
 		SyncEnabledPlugins();   // persist the new load list to the .nuproj
 	}
+}
+
+// ---- undo/redo (generic command stack) ----
+static long AtomParentId(Atom* a) { return (a && a->parent) ? a->parent->id.id : 0; }
+static int  AtomIndex(World* w, Atom* a)
+{
+	if (!a) return -1;
+	auto& lst = a->parent ? a->parent->children : w->GetHierarchy();
+	int i = 0; for (Atom* s : lst) { if (s == a) return i; ++i; }
+	return -1;
+}
+
+void EditorUI::PushUndo(const std::string& label, std::function<void()> undoFn, std::function<void()> redoFn)
+{
+	undoStack.push_back({ std::move(undoFn), std::move(redoFn), label });
+	if (undoStack.size() > 200) undoStack.erase(undoStack.begin());
+	redoStack.clear();
+}
+
+void EditorUI::ResetUndo() { undoStack.clear(); redoStack.clear(); editing = false; editAtomId = 0; editBefore.clear(); }
+
+void EditorUI::Undo()
+{
+	if (AppInstance::GetSingleton()->playState != 0) return;   // not during PIE
+	if (ImGui::GetIO().WantTextInput) return;                  // let text fields keep their own undo
+	if (undoStack.empty()) return;
+	UndoCmd c = undoStack.back(); undoStack.pop_back();
+	c.undo();
+	redoStack.push_back(c);
+}
+
+void EditorUI::Redo()
+{
+	if (AppInstance::GetSingleton()->playState != 0) return;
+	if (ImGui::GetIO().WantTextInput) return;
+	if (redoStack.empty()) return;
+	UndoCmd c = redoStack.back(); redoStack.pop_back();
+	c.redo();
+	undoStack.push_back(c);
+}
+
+// Undo primitive for atom deltas: replace the atom (by id) with the given serialized state at a
+// placement (parentId 0 = root). Empty json = remove the atom.
+void EditorUI::ApplyAtomState(long id, long parentId, int index, const std::string& json)
+{
+	World* w = AppInstance::GetSingleton()->currentScene;
+	w->RemoveAtomById(id);
+	if (!json.empty()) { if (Atom* a = LoadAtomFromString(json)) w->InsertAtom(a, parentId, index); }
+	AppInstance::GetSingleton()->selectedInHieararchy = w->GetById(id);   // null if it was removed
+	editing = false; editAtomId = 0;                                      // don't re-capture this change
+}
+
+// Detect a settled edit of the SELECTED atom (inspector widget or gizmo): capture before on the first
+// active frame, push one delta command when it deactivates. Other change kinds use PushUndo/RecordChange.
+void EditorUI::TrackUndo()
+{
+	AppInstance* app = AppInstance::GetSingleton();
+	if (app->playState != 0) return;   // never track during PIE
+	bool active = ImGui::IsAnyItemActive() || ImGuizmo::IsUsing();
+	Atom* sel = app->selectedInHieararchy;
+	if (active && !editing)
+	{
+		editing    = true;
+		editAtomId = sel ? sel->id.id : 0;
+		editBefore = sel ? SaveAtomToString(sel) : std::string();
+	}
+	else if (!active && editing)
+	{
+		editing = false;
+		if (!editAtomId) return;
+		Atom* a = app->currentScene->GetById(editAtomId);
+		if (!a) return;
+		std::string after = SaveAtomToString(a);
+		if (after == editBefore) return;                       // nothing actually changed on this atom
+		long id = editAtomId, parent = AtomParentId(a); int index = AtomIndex(app->currentScene, a);
+		std::string before = editBefore;
+		PushUndo("Edit " + a->GetName(),
+			[this, id, parent, index, before]{ ApplyAtomState(id, parent, index, before); },
+			[this, id, parent, index, after ]{ ApplyAtomState(id, parent, index, after ); });
+	}
+}
+
+void EditorUI::RecordAdd(Atom* a)
+{
+	if (!a) return;
+	World* w = AppInstance::GetSingleton()->currentScene;
+	long id = a->id.id, parent = AtomParentId(a); int index = AtomIndex(w, a);
+	std::string json = SaveAtomToString(a);
+	PushUndo("Add " + a->GetName(),
+		[this, id, parent, index]      { ApplyAtomState(id, parent, index, std::string()); },   // undo: remove
+		[this, id, parent, index, json]{ ApplyAtomState(id, parent, index, json); });            // redo: re-add
+}
+
+void EditorUI::RecordReparent(Atom* a, long oldParent, int oldIndex)
+{
+	if (!a) return;
+	World* w = AppInstance::GetSingleton()->currentScene;
+	long id = a->id.id, newParent = AtomParentId(a); int newIndex = AtomIndex(w, a);
+	if (oldParent == newParent && oldIndex == newIndex) return;
+	std::string json = SaveAtomToString(a);
+	PushUndo("Reparent " + a->GetName(),
+		[this, id, oldParent, oldIndex, json]{ ApplyAtomState(id, oldParent, oldIndex, json); },
+		[this, id, newParent, newIndex, json]{ ApplyAtomState(id, newParent, newIndex, json); });
 }

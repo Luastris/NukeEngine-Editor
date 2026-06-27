@@ -172,8 +172,15 @@ void EditorUI::winHierarchy()
 	// Apply deferred DnD now that the whole tree is drawn (mutating the lists mid-iteration corrupts it).
 	if (dndPending && dndAtom)
 	{
+		// Capture the old placement first so the move is undoable.
+		long oldParent = dndAtom->parent ? dndAtom->parent->id.id : 0;
+		int  oldIndex  = 0;
+		{ auto& lst = dndAtom->parent ? dndAtom->parent->children : app->currentScene->GetHierarchy();
+		  int i = 0; for (Atom* s : lst) { if (s == dndAtom) { oldIndex = i; break; } ++i; } }
+		Atom* moved = dndAtom;
 		if (dndBefore) app->currentScene->ReparentBefore(dndAtom, dndBefore);
 		else           app->currentScene->Reparent(dndAtom, dndParent);
+		RecordReparent(moved, oldParent, oldIndex);
 	}
 	dndPending = false; dndAtom = dndBefore = dndParent = nullptr;
 	if (!dndAsset.empty())

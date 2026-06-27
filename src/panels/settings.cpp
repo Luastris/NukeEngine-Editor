@@ -13,6 +13,8 @@ void EditorUI::RegisterHotkeys()
 	hk->Register("editor.world.saveas", "Save World As",     ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_S, [this] { SaveWorldAsCmd(); });
 	hk->Register("editor.world.open", "Open Default World",   ImGuiMod_Ctrl | ImGuiKey_O,     [this] { OpenWorldCmd(startupWorld); });
 	hk->Register("editor.settings",   "Project Settings",     ImGuiMod_Ctrl | ImGuiKey_Comma, [this] { settingsOpen = true; });
+	hk->Register("editor.edit.undo",  "Undo",                 ImGuiMod_Ctrl | ImGuiKey_Z,     [this] { Undo(); });
+	hk->Register("editor.edit.redo",  "Redo",                 ImGuiMod_Ctrl | ImGuiKey_Y,     [this] { Redo(); });
 	// Context hotkeys: registered in the pool (rebindable, shown in settings, conflict-aware) but
 	// dispatched by the Browser only when it's hovered — so no global action (DispatchHotkeys skips
 	// null-action entries). Default to the mouse back/forward buttons (M4/M5).
@@ -43,7 +45,7 @@ void EditorUI::MenuHotkeyItem(const char* label, const char* id)
 	if (ImGui::MenuItem(label, sc) && h && h->action) h->action();
 }
 
-void EditorUI::NewWorldCmd() { AppInstance::GetSingleton()->NewWorld(); }
+void EditorUI::NewWorldCmd() { AppInstance::GetSingleton()->NewWorld(); ResetUndo(); }
 
 void EditorUI::SaveWorldCmd()
 {
@@ -58,6 +60,7 @@ void EditorUI::OpenWorldCmd(const std::string& relPath)
 {
 	if (relPath.empty()) return;
 	AppInstance::GetSingleton()->OpenWorld(relPath);
+	ResetUndo();
 }
 
 // Open the "Save World As" modal; default the folder to the one currently open in the browser.
@@ -141,6 +144,7 @@ void EditorUI::OpenWorldFromBrowser(const std::string& fullPath)
 	bfs::path rel = bfs::relative(bfs::path(fullPath), bfs::path(contentDir), ec);
 	std::string r = (!ec && !rel.empty()) ? rel.generic_string() : fullPath;
 	AppInstance::GetSingleton()->OpenWorld(r);
+	ResetUndo();
 }
 
 void EditorUI::winSettings()
@@ -168,7 +172,13 @@ void EditorUI::winSettings()
 		if (ImGui::BeginCombo("Default World", cur))
 		{
 			for (auto& w : worlds)
-				if (ImGui::Selectable(w.c_str(), w == startupWorld)) { startupWorld = w; SaveProject(); }
+				if (ImGui::Selectable(w.c_str(), w == startupWorld) && w != startupWorld)
+				{
+					std::string before = startupWorld, after = w;
+					startupWorld = after; SaveProject();
+					PushUndo("Default world", [this, before]{ startupWorld = before; SaveProject(); },
+					                          [this, after ]{ startupWorld = after;  SaveProject(); });
+				}
 			ImGui::EndCombo();
 		}
 

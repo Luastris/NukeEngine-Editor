@@ -102,6 +102,13 @@ private:
 	// Deferred reparent (applied AFTER the tree is drawn — mutating the lists mid-iteration corrupts it).
 	Atom* dndAtom = nullptr; Atom* dndBefore = nullptr; Atom* dndParent = nullptr; bool dndPending = false;
 	std::string dndAsset; Atom* dndAssetParent = nullptr;   // deferred: instantiate a browser asset (then parent)
+	// Undo/redo: a GENERIC command stack. Each undoable action pushes its OWN inverse closures, so it
+	// covers anything that changes — atom edits, spawns, reparenting, project/editor settings, paths —
+	// not just atoms. Atom edits are captured as a delta (the affected atom subtree's before/after
+	// JSON), never the whole world. Use PushUndo / RecordChange<T> at any mutation site.
+	struct UndoCmd { std::function<void()> undo, redo; std::string label; };
+	std::vector<UndoCmd> undoStack, redoStack;
+	std::string editBefore; long editAtomId = 0; bool editing = false;   // selected-atom edit detector
 	std::string rebindId;                          // hotkey id currently being rebound ("" = none)
 	bool        settingsOpen = false;              // Project Settings window open?
 	bool        openSaveAsPopup = false;           // request to open the "Save World As" modal
@@ -224,6 +231,19 @@ public:
 	void SpawnCamera();
 	void Toolbar();
 	void Draw();
+	// undo/redo (generic command stack)
+	void Undo();
+	void Redo();
+	void PushUndo(const std::string& label, std::function<void()> undoFn, std::function<void()> redoFn);
+	void TrackUndo();                  // detect a settled selected-atom edit (inspector/gizmo); not in PIE
+	void ResetUndo();                  // clear history (on world load / new)
+	void ApplyAtomState(long id, long parentId, int index, const std::string& json);   // undo primitive
+	void RecordAdd(Atom* a);                                       // an atom was created
+	void RecordReparent(Atom* a, long oldParent, int oldIndex);   // an atom moved in the hierarchy
+	void RecordFileMove(const std::string& from, const std::string& to);   // a file/folder was renamed or moved
+	// Generic value edit (settings, paths, flags…): records before/after of any comparable value.
+	template<class T> void RecordChange(const std::string& label, T* slot, const T& before, const T& after)
+	{ if (before == after) return; PushUndo(label, [slot, before]{ *slot = before; }, [slot, after]{ *slot = after; }); }
 };
 
 inline void editorinit() { EditorUI::getSingleton()->SetUp(); }

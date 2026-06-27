@@ -1,5 +1,33 @@
 // browser panel — EditorUI method definitions (translation unit).
 #include <editor/editorui.h>
+#include "API/Model/Material.h"   // regen GUIDs of copied assets
+#include "API/Model/Mesh.h"
+#include "API/Model/Texture.h"
+
+// Rename/move a file or folder on disk + keep ResDB's guid<->path in sync; a renamed .numat also
+// gets its internal name re-synced. One canonical operation so undo can replay it in either direction.
+static void DoFileMove(const std::string& from, const std::string& to)
+{
+	if (from == to) return;
+	boost::system::error_code ec;
+	bfs::rename(from, to, ec);
+	ResDB* db = ResDB::getSingleton();
+	db->MoveAssetPath(from, to);
+	if (bfs::path(to).extension() == ".numat")
+		if (Material* m = db->GetMaterial(db->GuidForPath(to)))
+		{
+			m->matName = bfs::path(to).stem().string();
+			m->SaveToFile(to);
+		}
+}
+
+void EditorUI::RecordFileMove(const std::string& from, const std::string& to)
+{
+	if (from == to) return;
+	PushUndo("Move " + bfs::path(to).filename().string(),
+		[from, to]{ DoFileMove(to, from); },
+		[from, to]{ DoFileMove(from, to); });
+}
 
 // Icon for a (lowercased) file extension.
 const char* EditorUI::ExtIcon(const std::string& ext)
@@ -63,6 +91,7 @@ Atom* EditorUI::InstantiatePrefab(const std::string& path)
 		AppInstance* app = AppInstance::GetSingleton();
 		app->currentScene->Add(a);
 		app->selectedInHieararchy = a;
+		RecordAdd(a);
 		cout << "[editor]\tinstantiated prefab " << path << endl;
 		return a;
 	}
@@ -143,16 +172,8 @@ void EditorUI::DrawRenamePopup()
 		{
 			if (src != dst)
 			{
-				bfs::rename(src, dst, ec);
-				ResDB* db = ResDB::getSingleton();
-				db->MoveAssetPath(src.string(), dst.string());   // keep guid<->path in sync
-				// Keep a material's internal name == its file name: rename + re-save the .numat.
-				if (renameExt == ".numat")
-					if (Material* m = db->GetMaterial(db->GuidForPath(dst.string())))
-					{
-						m->matName = dst.stem().string();
-						m->SaveToFile(dst.string());
-					}
+				DoFileMove(src.string(), dst.string());          // rename + ResDB sync + .numat name
+				RecordFileMove(src.string(), dst.string());      // undoable
 				if (browserSel == src.string()) browserSel = dst.string();
 			}
 			ImGui::CloseCurrentPopup();
@@ -237,6 +258,41 @@ static void CopyRecursive(const bfs::path& src, const bfs::path& dst, boost::sys
 	else bfs::copy_file(src, dst, ec);
 }
 
+// A freshly COPIED asset still carries the original's internal GUID — two files sharing one GUID
+// collide in ResDB on the next project load. Rewrite the copy's GUID on disk (and register the copy
+// live so it shows in pickers immediately). Worlds/prefabs have no ResDB-keyed GUID — left as-is.
+static void RegenAssetGuid(const bfs::path& file)
+{
+	std::string ext = file.extension().string();
+	for (char& c : ext) c = (char)tolower((unsigned char)c);
+	ResDB* db = ResDB::getSingleton();
+	const std::string p = file.string();
+	if (ext == ".numat")
+	{
+		if (Material* m = Material::LoadFromFile(p)) { m->guid = ResDB::NewGuid(); m->SaveToFile(p); db->RegisterMaterial(m); db->SetAssetPath(m->guid, p); }
+	}
+	else if (ext == ".numesh")
+	{
+		if (Mesh* m = Mesh::LoadFromFile(p)) { m->guid = ResDB::NewGuid(); m->SaveToFile(p); db->RegisterMesh(m); db->SetAssetPath(m->guid, p); }
+	}
+	else if (ext == ".nutex")
+	{
+		if (Texture* t = Texture::LoadFromFile(p)) { t->guid = ResDB::NewGuid(); t->SaveToFile(p); db->RegisterTexture(t); db->SetAssetPath(t->guid, p); }
+	}
+}
+
+// Regenerate GUIDs across a just-copied file or folder tree.
+static void RegenGuidsIn(const bfs::path& path)
+{
+	boost::system::error_code ec;
+	if (bfs::is_directory(path, ec))
+	{
+		for (bfs::recursive_directory_iterator it(path, ec), end; it != end && !ec; it.increment(ec))
+			if (!bfs::is_directory(it->path(), ec)) RegenAssetGuid(it->path());
+	}
+	else RegenAssetGuid(path);
+}
+
 // Paste the clipboard into the current folder. Cut = move (and clear the clipboard); copy = duplicate.
 void EditorUI::BrowserPaste()
 {
@@ -253,10 +309,11 @@ void EditorUI::BrowserPaste()
 		bfs::path dst = UniquePath(destDir / src.filename());
 		if (clipboardCut)
 		{
-			bfs::rename(src, dst, ec);
-			ResDB::getSingleton()->MoveAssetPath(src.string(), dst.string());
+			DoFileMove(srcStr, dst.string());
+			RecordFileMove(srcStr, dst.string());   // undoable (cut = move)
+			ec.clear();
 		}
-		else CopyRecursive(src, dst, ec);
+		else { CopyRecursive(src, dst, ec); if (!ec) RegenGuidsIn(dst); }   // a copy needs a fresh GUID
 		if (!ec) lastSel = dst.string();
 	}
 	if (!lastSel.empty()) browserSel = lastSel;
@@ -277,9 +334,8 @@ void EditorUI::BrowserFolderDropTarget(const std::string& folderPath)
 		if (src.parent_path() != dstDir && !intoSelf)
 		{
 			bfs::path dst = UniquePath(dstDir / src.filename());   // never clobber a same-named entry
-			boost::system::error_code ec;
-			bfs::rename(src, dst, ec);
-			ResDB::getSingleton()->MoveAssetPath(src.string(), dst.string());   // keep guid<->path in sync
+			DoFileMove(srcStr, dst.string());
+			RecordFileMove(srcStr, dst.string());                  // undoable
 			if (browserSel == srcStr) browserSel = dst.string();
 		}
 	}
@@ -319,6 +375,7 @@ Atom* EditorUI::SpawnMeshAsset(const std::string& path)
 	mr->meshGuid = m->guid; mr->mesh = m;
 	AppInstance::GetSingleton()->currentScene->Add(go);
 	AppInstance::GetSingleton()->selectedInHieararchy = go;
+	RecordAdd(go);
 	return go;
 }
 
