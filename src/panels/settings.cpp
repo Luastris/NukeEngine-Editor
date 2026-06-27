@@ -18,6 +18,9 @@ void EditorUI::RegisterHotkeys()
 	// null-action entries). Default to the mouse back/forward buttons (M4/M5).
 	hk->Register("editor.browser.back",    "Browser: Back",    ImGuiKey_MouseX1, nullptr);
 	hk->Register("editor.browser.forward", "Browser: Forward", ImGuiKey_MouseX2, nullptr);
+	hk->Register("editor.browser.cut",     "Browser: Cut",     ImGuiMod_Ctrl | ImGuiKey_X, nullptr);
+	hk->Register("editor.browser.copy",    "Browser: Copy",    ImGuiMod_Ctrl | ImGuiKey_C, nullptr);
+	hk->Register("editor.browser.paste",   "Browser: Paste",   ImGuiMod_Ctrl | ImGuiKey_V, nullptr);
 }
 
 // Fire bound hotkeys whose chord is pressed this frame. Each chord maps to exactly one bound hotkey

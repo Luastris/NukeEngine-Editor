@@ -101,6 +101,10 @@ void EditorUI::EntryContextMenu(const std::string& path, bool isDir)
 			}
 			ImGui::Separator();
 		}
+		if (ImGui::MenuItem(ICON_LC_SCISSORS " Cut",  "Ctrl+X"))  { clipboard = { path }; clipboardCut = true;  }
+		if (ImGui::MenuItem(ICON_LC_COPY " Copy",     "Ctrl+C"))  { clipboard = { path }; clipboardCut = false; }
+		if (ImGui::MenuItem(ICON_LC_CLIPBOARD_PASTE " Paste", "Ctrl+V", false, !clipboard.empty())) BrowserPaste();
+		ImGui::Separator();
 		if (ImGui::MenuItem(ICON_LC_PENCIL " Rename")) StartRename(path);
 		if (ImGui::MenuItem(ICON_LC_TRASH_2 " Delete"))
 		{
@@ -219,6 +223,44 @@ void EditorUI::SaveAtomAsPrefab(Atom* a, const std::string& folder)
 		browserSel = path.string();
 		cout << "[editor]\tsaved prefab " << path.string() << endl;
 	}
+}
+
+// Recursively copy a file or a whole folder tree (dst must not already exist — callers use UniquePath).
+static void CopyRecursive(const bfs::path& src, const bfs::path& dst, boost::system::error_code& ec)
+{
+	if (bfs::is_directory(src))
+	{
+		bfs::create_directories(dst, ec);
+		for (bfs::directory_iterator it(src, ec), end; it != end && !ec; it.increment(ec))
+			CopyRecursive(it->path(), dst / it->path().filename(), ec);
+	}
+	else bfs::copy_file(src, dst, ec);
+}
+
+// Paste the clipboard into the current folder. Cut = move (and clear the clipboard); copy = duplicate.
+void EditorUI::BrowserPaste()
+{
+	if (clipboard.empty()) return;
+	bfs::path destDir(browserCwd.empty() ? contentDir : browserCwd);
+	std::string lastSel;
+	for (const std::string& srcStr : clipboard)
+	{
+		bfs::path src(srcStr);
+		boost::system::error_code ec;
+		if (!bfs::exists(src, ec)) continue;
+		// Don't paste a folder into itself or its own subtree.
+		if (bfs::is_directory(src, ec) && destDir.string().rfind(src.string(), 0) == 0) continue;
+		bfs::path dst = UniquePath(destDir / src.filename());
+		if (clipboardCut)
+		{
+			bfs::rename(src, dst, ec);
+			ResDB::getSingleton()->MoveAssetPath(src.string(), dst.string());
+		}
+		else CopyRecursive(src, dst, ec);
+		if (!ec) lastSel = dst.string();
+	}
+	if (!lastSel.empty()) browserSel = lastSel;
+	if (clipboardCut) clipboard.clear();   // a cut is one-shot
 }
 
 // Make the last-drawn item (a folder) a drop target: move a dragged file/folder into it, or save a
@@ -351,6 +393,15 @@ void EditorUI::winBrowser()
 		nuke::Hotkey* f = hk->Find("editor.browser.forward");
 		if (b && b->bound && ImGui::IsKeyChordPressed((ImGuiKeyChord)b->chord)) BrowserBack();
 		if (f && f->bound && ImGui::IsKeyChordPressed((ImGuiKeyChord)f->chord)) BrowserForward();
+
+		// Clipboard (don't steal keys while typing in the search/rename fields).
+		if (!ImGui::GetIO().WantTextInput)
+		{
+			auto chord = [&](const char* id) { nuke::Hotkey* h = hk->Find(id); return h && h->bound && ImGui::IsKeyChordPressed((ImGuiKeyChord)h->chord); };
+			if (chord("editor.browser.cut")   && !browserSel.empty()) { clipboard = { browserSel }; clipboardCut = true;  }
+			if (chord("editor.browser.copy")  && !browserSel.empty()) { clipboard = { browserSel }; clipboardCut = false; }
+			if (chord("editor.browser.paste")) BrowserPaste();
+		}
 	}
 
 	// --- toolbar: view mode | search | filters ---
@@ -491,6 +542,17 @@ void EditorUI::winBrowser()
 		float cell = 84.0f, availW = ImGui::GetContentRegionAvail().x;
 		int per = (int)(availW / cell); if (per < 1) per = 1;
 		int i = 0;
+		if (!atRoot)   // ".." cell: click = go up, drop a file here = move it up one level
+		{
+			ImGui::PushID("up");
+			ImGui::BeginGroup();
+			if (ImGui::Button(ICON_LC_CORNER_LEFT_UP "##upcell", ImVec2(64, 64))) BrowserNavigate(cwd.parent_path().string());
+			BrowserFolderDropTarget(cwd.parent_path().string());
+			ImGui::TextUnformatted("..");
+			ImGui::EndGroup();
+			ImGui::PopID();
+			if (++i % per != 0) ImGui::SameLine();
+		}
 		for (FEntry& e : entries)
 		{
 			ImGui::PushID(i);
@@ -519,6 +581,12 @@ void EditorUI::winBrowser()
 	else                             // List
 	{
 		int i = 0;
+		if (!atRoot)   // ".." row: DOUBLE-click = go up (same as every other row), drop a file here = move it up
+		{
+			bool upc = ImGui::Selectable(ICON_LC_CORNER_LEFT_UP "  ..", false, ImGuiSelectableFlags_AllowDoubleClick);
+			BrowserFolderDropTarget(cwd.parent_path().string());
+			if (upc && ImGui::IsMouseDoubleClicked(0)) BrowserNavigate(cwd.parent_path().string());
+		}
 		for (FEntry& e : entries)
 		{
 			ImGui::PushID(i++);

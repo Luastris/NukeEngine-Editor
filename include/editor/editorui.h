@@ -89,6 +89,8 @@ private:
 	std::string browserCwd;                        // current folder shown in the browser
 	std::string browserSel;                        // selected entry (full path; "" = none)
 	std::vector<std::string> browserBack, browserFwd;   // folder navigation history (M4=back, M5=forward)
+	std::vector<std::string> clipboard;            // browser cut/copy buffer (full paths)
+	bool        clipboardCut = false;              // true: paste MOVES (cut); false: paste COPIES
 	std::string renamePath;                        // browser: full path being renamed ("" = none)
 	char        renameBuf[256] = "";               // edited NAME (without extension)
 	std::string renameExt;                         // locked extension (kept as-is; "" for folders)
@@ -203,6 +205,7 @@ public:
 	void BrowserDragSource(const std::string& path);
 	void BrowserFolderDropTarget(const std::string& folderPath);
 	void SaveAtomAsPrefab(Atom* a, const std::string& folder);   // drag an atom into the browser -> .nuprefab
+	void BrowserPaste();                                          // paste the clipboard into the current folder (cut=move, copy=duplicate)
 	void AcceptAssetDropTarget();                    // viewport/hierarchy: accept an asset drop
 	Atom* DropAsset(const std::string& path);        // instantiate by extension; returns the new atom (or null)
 	Atom* SpawnMeshAsset(const std::string& path);   // .numesh -> new Atom + MeshRenderer
