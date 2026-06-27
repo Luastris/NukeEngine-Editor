@@ -51,7 +51,8 @@ void EditorUI::FocusSelected()
 	double half = (double)editorCam->fov * 0.5 * 0.01745329252;
 	double dist = radius / std::max(0.05, std::tan(half)) + radius * 2.0;
 	Transform* c = editorCam->transform;
-	c->position = target - c->direction() * dist;   // keep orientation, look at the target
+	camFocusTarget = target - c->direction() * dist;   // keep orientation, look at the target
+	camFocusing    = true;                              // smoothly lerp there (see winRender)
 }
 
 // A thin "insert before" zone overlaid on the TOP EDGE of the row just drawn. Only appears while an

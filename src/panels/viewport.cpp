@@ -1,10 +1,26 @@
 // viewport panel — EditorUI method definitions (translation unit).
 #include <editor/editorui.h>
+#include "API/Model/Math.h"
+#include <cmath>
 
 void EditorUI::winRender()
 {
 	if (!win->render) return;
 	ImGui::Begin("Render", &win->render, window_flags);
+
+	// Smooth "focus selected": ease the editor camera toward the target each frame (orientation kept).
+	if (camFocusing && editorCam && editorCam->transform)
+	{
+		ImGuiIO& fio = ImGui::GetIO();
+		if (ImGui::IsMouseDown(ImGuiMouseButton_Right) || ImGui::IsMouseDown(ImGuiMouseButton_Middle) || fio.MouseWheel != 0.0f)
+			camFocusing = false;                       // any manual camera input cancels the fly-to
+		else
+		{
+			Transform* c = editorCam->transform;
+			if ((camFocusTarget - c->position).abs() < 1e-3) { c->position = camFocusTarget; camFocusing = false; }
+			else c->position = Math::Lerp(c->position, camFocusTarget, 1.0 - std::exp(-12.0 * fio.DeltaTime));   // frame-rate-independent ease
+		}
+	}
 
 	// Hotkeys (when focused, not typing, and NOT flying with RMB): Q/W/E/R = tools, X = World/Local.
 	if (ImGui::IsWindowFocused() && !ImGui::GetIO().WantTextInput && !ImGui::IsMouseDown(ImGuiMouseButton_Right))
@@ -171,13 +187,17 @@ void EditorUI::winRender()
 					AppInstance::GetSingleton()->currentScene->Pick(o, dir);
 			}
 
-			// Sync the orbit angles from the camera when the drag STARTS — otherwise the first
-			// rotation after a load (camYaw/camPitch stale) snaps the camera to a bogus angle.
+			// Sync the orbit angles from the camera when the drag STARTS. Derive them from the FORWARD
+			// vector (unambiguous) — NOT EulerDeg(), whose quat->euler recompute after a load uses a
+			// different order/range and drops roll, which made the first rotation snap to a bogus angle.
 			if (ImGui::IsMouseClicked(ImGuiMouseButton_Right))
 			{
-				Vector3 e = t->EulerDeg();
-				camPitch = (float)e.x * 0.01745329252f;
-				camYaw   = (float)e.y * 0.01745329252f;
+				Vector3 f = t->direction();
+				double len = std::sqrt(f.x * f.x + f.y * f.y + f.z * f.z);
+				if (len > 1e-6) { f.x /= len; f.y /= len; f.z /= len; }
+				double py = f.y; if (py > 1.0) py = 1.0; if (py < -1.0) py = -1.0;
+				camPitch = (float)std::asin(-py);          // forward = (cosP sinY, -sinP, cosP cosY)
+				camYaw   = (float)std::atan2(f.x, f.z);
 			}
 			if (ImGui::IsMouseDragging(ImGuiMouseButton_Right))
 			{

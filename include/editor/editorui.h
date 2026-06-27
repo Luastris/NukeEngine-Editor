@@ -106,6 +106,8 @@ private:
 	std::string pendingDisk;                        // disk JSON awaiting a reload/conflict decision
 	bool        openReloadPopup = false, openConflictPopup = false;
 	bool        wasWindowFocused = true;            // disk re-check fires on focus-gain (avoids mid-write triggers)
+	Vector3     camFocusTarget;                      // smooth "focus selected": target editor-cam position
+	bool        camFocusing = false;
 	bool        mergeOpen = false;                  // merge/resolve window visible
 	std::shared_ptr<void> mergeState;               // opaque diff tree (built in panels/merge.cpp)
 	std::string renamePath;                        // browser: full path being renamed ("" = none)

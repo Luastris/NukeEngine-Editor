@@ -669,6 +669,7 @@ void EditorUI::winBrowser()
 	if (browserView == 3)
 	{
 		ImGui::Separator();
+		ImGui::BeginChild("##browserfiles");   // only the list scrolls; toolbar stays pinned
 		ResDB* db = ResDB::getSingleton();
 		if (ImGui::CollapsingHeader("Meshes", ImGuiTreeNodeFlags_DefaultOpen))
 			for (Mesh* m : db->meshes) if (m) ImGui::BulletText("%s  (%s)", m->name, m->guid.c_str());
@@ -676,6 +677,7 @@ void EditorUI::winBrowser()
 		if (ImGui::CollapsingHeader("Textures"))  ImGui::Text("%d texture(s)", (int)db->textures.size());
 		if (ImGui::CollapsingHeader("Prefabs"))
 			for (Atom* p : db->prefabs) if (p) ImGui::BulletText("%s", p->GetName().c_str());
+		ImGui::EndChild();
 		ImGui::End();
 		return;
 	}
@@ -714,7 +716,9 @@ void EditorUI::winBrowser()
 
 	if (browserView == 2)   // Tree (recursive folders from the content root)
 	{
+		ImGui::BeginChild("##browserfiles");   // only the tree scrolls
 		BrowserTree(root.string());
+		ImGui::EndChild();
 		ImGui::End();
 		return;
 	}
@@ -766,6 +770,8 @@ void EditorUI::winBrowser()
 		boost::system::error_code dec;
 		return bfs::weakly_canonical(bfs::path(e.path), dec).generic_string() == dirtyWorld;
 	};
+
+	ImGui::BeginChild("##browserfiles");   // pin the toolbar + path bar; only the file list scrolls
 
 	if (browserView == 0)            // Tiles
 	{
@@ -850,5 +856,6 @@ void EditorUI::winBrowser()
 			SaveAtomAsPrefab(*(Atom**)p->Data, browserCwd.empty() ? contentDir : browserCwd);
 		ImGui::EndDragDropTarget();
 	}
+	ImGui::EndChild();   // end the scrolling file list
 	ImGui::End();
 }
