@@ -364,6 +364,23 @@ void EditorUI::ResetToPrefab(Atom* a)
 		[this, id, parent, index, after ]{ ApplyAtomState(id, parent, index, after ); });
 }
 
+// Remove a component from an atom, undoable (captures the atom subtree before/after as one delta).
+void EditorUI::RemoveComponent(Atom* a, Component* c)
+{
+	if (!a || !c) return;
+	World* w = AppInstance::GetSingleton()->currentScene;
+	long id = a->id.id, parent = a->parent ? a->parent->id.id : 0;
+	int index = 0; { auto& lst = a->parent ? a->parent->children : w->GetHierarchy(); int i = 0; for (Atom* s : lst) { if (s == a) { index = i; break; } ++i; } }
+	std::string before = nuke::SaveAtomToString(a);
+	a->components.remove(c);   // edit-time removal: NOT Destroy() — that's the runtime/teardown hook
+	delete c;
+	std::string after = nuke::SaveAtomToString(a);
+	editing = false; editAtomId = 0;   // suppress the auto edit-detector (this is its own command)
+	PushUndo("Remove component",
+		[this, id, parent, index, before]{ ApplyAtomState(id, parent, index, before); },
+		[this, id, parent, index, after ]{ ApplyAtomState(id, parent, index, after ); });
+}
+
 void EditorUI::winInspector()
 {
 	if (!win->inspector) return;
@@ -433,6 +450,9 @@ void EditorUI::winInspector()
 				ImGui::SetNextItemOpen(st);
 				std::string hdr = uc ? (label + "  (plugin not loaded)") : label;
 				st = ImGui::CollapsingHeader(hdr.c_str());
+				ImGui::SameLine(ImGui::GetContentRegionMax().x - 22);   // remove (undoable)
+				if (ImGui::SmallButton(ICON_LC_X "##delcomp")) { pendingCompAtom = sltd; pendingCompDel = cmp; }
+				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remove component");
 				if (st)
 				{
 					if (uc)
@@ -464,6 +484,9 @@ void EditorUI::winInspector()
 				ImGui::PopID();
 			}
 		}
+
+		// Apply a deferred component removal now that the component loop is done (can't mutate mid-iterate).
+		if (pendingCompDel) { RemoveComponent(pendingCompAtom, pendingCompDel); pendingCompDel = nullptr; pendingCompAtom = nullptr; }
 
 		// Add any registered, create-able Component type (incl. ones added by plugins).
 		ImGui::Separator();

@@ -126,6 +126,7 @@ private:
 	struct UndoCmd { std::function<void()> undo, redo; std::string label; };
 	std::vector<UndoCmd> undoStack, redoStack;
 	std::string editBefore; long editAtomId = 0; bool editing = false;   // selected-atom edit detector
+	Atom* pendingCompAtom = nullptr; Component* pendingCompDel = nullptr;   // deferred component removal
 	std::string rebindId;                          // hotkey id currently being rebound ("" = none)
 	bool        settingsOpen = false;              // Project Settings window open?
 	bool        openSaveAsPopup = false;           // request to open the "Save World As" modal
@@ -279,6 +280,7 @@ public:
 	void RecordReparent(Atom* a, long oldParent, int oldIndex);   // an atom moved in the hierarchy
 	void RecordDelete(Atom* a);                                   // an atom was deleted
 	void DeleteSelectedAtom();                                    // hierarchy: delete the selected atom (undoable)
+	void RemoveComponent(Atom* a, Component* c);                  // inspector: remove a component (undoable)
 	void RecordFileMove(const std::string& from, const std::string& to);   // a file/folder was renamed or moved
 	// Generic value edit (settings, paths, flags…): records before/after of any comparable value.
 	template<class T> void RecordChange(const std::string& label, T* slot, const T& before, const T& after)
