@@ -105,6 +105,9 @@ private:
 	int         conflictMode    = 0;               // disk changed, editor dirty: 0=ask,1=reload,2=overwrite,3=merge
 	std::string pendingDisk;                        // disk JSON awaiting a reload/conflict decision
 	bool        openReloadPopup = false, openConflictPopup = false;
+	bool        wasWindowFocused = true;            // disk re-check fires on focus-gain (avoids mid-write triggers)
+	bool        mergeOpen = false;                  // merge/resolve window visible
+	std::shared_ptr<void> mergeState;               // opaque diff tree (built in panels/merge.cpp)
 	std::string renamePath;                        // browser: full path being renamed ("" = none)
 	char        renameBuf[256] = "";               // edited NAME (without extension)
 	std::string renameExt;                         // locked extension (kept as-is; "" for folders)
@@ -244,6 +247,9 @@ public:
 	void OverwriteWorld();           // save editor state over disk + reset baseline
 	void DrawReloadPopup();          // "changed on disk (editor clean): reload?"
 	void DrawConflictPopup();        // "changed on disk AND in editor: reload / overwrite / merge / ignore"
+	// Merge/resolve window: hierarchical per-object/param diff of editor vs disk, pick a side per node.
+	void OpenMerge(const std::string& editorJson, const std::string& diskJson);
+	void DrawMergeWindow();
 	void AcceptAssetDropTarget();                    // viewport/hierarchy: accept an asset drop
 	Atom* DropAsset(const std::string& path);        // instantiate by extension; returns the new atom (or null)
 	Atom* SpawnMeshAsset(const std::string& path);   // .numesh -> new Atom + MeshRenderer

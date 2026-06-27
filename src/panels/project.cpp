@@ -126,17 +126,26 @@ void EditorUI::OverwriteWorld()
 
 void EditorUI::TrackExternalChange()
 {
-	if ((++extTick % 30) != 0) return;
-	if (openReloadPopup || openConflictPopup) return;   // already prompting
+	// Re-check ONLY when the editor window regains focus — so a file mid-write (while you're in the
+	// other program) never triggers; by the time you tab back it's done. Cross-platform via GLFW focus.
 	AppInstance* app = AppInstance::GetSingleton();
+	bool focused = !app->render || app->render->isWindowFocused();
+	bool gained  = focused && !wasWindowFocused;
+	wasWindowFocused = focused;
+	if (!gained) return;
+	if (openReloadPopup || openConflictPopup) return;   // already prompting
 	if (app->currentWorldPath.empty()) return;
 	std::string full = app->WorldFullPath(app->currentWorldPath);
 	boost::system::error_code ec;
 	if (!bfs::exists(full, ec)) return;
 	long long mt = (long long)bfs::last_write_time(full, ec);
 	if (ec || mt == worldMtime) return;                 // unchanged since we last looked
-	std::string disk = Canon(ReadFileText(full));
-	worldMtime = mt;                                    // record so we don't re-trigger every check
+	// Stability gate: if the file doesn't parse as valid JSON it's still being written / locked —
+	// leave worldMtime untouched so we retry on the next focus-gain.
+	nlohmann::json pj = nlohmann::json::parse(ReadFileText(full), nullptr, false);
+	if (pj.is_discarded()) return;
+	std::string disk = pj.dump();
+	worldMtime = mt;                                    // record so we don't re-trigger
 	if (disk == worldOnDisk) return;                   // same content (e.g. our own save)
 	bool dirty = app->currentScene->SaveToString() != worldOnDisk;
 	if (!dirty)
@@ -148,9 +157,10 @@ void EditorUI::TrackExternalChange()
 	{
 		switch (conflictMode)
 		{
-			case 1: ReloadWorld(disk); break;        // ignore editor, reload from disk
-			case 2: OverwriteWorld();  break;        // ignore disk, overwrite from editor
-			default: pendingDisk = disk; openConflictPopup = true; break;   // 0=ask, 3=merge(TODO) -> prompt
+			case 1: ReloadWorld(disk); break;                                  // ignore editor, reload from disk
+			case 2: OverwriteWorld();  break;                                  // ignore disk, overwrite from editor
+			case 3: OpenMerge(app->currentScene->SaveToString(), disk); break; // merge/resolve window
+			default: pendingDisk = disk; openConflictPopup = true; break;      // 0 = ask
 		}
 	}
 }
@@ -181,10 +191,11 @@ void EditorUI::DrawConflictPopup()
 		ImGui::Separator();
 		if (ImGui::Button("Reload (lose editor changes)"))  { ReloadWorld(pendingDisk); pendingDisk.clear(); ImGui::CloseCurrentPopup(); }
 		if (ImGui::Button("Overwrite (lose disk changes)")) { OverwriteWorld();          pendingDisk.clear(); ImGui::CloseCurrentPopup(); }
-		ImGui::BeginDisabled(true);
-		ImGui::Button("Merge…");   // resolve window — next pass
-		ImGui::EndDisabled();
-		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Merge/resolve window — coming next");
+		if (ImGui::Button("Merge…"))   // open the resolve window
+		{
+			OpenMerge(AppInstance::GetSingleton()->currentScene->SaveToString(), pendingDisk);
+			pendingDisk.clear(); ImGui::CloseCurrentPopup();
+		}
 		if (ImGui::Button("Ignore")) { pendingDisk.clear(); ImGui::CloseCurrentPopup(); }
 		ImGui::EndPopup();
 	}

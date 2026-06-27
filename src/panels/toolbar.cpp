@@ -168,6 +168,7 @@ void EditorUI::Draw()
 	TrackExternalChange();// detect a disk edit of the open world
 	DrawReloadPopup();    // disk changed (editor clean) -> reload?
 	DrawConflictPopup();  // disk changed + editor dirty -> reload/overwrite/merge/ignore
+	DrawMergeWindow();    // the resolve window
 	DispatchHotkeys();    // fire any pressed hotkey chord (after the UI, so fields take input first)
 
 	// Apply queued plugin toggles AFTER the window loop: DisablePlugin()'s Shutdown may

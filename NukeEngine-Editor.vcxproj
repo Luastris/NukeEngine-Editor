@@ -187,6 +187,7 @@ xcopy "$(SolutionDir)shaders" "$(OutDir)shaders\" /s /e /i /y /d</Command>
     <ClCompile Include="src\panels\plugins.cpp" />
     <ClCompile Include="src\panels\settings.cpp" />
     <ClCompile Include="src\panels\toolbar.cpp" />
+    <ClCompile Include="src\panels\merge.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="include\editor\editorui.h" />
