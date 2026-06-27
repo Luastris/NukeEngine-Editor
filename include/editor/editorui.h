@@ -95,6 +95,16 @@ private:
 	bool        openDeletePopup = false;           // request to open the delete-confirm modal next frame
 	std::vector<std::string> deleteDeps;           // resources depending on pendingDelete (shown in the modal)
 	bool        unlinkOnDelete = false;            // project setting: break refs to a deleted resource
+	// Disk<->editor sync of the open world. worldOnDisk = canonical JSON of the last loaded/saved state
+	// (dirty baseline + the on-disk reference); worldDirty drives the "*" in the title + browser.
+	std::string worldOnDisk;
+	bool        worldDirty = false;
+	long long   worldMtime = 0;                    // last-known disk mtime of the world file
+	int         dirtyTick = 0, extTick = 0;        // throttles
+	int         reloadCleanMode = 0;               // disk changed, editor clean: 0=ask, 1=auto-reload
+	int         conflictMode    = 0;               // disk changed, editor dirty: 0=ask,1=reload,2=overwrite,3=merge
+	std::string pendingDisk;                        // disk JSON awaiting a reload/conflict decision
+	bool        openReloadPopup = false, openConflictPopup = false;
 	std::string renamePath;                        // browser: full path being renamed ("" = none)
 	char        renameBuf[256] = "";               // edited NAME (without extension)
 	std::string renameExt;                         // locked extension (kept as-is; "" for folders)
@@ -226,6 +236,14 @@ public:
 	std::vector<std::string> FindDependents(const std::string& guid);   // content files referencing a guid
 	void UnlinkResource(const std::string& guid);                // reset refs to a guid -> defaults (all worlds/assets)
 	void UpdateWindowTitle();                                     // "NukeEngine Editor — <project> — <world>"
+	// Disk<->editor world sync.
+	void SyncWorldBaseline();        // call after open/new/save: snapshot the on-disk state + clear dirty
+	void TrackDirty();               // per-frame: recompute worldDirty, refresh title on change
+	void TrackExternalChange();      // per-frame: detect a disk edit of the open world + act per settings
+	void ReloadWorld(const std::string& diskJson);   // load disk content, reset baseline + undo
+	void OverwriteWorld();           // save editor state over disk + reset baseline
+	void DrawReloadPopup();          // "changed on disk (editor clean): reload?"
+	void DrawConflictPopup();        // "changed on disk AND in editor: reload / overwrite / merge / ignore"
 	void AcceptAssetDropTarget();                    // viewport/hierarchy: accept an asset drop
 	Atom* DropAsset(const std::string& path);        // instantiate by extension; returns the new atom (or null)
 	Atom* SpawnMeshAsset(const std::string& path);   // .numesh -> new Atom + MeshRenderer

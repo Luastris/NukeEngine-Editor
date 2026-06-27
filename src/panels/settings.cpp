@@ -47,7 +47,7 @@ void EditorUI::MenuHotkeyItem(const char* label, const char* id)
 	if (ImGui::MenuItem(label, sc) && h && h->action) h->action();
 }
 
-void EditorUI::NewWorldCmd() { AppInstance::GetSingleton()->NewWorld(); ResetUndo(); UpdateWindowTitle(); }
+void EditorUI::NewWorldCmd() { AppInstance::GetSingleton()->NewWorld(); ResetUndo(); SyncWorldBaseline(); }
 
 void EditorUI::SaveWorldCmd()
 {
@@ -56,6 +56,7 @@ void EditorUI::SaveWorldCmd()
 	                 : (!startupWorld.empty() ? startupWorld : std::string("world.nuworld"));
 	app->SaveWorld(path);                                // writes into the project content
 	if (startupWorld.empty()) { startupWorld = path; SaveProject(); }   // first world becomes the default
+	SyncWorldBaseline();   // saved == disk now
 }
 
 void EditorUI::OpenWorldCmd(const std::string& relPath)
@@ -63,7 +64,7 @@ void EditorUI::OpenWorldCmd(const std::string& relPath)
 	if (relPath.empty()) return;
 	AppInstance::GetSingleton()->OpenWorld(relPath);
 	ResetUndo();
-	UpdateWindowTitle();
+	SyncWorldBaseline();
 }
 
 // Open the "Save World As" modal; default the folder to the one currently open in the browser.
@@ -131,7 +132,7 @@ void EditorUI::DrawSaveAsPopup()
 		if (ImGui::Button(label, ImVec2(120, 0)) || (enter && !exists && !empty))
 		{
 			AppInstance::GetSingleton()->SaveWorld(rel);   // forced into project content
-			UpdateWindowTitle();   // path may have changed
+			SyncWorldBaseline();   // saved == disk; path may have changed
 			ImGui::CloseCurrentPopup();
 		}
 		ImGui::EndDisabled();
@@ -149,7 +150,7 @@ void EditorUI::OpenWorldFromBrowser(const std::string& fullPath)
 	std::string r = (!ec && !rel.empty()) ? rel.generic_string() : fullPath;
 	AppInstance::GetSingleton()->OpenWorld(r);
 	ResetUndo();
-	UpdateWindowTitle();
+	SyncWorldBaseline();
 }
 
 void EditorUI::winSettings()
@@ -186,6 +187,12 @@ void EditorUI::winSettings()
 				}
 			ImGui::EndCombo();
 		}
+
+		ImGui::SeparatorText("Disk sync");
+		const char* cleanModes[] = { "Ask", "Auto-reload" };
+		if (ImGui::Combo("Disk changed (editor clean)", &reloadCleanMode, cleanModes, IM_ARRAYSIZE(cleanModes))) SaveProject();
+		const char* conflModes[] = { "Ask", "Reload (use disk)", "Overwrite (use editor)", "Merge / resolve" };
+		if (ImGui::Combo("Disk changed (editor dirty)", &conflictMode, conflModes, IM_ARRAYSIZE(conflModes))) SaveProject();
 
 		// --- Hotkeys (centralized pool: rebind, see conflicts) ---
 		ImGui::SeparatorText("Hotkeys");

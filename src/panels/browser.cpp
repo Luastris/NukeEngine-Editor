@@ -754,6 +754,19 @@ void EditorUI::winBrowser()
 		return a.name < b.name;
 	});
 
+	// The open world gets a "*" when it differs from disk (unsaved editor changes).
+	std::string dirtyWorld;
+	if (worldDirty && !AppInstance::GetSingleton()->currentWorldPath.empty())
+	{
+		boost::system::error_code dec;
+		dirtyWorld = bfs::weakly_canonical(bfs::path(AppInstance::GetSingleton()->WorldFullPath(AppInstance::GetSingleton()->currentWorldPath)), dec).generic_string();
+	}
+	auto isDirty = [&](const FEntry& e) {
+		if (dirtyWorld.empty() || e.ext != ".nuworld") return false;
+		boost::system::error_code dec;
+		return bfs::weakly_canonical(bfs::path(e.path), dec).generic_string() == dirtyWorld;
+	};
+
 	if (browserView == 0)            // Tiles
 	{
 		float cell = 84.0f, availW = ImGui::GetContentRegionAvail().x;
@@ -788,7 +801,8 @@ void EditorUI::winBrowser()
 				else if (e.ext == ".nuworld")  OpenWorldFromBrowser(e.path);
 			}
 			EntryContextMenu(e.path, e.isDir);   // right-click: Rename / Delete
-			char nm[24]; snprintf(nm, sizeof(nm), "%.20s", e.name.c_str());
+			std::string disp = isDirty(e) ? e.name + " *" : e.name;
+			char nm[28]; snprintf(nm, sizeof(nm), "%.24s", disp.c_str());
 			ImGui::TextUnformatted(nm);
 			ImGui::EndGroup();
 			ImGui::PopID();
@@ -807,8 +821,8 @@ void EditorUI::winBrowser()
 		for (FEntry& e : entries)
 		{
 			ImGui::PushID(i++);
-			bool clicked = ImGui::Selectable((std::string(e.icon) + "  " + e.name).c_str(),
-			                                 e.path == browserSel, ImGuiSelectableFlags_AllowDoubleClick);
+			std::string lbl = std::string(e.icon) + "  " + e.name + (isDirty(e) ? " *" : "");
+			bool clicked = ImGui::Selectable(lbl.c_str(), e.path == browserSel, ImGuiSelectableFlags_AllowDoubleClick);
 			BrowserDragSource(e.path);                       // drag this entry
 			if (e.isDir) BrowserFolderDropTarget(e.path);    // drop a file onto this folder = move
 			if (clicked)

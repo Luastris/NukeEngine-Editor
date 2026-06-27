@@ -1,5 +1,6 @@
 // project panel — EditorUI method definitions (translation unit).
 #include <editor/editorui.h>
+#include <iterator>   // istreambuf_iterator (read world file for disk-sync)
 
 // The project manifest (project/game.nuproj): content dir, startup world, plugin load list.
 // Projects have a file (like .sln/.uproject); this is ours, extension .nuproj. The plugin
@@ -20,6 +21,8 @@ void EditorUI::SaveProject()
 	j["content"]      = "content";          // relative to the project dir
 	j["startupWorld"] = startupWorld;        // the default world the game loads
 	j["unlinkOnDelete"] = unlinkOnDelete;   // break refs to a deleted resource (vs leave dangling)
+	j["reloadCleanMode"] = reloadCleanMode; // disk changed, editor clean: 0=ask,1=auto-reload
+	j["conflictMode"]    = conflictMode;    // disk changed, editor dirty: 0=ask,1=reload,2=overwrite,3=merge
 	j["plugins"]      = enabledPlugins;     // which pooled plugins this project loads
 	nlohmann::json hk = nlohmann::json::object();   // hotkey bindings (id -> chord), saved with the project
 	for (auto& kv : nuke::Hotkeys::Get()->ExportBindings()) hk[kv.first] = kv.second;
@@ -36,6 +39,8 @@ void EditorUI::LoadProject()
 	if (j.is_discarded()) return;
 	startupWorld   = j.value("startupWorld", startupWorld);
 	unlinkOnDelete = j.value("unlinkOnDelete", false);
+	reloadCleanMode = j.value("reloadCleanMode", 0);
+	conflictMode    = j.value("conflictMode", 0);
 	contentDir   = projectDir + "/" + j.value("content", std::string("content"));
 	enabledPlugins.clear();
 	if (j.contains("plugins") && j["plugins"].is_array())
@@ -59,7 +64,130 @@ void EditorUI::UpdateWindowTitle()
 	if (proj.empty()) proj = "Untitled";
 	std::string title = "NukeEngine Editor - " + proj;
 	if (!app->currentWorldPath.empty()) title += " - " + bfs::path(app->currentWorldPath).stem().string();
+	if (worldDirty) title += " *";   // unsaved editor changes
 	app->render->setWindowTitle(title.c_str());
+}
+
+// --- disk <-> editor world sync ---------------------------------------------------------------
+static std::string ReadFileText(const std::string& path)
+{
+	bfs::ifstream f{bfs::path(path)};
+	if (!f) return std::string();
+	return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+}
+// Canonical JSON (parse + re-dump) so formatting/indent differences don't read as "changed".
+static std::string Canon(const std::string& s)
+{
+	nlohmann::json j = nlohmann::json::parse(s, nullptr, false);
+	return j.is_discarded() ? s : j.dump();
+}
+
+void EditorUI::SyncWorldBaseline()
+{
+	AppInstance* app = AppInstance::GetSingleton();
+	worldOnDisk = app->currentScene->SaveToString();   // already canonical (dump())
+	worldDirty  = false;
+	worldMtime  = 0;
+	boost::system::error_code ec;
+	if (!app->currentWorldPath.empty())
+	{
+		std::string full = app->WorldFullPath(app->currentWorldPath);
+		if (bfs::exists(full, ec)) worldMtime = (long long)bfs::last_write_time(full, ec);
+	}
+	UpdateWindowTitle();
+}
+
+void EditorUI::TrackDirty()
+{
+	if ((++dirtyTick % 15) != 0) return;
+	AppInstance* app = AppInstance::GetSingleton();
+	bool d = app->currentScene->SaveToString() != worldOnDisk;
+	if (d != worldDirty) { worldDirty = d; UpdateWindowTitle(); }
+}
+
+void EditorUI::ReloadWorld(const std::string& diskJson)
+{
+	AppInstance* app = AppInstance::GetSingleton();
+	app->selectedInHieararchy = nullptr;
+	app->currentScene->LoadFromString(diskJson);
+	worldOnDisk = Canon(diskJson);
+	worldDirty  = false;
+	ResetUndo();
+	UpdateWindowTitle();
+}
+
+void EditorUI::OverwriteWorld()
+{
+	AppInstance* app = AppInstance::GetSingleton();
+	if (app->currentWorldPath.empty()) return;
+	app->SaveWorld(app->currentWorldPath);
+	SyncWorldBaseline();
+}
+
+void EditorUI::TrackExternalChange()
+{
+	if ((++extTick % 30) != 0) return;
+	if (openReloadPopup || openConflictPopup) return;   // already prompting
+	AppInstance* app = AppInstance::GetSingleton();
+	if (app->currentWorldPath.empty()) return;
+	std::string full = app->WorldFullPath(app->currentWorldPath);
+	boost::system::error_code ec;
+	if (!bfs::exists(full, ec)) return;
+	long long mt = (long long)bfs::last_write_time(full, ec);
+	if (ec || mt == worldMtime) return;                 // unchanged since we last looked
+	std::string disk = Canon(ReadFileText(full));
+	worldMtime = mt;                                    // record so we don't re-trigger every check
+	if (disk == worldOnDisk) return;                   // same content (e.g. our own save)
+	bool dirty = app->currentScene->SaveToString() != worldOnDisk;
+	if (!dirty)
+	{
+		if (reloadCleanMode == 1) ReloadWorld(disk);
+		else { pendingDisk = disk; openReloadPopup = true; }
+	}
+	else
+	{
+		switch (conflictMode)
+		{
+			case 1: ReloadWorld(disk); break;        // ignore editor, reload from disk
+			case 2: OverwriteWorld();  break;        // ignore disk, overwrite from editor
+			default: pendingDisk = disk; openConflictPopup = true; break;   // 0=ask, 3=merge(TODO) -> prompt
+		}
+	}
+}
+
+void EditorUI::DrawReloadPopup()
+{
+	if (openReloadPopup) { ImGui::OpenPopup("Changed on disk##reload"); openReloadPopup = false; }
+	if (ImGui::BeginPopupModal("Changed on disk##reload", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+	{
+		ImGui::TextUnformatted("The open world was changed on disk.");
+		ImGui::TextUnformatted("Your editor copy has no unsaved changes.");
+		ImGui::Separator();
+		if (ImGui::Button("Reload")) { ReloadWorld(pendingDisk); pendingDisk.clear(); ImGui::CloseCurrentPopup(); }
+		ImGui::SameLine();
+		if (ImGui::Button("Ignore")) { pendingDisk.clear(); ImGui::CloseCurrentPopup(); }   // keep editor copy; mtime already advanced
+		ImGui::EndPopup();
+	}
+}
+
+void EditorUI::DrawConflictPopup()
+{
+	if (openConflictPopup) { ImGui::OpenPopup("Conflict##disk"); openConflictPopup = false; }
+	if (ImGui::BeginPopupModal("Conflict##disk", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+	{
+		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.30f, 0.25f, 1.0f));
+		ImGui::TextUnformatted(ICON_LC_TRIANGLE_ALERT " Changed on disk AND in the editor.");
+		ImGui::PopStyleColor();
+		ImGui::Separator();
+		if (ImGui::Button("Reload (lose editor changes)"))  { ReloadWorld(pendingDisk); pendingDisk.clear(); ImGui::CloseCurrentPopup(); }
+		if (ImGui::Button("Overwrite (lose disk changes)")) { OverwriteWorld();          pendingDisk.clear(); ImGui::CloseCurrentPopup(); }
+		ImGui::BeginDisabled(true);
+		ImGui::Button("Merge…");   // resolve window — next pass
+		ImGui::EndDisabled();
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Merge/resolve window — coming next");
+		if (ImGui::Button("Ignore")) { pendingDisk.clear(); ImGui::CloseCurrentPopup(); }
+		ImGui::EndPopup();
+	}
 }
 
 // Activate the project's chosen plugins from the shared (already-discovered) pool. On a
