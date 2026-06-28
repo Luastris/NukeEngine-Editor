@@ -4,6 +4,7 @@
 #include "API/Model/Mesh.h"
 #include "API/Model/Texture.h"
 #include <nlohmann/json.hpp>      // dependency scan + unlink (rewrite reference fields)
+#include "interface/AssetCreators.h"   // plugin-registered "New ..." commands
 #include <boost/filesystem/fstream.hpp>
 #include <algorithm>
 #include <iterator>
@@ -653,6 +654,17 @@ void EditorUI::winBrowser()
 		if (ImGui::MenuItem(ICON_LC_GLOBE " World"))       CreateWorldAsset(folder);
 		if (ImGui::MenuItem(ICON_LC_PALETTE " Material"))  CreateMaterialAsset(folder);
 		if (ImGui::MenuItem(ICON_LC_FILE_CODE " Shader"))  CreateShaderAsset(folder);
+		// Plugin-registered creators (they supply only label/ext/template; the editor writes the file).
+		const std::vector<nuke::AssetCreator>& creators = nuke::AssetCreators();
+		if (!creators.empty()) ImGui::Separator();
+		for (const nuke::AssetCreator& ac : creators)
+			if (ImGui::MenuItem((std::string(ICON_LC_FILE_CODE " ") + ac.label).c_str()))
+			{
+				bfs::path p = UniquePath(bfs::path(folder) / (ac.baseName + ac.ext));
+				bfs::ofstream wf(p); if (wf) wf << ac.content;
+				browserSel = p.string();
+				StartRename(p.string());
+			}
 		ImGui::EndPopup();
 	}
 	if (ImGui::BeginPopup("bfilters"))
