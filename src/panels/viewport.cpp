@@ -4,6 +4,9 @@
 #include <cmath>
 #include <algorithm>
 #include <cctype>
+#define GLM_ENABLE_EXPERIMENTAL
+#include <glm/gtx/matrix_decompose.hpp>   // gizmo: decompose the manipulated world matrix
+#include <glm/gtc/type_ptr.hpp>
 
 // Cast a ray from a screen point inside the viewport image and return the atom under it (null = none).
 // Shared by left-click selection and asset drag&drop onto an object.
@@ -160,20 +163,18 @@ void EditorUI::winRender()
 				}
 
 				Transform& gtt = gsel->GetTransform();
-				glm::quat gq((float)gtt.rotation.w, (float)gtt.rotation.x, (float)gtt.rotation.y, (float)gtt.rotation.z);
-				glm::mat4 gworld = glm::translate(glm::mat4(1.0f), glm::vec3((float)gtt.position.x, (float)gtt.position.y, (float)gtt.position.z))
-				                 * glm::mat4_cast(gq)
-				                 * glm::scale(glm::mat4(1.0f), glm::vec3((float)gtt.scale.x, (float)gtt.scale.y, (float)gtt.scale.z));
-				(void)gworld;   // model is built via ImGuizmo's own compose below
 				if (!ImGuizmo::IsUsing())   // resync from the object only when NOT dragging
 				{
-					// Build the model with ImGuizmo's OWN compose so it's in exactly the
-					// convention ImGuizmo expects — this is what makes per-axis scale work.
-					Vector3 ep = gtt.position, ee = gtt.EulerDeg(), es = gtt.scale;
-					float t3[3] = { (float)ep.x, (float)ep.y, (float)ep.z };
-					float r3[3] = { (float)ee.x, (float)ee.y, (float)ee.z };
-					float s3[3] = { (float)es.x, (float)es.y, (float)es.z };
-					ImGuizmo::RecomposeMatrixFromComponents(t3, r3, s3, gizmoMatrix);
+					// Build the gizmo model from the atom's GLOBAL transform (matches the rendered image +
+					// the selection outline, which also use global). The outline/render uses globalPosition/
+					// Rotation/Scale, so the gizmo must too — otherwise a parented atom's gizmo sits at its
+					// LOCAL coords (wrong place). NOTE this engine's parenting is non-standard (position is
+					// additive, scale component-wise) — the write-back below inverts it.
+					Vector3 gP = gtt.globalPosition(); Quaternion gR = gtt.globalRotation(); Vector3 gS = gtt.globalScale();
+					glm::mat4 gm = glm::translate(glm::mat4(1.0f), glm::vec3((float)gP.x, (float)gP.y, (float)gP.z))
+					             * glm::mat4_cast(glm::quat((float)gR.w, (float)gR.x, (float)gR.y, (float)gR.z))
+					             * glm::scale(glm::mat4(1.0f), glm::vec3((float)gS.x, (float)gS.y, (float)gS.z));
+					memcpy(gizmoMatrix, glm::value_ptr(gm), sizeof(float) * 16);
 				}
 
 				ImGuizmo::OPERATION gop = (gapp->manipulationMode == 1) ? ImGuizmo::TRANSLATE
@@ -186,18 +187,33 @@ void EditorUI::winRender()
 				ImGuizmo::Manipulate(gview, gproj, gop, gmode, gizmoMatrix, nullptr, gsnapPtr);
 				if (ImGuizmo::IsUsing())
 				{
-					float gtr[3], gro[3], gsc[3];
-					ImGuizmo::DecomposeMatrixToComponents(gizmoMatrix, gtr, gro, gsc);
-					bool gok = true;
-					for (int i = 0; i < 3; ++i)
-						gok = gok && std::isfinite(gtr[i]) && std::isfinite(gro[i]) && std::isfinite(gsc[i]);
-					if (gok)   // skip degenerate results (e.g. scale dragged through zero -> NaN)
+					// Decompose the manipulated GLOBAL matrix, then convert back to LOCAL using this
+					// engine's parenting rules (position additive, rotation quat-composed, scale multiplied).
+					glm::mat4 nm = glm::make_mat4(gizmoMatrix);
+					glm::vec3 nS, nT, nSkew; glm::vec4 nPersp; glm::quat nR;
+					if (glm::decompose(nm, nS, nR, nT, nSkew, nPersp) &&
+					    std::isfinite(nT.x) && std::isfinite(nT.y) && std::isfinite(nT.z) &&
+					    std::isfinite(nS.x) && std::isfinite(nS.y) && std::isfinite(nS.z))
 					{
-						for (int i = 0; i < 3; ++i)
-							if (fabsf(gsc[i]) < 1e-3f) gsc[i] = (gsc[i] < 0.0f) ? -1e-3f : 1e-3f;
-						gtt.position = Vector3(gtr[0], gtr[1], gtr[2]);
-						gtt.SetEulerDeg(Vector3(gro[0], gro[1], gro[2]));
-						gtt.scale = Vector3(gsc[0], gsc[1], gsc[2]);
+						if (nS.x < 1e-3f && nS.x > -1e-3f) nS.x = 1e-3f;
+						if (nS.y < 1e-3f && nS.y > -1e-3f) nS.y = 1e-3f;
+						if (nS.z < 1e-3f && nS.z > -1e-3f) nS.z = 1e-3f;
+						Atom* par = gsel->GetParent();
+						if (par)
+						{
+							Transform& pt = par->GetTransform();
+							Vector3 pP = pt.globalPosition(); Quaternion pR = pt.globalRotation(); Vector3 pS = pt.globalScale();
+							glm::quat lq = glm::inverse(glm::quat((float)pR.w, (float)pR.x, (float)pR.y, (float)pR.z)) * nR;
+							gtt.position = Vector3(nT.x - pP.x, nT.y - pP.y, nT.z - pP.z);
+							gtt.rotation.x = lq.x; gtt.rotation.y = lq.y; gtt.rotation.z = lq.z; gtt.rotation.w = lq.w;
+							gtt.scale = Vector3(pS.x != 0 ? nS.x / pS.x : nS.x, pS.y != 0 ? nS.y / pS.y : nS.y, pS.z != 0 ? nS.z / pS.z : nS.z);
+						}
+						else
+						{
+							gtt.position = Vector3(nT.x, nT.y, nT.z);
+							gtt.rotation.x = nR.x; gtt.rotation.y = nR.y; gtt.rotation.z = nR.z; gtt.rotation.w = nR.w;
+							gtt.scale = Vector3(nS.x, nS.y, nS.z);
+						}
 					}
 				}
 			}
