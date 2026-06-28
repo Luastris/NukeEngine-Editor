@@ -228,7 +228,19 @@ bool EditorUI::DrawFields(void* obj, nuke::TypeInfo* ti)
 		switch (f.type)
 		{
 		case nuke::FT::Bool:   changed |= ImGui::Checkbox(n, (bool*)a); break;
-		case nuke::FT::Int:    changed |= ImGui::InputInt(n, (int*)a); break;
+		case nuke::FT::Int:
+			if (!f.enumLabels.empty())   // [[prop(enum=...)]] -> dropdown; the int is the selected index
+			{
+				int* iv = (int*)a; int cur = (*iv < 0 || *iv >= (int)f.enumLabels.size()) ? 0 : *iv;
+				if (ImGui::BeginCombo(n, f.enumLabels[cur].c_str()))
+				{
+					for (int e = 0; e < (int)f.enumLabels.size(); ++e)
+						if (ImGui::Selectable(f.enumLabels[e].c_str(), e == cur)) { *iv = e; changed = true; }
+					ImGui::EndCombo();
+				}
+			}
+			else changed |= ImGui::InputInt(n, (int*)a);
+			break;
 		case nuke::FT::Float:
 			if (f.fmax > f.fmin) changed |= ImGui::SliderFloat(n, (float*)a, f.fmin, f.fmax);   // [[prop(min,max)]]
 			else                 changed |= ImGui::DragFloat(n, (float*)a, 0.05f);
