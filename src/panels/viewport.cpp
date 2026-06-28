@@ -1,6 +1,7 @@
 // viewport panel — EditorUI method definitions (translation unit).
 #include <editor/editorui.h>
 #include "API/Model/Math.h"
+#include "API/Model/resdb.h"   // RenderTexture camera preview (resolve targetTexGuid -> RT)
 #include <cmath>
 #include <algorithm>
 #include <cctype>
@@ -110,9 +111,22 @@ void EditorUI::winRender()
 			Camera* selCam = sel ? sel->GetComponent<Camera>() : nullptr;
 			if (tex && selCam && selCam != editorCam)
 			{
-				if (camPreviewRT == 0) camPreviewRT = r->createRenderTarget(256, 144);
-				selCam->renderTarget = camPreviewRT;   // World::Render draws it here next pass
-				previewCam = selCam;
+				uint64_t ptex = 0;
+				if (!selCam->targetTexGuid.empty())
+				{
+					// RenderTexture camera: it already renders into its own RT (World::Render) — preview that
+					// directly. Do NOT hijack renderTarget to camPreviewRT (that would steal it from the RT).
+					if (nuke::Texture* rtx = ResDB::getSingleton()->GetTexture(selCam->targetTexGuid))
+						if (rtx->rtId) ptex = r->getRenderTargetTexture(rtx->rtId);
+					previewCam = nullptr;
+				}
+				else
+				{
+					if (camPreviewRT == 0) camPreviewRT = r->createRenderTarget(256, 144);
+					selCam->renderTarget = camPreviewRT;   // World::Render draws it here next pass
+					previewCam = selCam;
+					ptex = r->getRenderTargetTexture(camPreviewRT);
+				}
 
 				ImVec2 imax = ImGui::GetItemRectMax();  // bottom-right of the scene image
 				ImVec2 pv(256, 144), pad(12, 12);
@@ -120,7 +134,7 @@ void EditorUI::winRender()
 				ImVec2 p1(p0.x + pv.x, p0.y + pv.y);
 				ImDrawList* dl = ImGui::GetWindowDrawList();
 				dl->AddRectFilled(ImVec2(p0.x - 2, p0.y - 16), ImVec2(p1.x + 2, p1.y + 2), IM_COL32(15, 15, 15, 220));
-				if (uint64_t ptex = r->getRenderTargetTexture(camPreviewRT))
+				if (ptex)
 					dl->AddImage((ImTextureID)ptex, p0, p1);
 				dl->AddRect(p0, p1, IM_COL32(180, 180, 180, 255));
 				dl->AddText(ImVec2(p0.x + 3, p0.y - 15), IM_COL32_WHITE, sel->GetName().c_str());

@@ -540,7 +540,7 @@ void EditorUI::DropAssetOnAtom(Atom* a, const std::string& path)
 			changed = true;
 		}
 	}
-	else // .nutex -> the material's base color (diffuse)
+	else // .nutex -> base color (diffuse); a RenderTexture -> emissive so it shows like an unlit screen
 	{
 		std::string guid = db->GuidForPath(path);
 		if (guid.empty())
@@ -552,7 +552,17 @@ void EditorUI::DropAssetOnAtom(Atom* a, const std::string& path)
 				Material* asset = db->GetMaterial(mr->matGuid);
 				mr->mat = asset ? asset->Clone() : new Material();
 			}
-			mr->mat->diffuseGuid = guid;
+			Texture* tx = db->GetTexture(guid);
+			if (tx && tx->renderTexture)
+			{
+				// Camera feed: emissive (unlit, full bright). Emissive map is tinted by emissive color×
+				// intensity, so set those to white×1 or the map shows black.
+				mr->mat->emissiveGuid = guid;
+				mr->mat->emissive = Color(1, 1, 1, 1);
+				mr->mat->emissiveIntensity = 1.0f;
+			}
+			else
+				mr->mat->diffuseGuid = guid;
 			mr->mat->Resolve();
 			changed = true;
 		}
