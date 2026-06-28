@@ -198,22 +198,10 @@ void EditorUI::winRender()
 						if (nS.x < 1e-3f && nS.x > -1e-3f) nS.x = 1e-3f;
 						if (nS.y < 1e-3f && nS.y > -1e-3f) nS.y = 1e-3f;
 						if (nS.z < 1e-3f && nS.z > -1e-3f) nS.z = 1e-3f;
-						Atom* par = gsel->GetParent();
-						if (par)
-						{
-							Transform& pt = par->GetTransform();
-							Vector3 pP = pt.globalPosition(); Quaternion pR = pt.globalRotation(); Vector3 pS = pt.globalScale();
-							glm::quat lq = glm::inverse(glm::quat((float)pR.w, (float)pR.x, (float)pR.y, (float)pR.z)) * nR;
-							gtt.position = Vector3(nT.x - pP.x, nT.y - pP.y, nT.z - pP.z);
-							gtt.rotation.x = lq.x; gtt.rotation.y = lq.y; gtt.rotation.z = lq.z; gtt.rotation.w = lq.w;
-							gtt.scale = Vector3(pS.x != 0 ? nS.x / pS.x : nS.x, pS.y != 0 ? nS.y / pS.y : nS.y, pS.z != 0 ? nS.z / pS.z : nS.z);
-						}
-						else
-						{
-							gtt.position = Vector3(nT.x, nT.y, nT.z);
-							gtt.rotation.x = nR.x; gtt.rotation.y = nR.y; gtt.rotation.z = nR.z; gtt.rotation.w = nR.w;
-							gtt.scale = Vector3(nS.x, nS.y, nS.z);
-						}
+						// Write the manipulated WORLD pose; Transform::SetGlobal converts it to local.
+						gtt.SetGlobal(Vector3(nT.x, nT.y, nT.z),
+						              Quaternion(nR.x, nR.y, nR.z, nR.w),
+						              Vector3(nS.x, nS.y, nS.z));
 					}
 				}
 			}

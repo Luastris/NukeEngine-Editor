@@ -194,8 +194,16 @@ void EditorUI::winHierarchy()
 		{ auto& lst = dndAtom->parent ? dndAtom->parent->children : app->currentScene->GetHierarchy();
 		  int i = 0; for (Atom* s : lst) { if (s == dndAtom) { oldIndex = i; break; } ++i; } }
 		Atom* moved = dndAtom;
-		if (dndBefore) app->currentScene->ReparentBefore(dndAtom, dndBefore);
-		else           app->currentScene->Reparent(dndAtom, dndParent);
+		if (dndBefore) app->currentScene->ReparentBefore(dndAtom, dndBefore);   // reorder: same parent, world unchanged
+		else
+		{
+			// Reparent under a new parent: keep the atom's WORLD pose (standard editor behaviour — the
+			// object stays put on screen instead of jumping into the parent's local space).
+			Transform& mt = moved->GetTransform();
+			Vector3 wp = mt.globalPosition(); Quaternion wr = mt.globalRotation(); Vector3 ws = mt.globalScale();
+			app->currentScene->Reparent(dndAtom, dndParent);
+			mt.SetGlobal(wp, wr, ws);
+		}
 		RecordReparent(moved, oldParent, oldIndex);
 	}
 	dndPending = false; dndAtom = dndBefore = dndParent = nullptr;
