@@ -1,5 +1,6 @@
 // setup_menu panel — EditorUI method definitions (translation unit).
 #include <editor/editorui.h>
+#include <import/assimporter.h>   // drag&drop import (ImportAny)
 
 void EditorUI::SetUp()
 {
@@ -75,6 +76,13 @@ void EditorUI::SetUp()
 	// Build a renderer pipeline per shader (render is already init'd before editorinit()).
 	ResDB::getSingleton()->BuildShaderPipelines(AppInstance::GetSingleton()->render);
 	ResDB::getSingleton()->CreateRenderTextures(AppInstance::GetSingleton()->render);   // RTs for RenderTextures
+
+	// Drag&drop from the desktop/Explorer -> import the dropped model/image into the current browser folder.
+	AppInstance::GetSingleton()->render->setOnFileDrop([this](const char* p) {
+		std::string dest = browserCwd.empty() ? contentDir : browserCwd;
+		bool ok = AssImporter::getSingleton()->ImportAny(p, dest.c_str());
+		std::cout << "[editor]\tdrop-import " << (ok ? "ok" : "FAILED") << ": " << p << " -> " << dest << std::endl;
+	});
 
 	// Editor state (project-tied): camera, selection, inspector + browser + panel state.
 	LoadEditorState();

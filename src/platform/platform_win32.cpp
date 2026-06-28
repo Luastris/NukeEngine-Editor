@@ -11,16 +11,21 @@
 #include <cstring>
 #pragma comment(lib, "comdlg32.lib")
 
-// Native "open file" dialog for model import.
+// Native "open file" dialog for asset import (models + images). Filter labels list the extensions so it
+// is obvious what is supported. The browser dispatches by extension (AssImporter::ImportAny).
 std::string EditorPickModelFile()
 {
 	char file[1024] = "";
 	OPENFILENAMEA ofn = {};
 	ofn.lStructSize = sizeof(ofn);
-	ofn.lpstrFilter = "Models\0*.obj;*.fbx;*.dae;*.gltf;*.glb;*.3ds;*.ply;*.stl\0All files\0*.*\0";
+	ofn.lpstrFilter =
+		"All supported (models + images)\0*.obj;*.fbx;*.dae;*.gltf;*.glb;*.3ds;*.ply;*.stl;*.png;*.jpg;*.jpeg;*.tga;*.bmp;*.hdr;*.psd;*.gif\0"
+		"Models (*.obj;*.fbx;*.dae;*.gltf;*.glb;*.3ds;*.ply;*.stl)\0*.obj;*.fbx;*.dae;*.gltf;*.glb;*.3ds;*.ply;*.stl\0"
+		"Images (*.png;*.jpg;*.jpeg;*.tga;*.bmp;*.hdr;*.psd;*.gif)\0*.png;*.jpg;*.jpeg;*.tga;*.bmp;*.hdr;*.psd;*.gif\0"
+		"All files (*.*)\0*.*\0";
 	ofn.lpstrFile   = file;
 	ofn.nMaxFile    = sizeof(file);
-	ofn.lpstrTitle  = "Import model";
+	ofn.lpstrTitle  = "Import asset";
 	ofn.Flags       = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
 	if (GetOpenFileNameA(&ofn)) return std::string(file);
 	return std::string();

@@ -719,15 +719,15 @@ void EditorUI::winBrowser()
 	ImGui::SameLine();
 	if (ImGui::Button(ICON_LC_DOWNLOAD " Import"))
 	{
-		std::string src = EditorPickModelFile();   // OBJ/FBX/glTF/...
+		std::string src = EditorPickModelFile();   // models OR images
 		if (!src.empty())
 		{
 			std::string dest = browserCwd.empty() ? contentDir : browserCwd;
-			int n = AssImporter::getSingleton()->ImportToContent(src.c_str(), dest.c_str());
-			cout << "[editor]\timported " << n << " mesh(es) into " << dest << endl;
+			bool ok = AssImporter::getSingleton()->ImportAny(src.c_str(), dest.c_str());
+			cout << "[editor]\timport " << (ok ? "ok" : "FAILED") << ": " << src << " -> " << dest << endl;
 		}
 	}
-	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Import a model (OBJ/FBX/glTF) -> .numesh in this folder");
+	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Import a model (OBJ/FBX/glTF) or image (PNG/JPG/TGA/...) into this folder");
 	ImGui::SameLine();
 	if (ImGui::Button(ICON_LC_FILE_PLUS " New")) ImGui::OpenPopup("bnew");
 	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Create a new asset/folder here");
