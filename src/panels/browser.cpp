@@ -560,6 +560,23 @@ void EditorUI::CreateMaterialAsset(const std::string& folder)
 	StartRename(path.string());
 }
 
+void EditorUI::CreateRenderTextureAsset(const std::string& folder)
+{
+	bfs::path path = UniquePath(bfs::path(folder) / "New RenderTexture.nutex");
+	Texture* t = new Texture();
+	t->guid = ResDB::NewGuid();
+	t->renderTexture = true;
+	t->width = 512; t->height = 512;          // default; (resize later when an inspector exists)
+	t->SaveToFile(path.string());
+	ResDB* db = ResDB::getSingleton();
+	db->RegisterTexture(t);
+	db->SetAssetPath(t->guid, path.string());
+	if (AppInstance::GetSingleton()->render)  // allocate its GPU render target now
+		t->rtId = AppInstance::GetSingleton()->render->createRenderTarget(t->width, t->height);
+	browserSel = path.string();
+	StartRename(path.string());
+}
+
 void EditorUI::CreateShaderAsset(const std::string& folder)
 {
 	// A shader is a "<base>.vs.hlsl" + "<base>.ps.hlsl" pair — find a base where neither exists.
@@ -654,6 +671,7 @@ void EditorUI::winBrowser()
 		if (ImGui::MenuItem(ICON_LC_GLOBE " World"))       CreateWorldAsset(folder);
 		if (ImGui::MenuItem(ICON_LC_PALETTE " Material"))  CreateMaterialAsset(folder);
 		if (ImGui::MenuItem(ICON_LC_FILE_CODE " Shader"))  CreateShaderAsset(folder);
+		if (ImGui::MenuItem(ICON_LC_IMAGE " RenderTexture")) CreateRenderTextureAsset(folder);
 		// Plugin-registered creators (they supply only label/ext/template; the editor writes the file).
 		const std::vector<nuke::AssetCreator>& creators = nuke::AssetCreators();
 		if (!creators.empty()) ImGui::Separator();

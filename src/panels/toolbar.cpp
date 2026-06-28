@@ -135,9 +135,12 @@ void EditorUI::Draw()
 
 	nuke::Time::getSingleton()->NewFrame();   // real frame delta/elapsed (scripts & systems)
 
-	// Hot-reload shaders edited on disk (~twice a second; cheap mtime checks).
+	// Hot-reload shaders + materials/textures edited on disk (~twice a second; cheap mtime checks).
 	if ((++hotReloadTick % 30) == 0)
+	{
 		ResDB::getSingleton()->HotReloadShaders(AppInstance::GetSingleton()->render);
+		ResDB::getSingleton()->HotReloadAssets(AppInstance::GetSingleton()->render);
+	}
 
 	// PIE: while playing, run game logic (component Update) each frame.
 	if (AppInstance::GetSingleton()->playState == 1)

@@ -261,6 +261,7 @@ public:
 	void CreateWorldAsset(const std::string& folder);    // empty .nuworld
 	void CreateMaterialAsset(const std::string& folder); // default .numat (registered in ResDB)
 	void CreateShaderAsset(const std::string& folder);   // .vs/.ps.hlsl pair (registered + pipeline built)
+	void CreateRenderTextureAsset(const std::string& folder);   // .nutex RenderTexture (camera target)
 	// plugins
 	void PluginMGRWindow();
 	// toolbar

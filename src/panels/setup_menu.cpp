@@ -74,6 +74,7 @@ void EditorUI::SetUp()
 	ResDB::getSingleton()->LoadShadersDir(contentDir);
 	// Build a renderer pipeline per shader (render is already init'd before editorinit()).
 	ResDB::getSingleton()->BuildShaderPipelines(AppInstance::GetSingleton()->render);
+	ResDB::getSingleton()->CreateRenderTextures(AppInstance::GetSingleton()->render);   // RTs for RenderTextures
 
 	// Editor state (project-tied): camera, selection, inspector + browser + panel state.
 	LoadEditorState();
