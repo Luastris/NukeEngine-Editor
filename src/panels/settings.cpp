@@ -205,6 +205,14 @@ void EditorUI::winSettings()
 		ImGui::SameLine(); ImGui::TextDisabled("(?)");
 		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Hardware multisampling for the world. Clamped to GPU support.");
 
+		if (ImGui::Checkbox("HDR", &hdrEnabled))
+		{
+			if (AppInstance::GetSingleton()->render) AppInstance::GetSingleton()->render->setHDR(hdrEnabled);
+			SaveProject();
+		}
+		ImGui::SameLine(); ImGui::TextDisabled("(?)");
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("On: float (RGBA16F) rendering, real dynamic range (enables bloom later).\nOff: LDR (RGBA8), cheaper, tonemap inline.");
+
 		ImGui::SeparatorText("Disk sync");
 		const char* cleanModes[] = { "Ask", "Auto-reload" };
 		if (ImGui::Combo("Disk changed (editor clean)", &reloadCleanMode, cleanModes, IM_ARRAYSIZE(cleanModes))) SaveProject();

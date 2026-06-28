@@ -104,6 +104,7 @@ private:
 	int         reloadCleanMode = 0;               // disk changed, editor clean: 0=ask, 1=auto-reload
 	int         conflictMode    = 0;               // disk changed, editor dirty: 0=ask,1=reload,2=overwrite,3=merge
 	int         msaaSamples     = 4;               // anti-aliasing sample count (1=off,2,4,8); applied via render->setMSAA
+	bool        hdrEnabled      = true;            // HDR pipeline on/off; applied via render->setHDR
 	std::string pendingDisk;                        // disk JSON awaiting a reload/conflict decision
 	bool        openReloadPopup = false, openConflictPopup = false;
 	bool        wasWindowFocused = true;            // disk re-check fires on focus-gain (avoids mid-write triggers)
