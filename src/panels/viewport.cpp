@@ -52,6 +52,12 @@ void EditorUI::winRender()
 		{
 			ImGui::Image((ImTextureID)tex, avail); // the live scene viewport
 			AcceptAssetDropTarget();               // drag assets from the browser into the scene
+			// Tell the runtime GUI (NukeGUI) to draw INTO this viewport RT + map input to its rect.
+			ImVec2 imin = ImGui::GetItemRectMin();
+			AppInstance* app = AppInstance::GetSingleton();
+			app->uiTarget = sceneRTId;
+			app->uiX = (int)imin.x; app->uiY = (int)imin.y;
+			app->uiW = (int)avail.x; app->uiH = (int)avail.y;
 		}
 		else
 			ImGui::Text("No scene texture.");
