@@ -23,6 +23,7 @@ void EditorUI::SaveProject()
 	j["unlinkOnDelete"] = unlinkOnDelete;   // break refs to a deleted resource (vs leave dangling)
 	j["reloadCleanMode"] = reloadCleanMode; // disk changed, editor clean: 0=ask,1=auto-reload
 	j["conflictMode"]    = conflictMode;    // disk changed, editor dirty: 0=ask,1=reload,2=overwrite,3=merge
+	j["msaa"]            = msaaSamples;      // anti-aliasing sample count (1/2/4/8)
 	j["plugins"]      = enabledPlugins;     // which pooled plugins this project loads
 	nlohmann::json hk = nlohmann::json::object();   // hotkey bindings (id -> chord), saved with the project
 	for (auto& kv : nuke::Hotkeys::Get()->ExportBindings()) hk[kv.first] = kv.second;
@@ -41,6 +42,8 @@ void EditorUI::LoadProject()
 	unlinkOnDelete = j.value("unlinkOnDelete", false);
 	reloadCleanMode = j.value("reloadCleanMode", 0);
 	conflictMode    = j.value("conflictMode", 0);
+	msaaSamples     = j.value("msaa", 4);
+	if (AppInstance::GetSingleton()->render) AppInstance::GetSingleton()->render->setMSAA(msaaSamples);
 	contentDir   = projectDir + "/" + j.value("content", std::string("content"));
 	enabledPlugins.clear();
 	if (j.contains("plugins") && j["plugins"].is_array())

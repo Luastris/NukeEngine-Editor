@@ -188,6 +188,23 @@ void EditorUI::winSettings()
 			ImGui::EndCombo();
 		}
 
+		ImGui::SeparatorText("Rendering");
+		const char* aaModes[] = { "Off", "MSAA 2x", "MSAA 4x", "MSAA 8x" };
+		int aaIdx = (msaaSamples >= 8) ? 3 : (msaaSamples >= 4) ? 2 : (msaaSamples >= 2) ? 1 : 0;
+		if (ImGui::Combo("Anti-aliasing", &aaIdx, aaModes, IM_ARRAYSIZE(aaModes)))
+		{
+			int s = (aaIdx == 3) ? 8 : (aaIdx == 2) ? 4 : (aaIdx == 1) ? 2 : 1;
+			msaaSamples = s;
+			if (AppInstance::GetSingleton()->render)
+			{
+				AppInstance::GetSingleton()->render->setMSAA(s);
+				msaaSamples = AppInstance::GetSingleton()->render->getMSAA();   // device may clamp (e.g. 8x->4x)
+			}
+			SaveProject();
+		}
+		ImGui::SameLine(); ImGui::TextDisabled("(?)");
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Hardware multisampling for the world. Clamped to GPU support.");
+
 		ImGui::SeparatorText("Disk sync");
 		const char* cleanModes[] = { "Ask", "Auto-reload" };
 		if (ImGui::Combo("Disk changed (editor clean)", &reloadCleanMode, cleanModes, IM_ARRAYSIZE(cleanModes))) SaveProject();
