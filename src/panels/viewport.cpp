@@ -46,8 +46,10 @@ void EditorUI::winRender()
 		}
 	}
 
-	// Hotkeys (when focused, not typing, and NOT flying with RMB): Q/W/E/R = tools, X = World/Local.
-	if (ImGui::IsWindowFocused() && !ImGui::GetIO().WantTextInput && !ImGui::IsMouseDown(ImGuiMouseButton_Right))
+	// Hotkeys: fire when the viewport is focused OR hovered (mouse over it) — matching the WASD camera
+	// input, which is hover-based, so tools/Delete work even if another docked panel holds focus. Not
+	// while typing in a field or flying with RMB held. Q/W/E/R = tools, X = World/Local, F = frame, Del.
+	if ((ImGui::IsWindowFocused() || ImGui::IsWindowHovered()) && !ImGui::GetIO().WantTextInput && !ImGui::IsMouseDown(ImGuiMouseButton_Right))
 	{
 		AppInstance* a = AppInstance::GetSingleton();
 		if (ImGui::IsKeyPressed(ImGuiKey_Q)) a->manipulationMode = 0;
@@ -56,6 +58,13 @@ void EditorUI::winRender()
 		if (ImGui::IsKeyPressed(ImGuiKey_R)) a->manipulationMode = 3;
 		if (ImGui::IsKeyPressed(ImGuiKey_X)) a->manipulationWorld = !a->manipulationWorld;
 		if (ImGui::IsKeyPressed(ImGuiKey_F)) FocusSelected();   // frame the selected object
+		// Delete the selected atom from the viewport too (same rebindable pool as the hierarchy).
+		nuke::Hotkeys* hk = nuke::Hotkeys::Get();
+		nuke::Hotkey* d  = hk->Find("editor.delete");
+		nuke::Hotkey* df = hk->Find("editor.delete.force");
+		if ((d  && d->bound  && ImGui::IsKeyChordPressed((ImGuiKeyChord)d->chord)) ||
+		    (df && df->bound && ImGui::IsKeyChordPressed((ImGuiKeyChord)df->chord)))
+			DeleteSelectedAtom();
 	}
 
 	ImVec2 avail = ImGui::GetContentRegionAvail();
