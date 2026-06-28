@@ -1,5 +1,6 @@
 // toolbar panel — EditorUI method definitions (translation unit).
 #include <editor/editorui.h>
+#include <API/Model/Light.h>
 
 // ---- toolbar ----
 // A flat button that stays highlighted while `active` (radio/toggle look).
@@ -38,6 +39,17 @@ void EditorUI::SpawnPrimitive(const char* atomName, const char* guid)
 	RecordAdd(go);
 }
 void EditorUI::SpawnCube() { SpawnPrimitive("Cube", "builtin:cube"); }
+void EditorUI::SpawnLight(int type, const char* atomName)
+{
+	AppInstance* app = AppInstance::GetSingleton();
+	Atom* go = new Atom(atomName);
+	Light* l = new Light();
+	l->type = type;
+	go->AddComponent(l);
+	app->currentScene->Add(go);
+	app->selectedInHieararchy = go;
+	RecordAdd(go);
+}
 void EditorUI::SpawnCamera()
 {
 	AppInstance* app = AppInstance::GetSingleton();
@@ -74,11 +86,18 @@ void EditorUI::Toolbar()
 		if (ToolBtn(ICON_LC_PLUS,          "Create", false,                       bw)) ImGui::OpenPopup("##nuke-create");
 		if (ImGui::BeginPopup("##nuke-create"))
 		{
-			if (ImGui::MenuItem("Empty"))  SpawnEmpty();
-			if (ImGui::MenuItem("Cube"))   SpawnPrimitive("Cube",   "builtin:cube");
-			if (ImGui::MenuItem("Sphere")) SpawnPrimitive("Sphere", "builtin:sphere");
-			if (ImGui::MenuItem("Plane"))  SpawnPrimitive("Plane",  "builtin:plane");
-			if (ImGui::MenuItem("Camera")) SpawnCamera();
+			if (ImGui::MenuItem(ICON_LC_SQUARE_DASHED " Empty"))  SpawnEmpty();
+			if (ImGui::MenuItem(ICON_LC_BOX    " Cube"))   SpawnPrimitive("Cube",   "builtin:cube");
+			if (ImGui::MenuItem(ICON_LC_CIRCLE " Sphere")) SpawnPrimitive("Sphere", "builtin:sphere");
+			if (ImGui::MenuItem(ICON_LC_SQUARE " Plane"))  SpawnPrimitive("Plane",  "builtin:plane");
+			if (ImGui::MenuItem(ICON_LC_VIDEO  " Camera")) SpawnCamera();
+			if (ImGui::BeginMenu(ICON_LC_LIGHTBULB " Light"))
+			{
+				if (ImGui::MenuItem(ICON_LC_SUN       " Directional")) SpawnLight(0, "Directional Light");
+				if (ImGui::MenuItem(ICON_LC_LIGHTBULB " Point"))       SpawnLight(1, "Point Light");
+				if (ImGui::MenuItem(ICON_LC_SPOTLIGHT " Spot"))        SpawnLight(2, "Spot Light");
+				ImGui::EndMenu();
+			}
 			ImGui::EndPopup();
 		}
 		// World/Local space toggle for the gizmo (also hotkey X).

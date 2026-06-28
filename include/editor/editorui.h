@@ -255,6 +255,9 @@ public:
 	void DrawMergeWindow();
 	void AcceptAssetDropTarget();                    // viewport/hierarchy: accept an asset drop
 	Atom* DropAsset(const std::string& path);        // instantiate by extension; returns the new atom (or null)
+	// Drop a material/texture asset ONTO an existing atom (viewport DnD): .numat -> the atom's material,
+	// .nutex -> the atom's material base-color (diffuse). Undoable. No-op if the atom has no MeshRenderer.
+	void  DropAssetOnAtom(Atom* a, const std::string& path);
 	Atom* SpawnMeshAsset(const std::string& path);   // .numesh -> new Atom + MeshRenderer
 	// Create new assets in a content folder (from the browser's "New" menu).
 	void CreateFolderAsset(const std::string& folder);
@@ -270,6 +273,7 @@ public:
 	void SpawnPrimitive(const char* atomName, const char* guid);
 	void SpawnCube();
 	void SpawnCamera();
+	void SpawnLight(int type, const char* atomName);   // type 0=dir 1=point 2=spot
 	void Toolbar();
 	void Draw();
 	// undo/redo (generic command stack)

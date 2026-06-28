@@ -2,6 +2,26 @@
 #include <editor/editorui.h>
 #include "API/Model/Math.h"
 #include <cmath>
+#include <algorithm>
+#include <cctype>
+
+// Cast a ray from a screen point inside the viewport image and return the atom under it (null = none).
+// Shared by left-click selection and asset drag&drop onto an object.
+static nuke::Atom* PickAtScreen(nuke::Camera* cam, ImVec2 rmin, ImVec2 sz, ImVec2 mp)
+{
+	if (!cam || !cam->transform || sz.x <= 0.0f || sz.y <= 0.0f) return nullptr;
+	nuke::Transform* t = cam->transform;
+	float ndcx = ((mp.x - rmin.x) / sz.x) * 2.0f - 1.0f;
+	float ndcy = 1.0f - ((mp.y - rmin.y) / sz.y) * 2.0f;
+	nuke::Vector3 o = t->globalPosition();
+	nuke::Vector3 f = t->direction(), rr = t->right(), uu = t->up();
+	float aspect = sz.x / sz.y;
+	float thf = tanf((float)cam->fov * 0.5f * 0.01745329252f);
+	nuke::Vector3 dir(f.x + ndcx * thf * aspect * rr.x + ndcy * thf * uu.x,
+	                  f.y + ndcx * thf * aspect * rr.y + ndcy * thf * uu.y,
+	                  f.z + ndcx * thf * aspect * rr.z + ndcy * thf * uu.z);
+	return nuke::AppInstance::GetSingleton()->currentScene->Pick(o, dir);
+}
 
 void EditorUI::winRender()
 {
@@ -51,7 +71,25 @@ void EditorUI::winRender()
 		if (tex)
 		{
 			ImGui::Image((ImTextureID)tex, avail); // the live scene viewport
-			AcceptAssetDropTarget();               // drag assets from the browser into the scene
+			// Drag from the browser onto the scene: a material/texture drops ONTO the object under the
+			// cursor; anything else (prefab/mesh/world) spawns into the scene.
+			if (ImGui::BeginDragDropTarget())
+			{
+				if (const ImGuiPayload* dp = ImGui::AcceptDragDropPayload("NUKE_ASSET"))
+				{
+					std::string dpath((const char*)dp->Data), dext;
+					size_t dot = dpath.find_last_of('.');
+					if (dot != std::string::npos) dext = dpath.substr(dot);
+					std::transform(dext.begin(), dext.end(), dext.begin(), ::tolower);
+					if (dext == ".numat" || dext == ".nutex")
+					{
+						if (nuke::Atom* hit = PickAtScreen(editorCam, ImGui::GetItemRectMin(), ImGui::GetItemRectSize(), ImGui::GetMousePos()))
+							DropAssetOnAtom(hit, dpath);
+					}
+					else DropAsset(dpath);
+				}
+				ImGui::EndDragDropTarget();
+			}
 			// Tell the runtime GUI (NukeGUI) to draw INTO this viewport RT + map input to its rect.
 			ImVec2 imin = ImGui::GetItemRectMin();
 			AppInstance* app = AppInstance::GetSingleton();

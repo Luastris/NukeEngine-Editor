@@ -5,6 +5,8 @@
 #include "API/Model/Texture.h"
 #include <nlohmann/json.hpp>      // dependency scan + unlink (rewrite reference fields)
 #include "interface/AssetCreators.h"   // plugin-registered "New ..." commands
+#include "API/Model/Prefab.h"          // SaveAtomToString (undo snapshots for drop-on-atom)
+#include "API/Model/MeshRenderer.h"
 #include <boost/filesystem/fstream.hpp>
 #include <algorithm>
 #include <iterator>
@@ -509,6 +511,62 @@ Atom* EditorUI::DropAsset(const std::string& path)
 	else if (ext == ".numesh")   return SpawnMeshAsset(path);
 	else if (ext == ".nuworld")  { OpenWorldFromBrowser(path); return nullptr; }
 	return nullptr;
+}
+
+void EditorUI::DropAssetOnAtom(Atom* a, const std::string& path)
+{
+	if (!a) return;
+	nuke::MeshRenderer* mr = a->GetComponent<nuke::MeshRenderer>();
+	if (!mr) return;                                  // only mesh objects carry a material
+	std::string ext = bfs::path(path).extension().string();
+	std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+	if (ext != ".numat" && ext != ".nutex") return;
+
+	ResDB* db = ResDB::getSingleton();
+	std::string before = nuke::SaveAtomToString(a);
+	bool changed = false;
+
+	if (ext == ".numat")
+	{
+		std::string guid = db->GuidForPath(path);
+		if (guid.empty())   // not indexed yet -> load + register the asset
+			if (Material* m = Material::LoadFromFile(path)) { db->RegisterMaterial(m); db->SetAssetPath(m->guid, path); guid = m->guid; }
+		if (!guid.empty())
+		{
+			Material* asset = db->GetMaterial(guid);
+			mr->matGuid = guid;
+			if (mr->mat) delete mr->mat;
+			mr->mat = asset ? asset->Clone() : nullptr;   // own an instance (scene edits stay local)
+			changed = true;
+		}
+	}
+	else // .nutex -> the material's base color (diffuse)
+	{
+		std::string guid = db->GuidForPath(path);
+		if (guid.empty())
+			if (Texture* t = Texture::LoadFromFile(path)) { db->RegisterTexture(t); db->SetAssetPath(t->guid, path); guid = t->guid; }
+		if (!guid.empty())
+		{
+			if (!mr->mat)   // ensure an instance exists to override
+			{
+				Material* asset = db->GetMaterial(mr->matGuid);
+				mr->mat = asset ? asset->Clone() : new Material();
+			}
+			mr->mat->diffuseGuid = guid;
+			mr->mat->Resolve();
+			changed = true;
+		}
+	}
+
+	if (!changed) return;
+	AppInstance::GetSingleton()->selectedInHieararchy = a;
+	std::string after = nuke::SaveAtomToString(a);
+	World* w = AppInstance::GetSingleton()->currentScene;
+	long id = a->id.id, parent = a->parent ? a->parent->id.id : 0;
+	int index = 0; { auto& lst = a->parent ? a->parent->children : w->GetHierarchy(); int i = 0; for (Atom* s : lst) { if (s == a) { index = i; break; } ++i; } }
+	PushUndo(ext == ".numat" ? "Assign material" : "Assign texture",
+		[this, id, parent, index, before]{ ApplyAtomState(id, parent, index, before); },
+		[this, id, parent, index, after ]{ ApplyAtomState(id, parent, index, after ); });
 }
 
 Atom* EditorUI::SpawnMeshAsset(const std::string& path)

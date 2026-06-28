@@ -178,12 +178,10 @@ void EditorUI::DrawMeshRendererInspector(nuke::MeshRenderer* mr)
 	if (Material* m = mr->mat)
 	{
 		ImGui::SeparatorText("Material");
-		AssetPicker("Shader", m->shaderGuid, "shader", "world");
-		if (!m->shader || m->shader->guid != m->shaderGuid) m->shader = db->GetShader(m->shaderGuid);
-		ImGui::ColorEdit4("Color", m->color);
-		if (!m->diffuseGuid.empty())  ImGui::Text("diffuse:  %s", m->diffuseGuid.c_str());
-		if (!m->normalGuid.empty())   ImGui::Text("normal:   %s", m->normalGuid.c_str());
-		if (!m->specularGuid.empty()) ImGui::Text("specular: %s", m->specularGuid.c_str());
+		// Reflection-driven: shader + every PBR map (asset pickers) + color swatch + metallic/roughness/
+		// emissive — all from Material's [[nuke::prop]] schema, no per-field hardcode here.
+		if (DrawFields(m, m->GetType()))
+			m->Resolve();   // rebind shader/textures after an edit
 
 		// Shader params: schema from the instance's shader, VALUES on the instance (m->props),
 		// saved with the world. Unset shows the shader's default.
@@ -231,7 +229,10 @@ bool EditorUI::DrawFields(void* obj, nuke::TypeInfo* ti)
 		{
 		case nuke::FT::Bool:   changed |= ImGui::Checkbox(n, (bool*)a); break;
 		case nuke::FT::Int:    changed |= ImGui::InputInt(n, (int*)a); break;
-		case nuke::FT::Float:  changed |= ImGui::DragFloat(n, (float*)a, 0.05f); break;
+		case nuke::FT::Float:
+			if (f.fmax > f.fmin) changed |= ImGui::SliderFloat(n, (float*)a, f.fmin, f.fmax);   // [[prop(min,max)]]
+			else                 changed |= ImGui::DragFloat(n, (float*)a, 0.05f);
+			break;
 		case nuke::FT::Double: changed |= ImGui::InputDouble(n, (double*)a); break;
 		case nuke::FT::String:
 		{
@@ -258,6 +259,12 @@ bool EditorUI::DrawFields(void* obj, nuke::TypeInfo* ti)
 		{
 			Vector4* v = (Vector4*)a; float t[4] = { (float)v->x, (float)v->y, (float)v->z, (float)v->w };
 			if (ImGui::DragFloat4(n, t, 0.05f)) { v->x = t[0]; v->y = t[1]; v->z = t[2]; v->w = t[3]; changed = true; }
+			break;
+		}
+		case nuke::FT::Color:
+		{
+			Color* c = (Color*)a; float t[4] = { (float)c->r, (float)c->g, (float)c->b, (float)c->a };
+			if (ImGui::ColorEdit4(n, t)) { c->r = t[0]; c->g = t[1]; c->b = t[2]; c->a = t[3]; changed = true; }
 			break;
 		}
 		default: break;

@@ -1,5 +1,6 @@
 // hierarchy panel — tree, icons, search, drag&drop (reparent + asset instantiate), focus. EditorUI.
 #include <editor/editorui.h>
+#include <API/Model/Light.h>
 #include <cmath>
 
 static bool hierCI(const std::string& hay, const std::string& needle)
@@ -12,6 +13,8 @@ static bool hierCI(const std::string& hay, const std::string& needle)
 const char* EditorUI::AtomIcon(Atom* go)
 {
 	if (go->GetComponent<Camera>())       return ICON_LC_VIDEO;
+	if (Light* l = go->GetComponent<Light>())   // light by type: sun / bulb / spotlight
+		return l->type == 0 ? ICON_LC_SUN : (l->type == 2 ? ICON_LC_SPOTLIGHT : ICON_LC_LIGHTBULB);
 	if (go->GetComponent<MeshRenderer>()) return ICON_LC_BOX;
 	return ICON_LC_ATOM;
 }
