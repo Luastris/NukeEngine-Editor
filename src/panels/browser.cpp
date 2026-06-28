@@ -621,10 +621,10 @@ void EditorUI::winBrowser()
 	}
 
 	// --- toolbar: view mode | search | filters ---
-	const char* modes[] = { ICON_LC_LAYOUT_GRID " Tiles", ICON_LC_LIST " List",
-	                        ICON_LC_FOLDER_TREE " Tree", ICON_LC_BOXES " By Type" };
+	const char* modes[] = { ICON_LC_LAYOUT_GRID " Tiles", ICON_LC_LIST " List", ICON_LC_FOLDER_TREE " Tree" };
+	if (browserView < 0 || browserView > 2) browserView = 0;   // drop the removed "By Type" mode
 	ImGui::SetNextItemWidth(130);
-	ImGui::Combo("##bview", &browserView, modes, 4);
+	ImGui::Combo("##bview", &browserView, modes, 3);
 	ImGui::SameLine();
 	ImGui::SetNextItemWidth(180);
 	ImGui::InputTextWithHint("##bsearch", ICON_LC_SEARCH " Search", browserSearch, sizeof(browserSearch));
@@ -664,23 +664,6 @@ void EditorUI::winBrowser()
 
 	DrawRenamePopup();   // rename modal (works in all views; before the mode early-returns)
 	DrawDeletePopup();   // delete-confirm modal
-
-	// --- By Type: in-memory ResDB dump (kept as a separate mode) ---
-	if (browserView == 3)
-	{
-		ImGui::Separator();
-		ImGui::BeginChild("##browserfiles");   // only the list scrolls; toolbar stays pinned
-		ResDB* db = ResDB::getSingleton();
-		if (ImGui::CollapsingHeader("Meshes", ImGuiTreeNodeFlags_DefaultOpen))
-			for (Mesh* m : db->meshes) if (m) ImGui::BulletText("%s  (%s)", m->name, m->guid.c_str());
-		if (ImGui::CollapsingHeader("Materials")) ImGui::Text("%d material(s)", (int)db->materials.size());
-		if (ImGui::CollapsingHeader("Textures"))  ImGui::Text("%d texture(s)", (int)db->textures.size());
-		if (ImGui::CollapsingHeader("Prefabs"))
-			for (Atom* p : db->prefabs) if (p) ImGui::BulletText("%s", p->GetName().c_str());
-		ImGui::EndChild();
-		ImGui::End();
-		return;
-	}
 
 	bfs::path root = bfs::path(contentDir);
 	bfs::path cwd  = browserCwd.empty() ? root : bfs::path(browserCwd);
@@ -775,15 +758,24 @@ void EditorUI::winBrowser()
 
 	if (browserView == 0)            // Tiles
 	{
-		float cell = 84.0f, availW = ImGui::GetContentRegionAvail().x;
+		const float tile = 64.0f, cell = 84.0f;
+		float availW = ImGui::GetContentRegionAvail().x;
 		int per = (int)(availW / cell); if (per < 1) per = 1;
+		// Truncate a label to the tile width with an ellipsis.
+		auto fit = [tile](const std::string& s) {
+			if (ImGui::CalcTextSize(s.c_str()).x <= tile) return s;
+			std::string o = s;
+			while (!o.empty() && ImGui::CalcTextSize((o + "..").c_str()).x > tile) o.pop_back();
+			return o + "..";
+		};
 		int i = 0;
-		if (!atRoot)   // ".." cell: click = go up, drop a file here = move it up one level
+		if (!atRoot)   // ".." cell: DOUBLE-click = go up, drop a file here = move it up one level
 		{
 			ImGui::PushID("up");
 			ImGui::BeginGroup();
-			if (ImGui::Button(ICON_LC_CORNER_LEFT_UP "##upcell", ImVec2(64, 64))) BrowserNavigate(cwd.parent_path().string());
+			ImGui::Button(ICON_LC_CORNER_LEFT_UP "##upcell", ImVec2(tile, tile));
 			BrowserFolderDropTarget(cwd.parent_path().string());
+			if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) BrowserNavigate(cwd.parent_path().string());
 			ImGui::TextUnformatted("..");
 			ImGui::EndGroup();
 			ImGui::PopID();
@@ -795,21 +787,21 @@ void EditorUI::winBrowser()
 			ImGui::BeginGroup();
 			bool seld = (e.path == browserSel);
 			if (seld) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.42f, 0.68f, 1.0f));
-			bool clicked = ImGui::Button(e.icon, ImVec2(64, 64));
+			bool clicked = ImGui::Button(e.icon, ImVec2(tile, tile));
 			if (seld) ImGui::PopStyleColor();
 			BrowserDragSource(e.path);                       // drag this entry
 			if (e.isDir) BrowserFolderDropTarget(e.path);    // drop a file onto this folder = move
-			if (clicked) browserSel = e.path;
-			if (clicked && e.isDir) BrowserNavigate(e.path);
-			if (!e.isDir && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0))
+			if (clicked) browserSel = e.path;                // single click = select only
+			if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0))   // double click = activate (all items)
 			{
-				if      (e.ext == ".nuprefab") InstantiatePrefab(e.path);
+				if      (e.isDir)              BrowserNavigate(e.path);
+				else if (e.ext == ".nuprefab") InstantiatePrefab(e.path);
 				else if (e.ext == ".nuworld")  OpenWorldFromBrowser(e.path);
 			}
 			EntryContextMenu(e.path, e.isDir);   // right-click: Rename / Delete
 			std::string disp = isDirty(e) ? e.name + " *" : e.name;
-			char nm[28]; snprintf(nm, sizeof(nm), "%.24s", disp.c_str());
-			ImGui::TextUnformatted(nm);
+			ImGui::TextUnformatted(fit(disp).c_str());
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", disp.c_str());   // full name on hover
 			ImGui::EndGroup();
 			ImGui::PopID();
 			if (++i % per != 0) ImGui::SameLine();
