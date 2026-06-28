@@ -1,6 +1,7 @@
 // toolbar panel — EditorUI method definitions (translation unit).
 #include <editor/editorui.h>
 #include <API/Model/Light.h>
+#include <API/Model/Environment.h>
 
 // ---- toolbar ----
 // A flat button that stays highlighted while `active` (radio/toggle look).
@@ -46,6 +47,15 @@ void EditorUI::SpawnLight(int type, const char* atomName)
 	Light* l = new Light();
 	l->type = type;
 	go->AddComponent(l);
+	app->currentScene->Add(go);
+	app->selectedInHieararchy = go;
+	RecordAdd(go);
+}
+void EditorUI::SpawnEnvironment()
+{
+	AppInstance* app = AppInstance::GetSingleton();
+	Atom* go = new Atom("Environment");
+	go->AddComponent(new Environment());
 	app->currentScene->Add(go);
 	app->selectedInHieararchy = go;
 	RecordAdd(go);
@@ -98,6 +108,7 @@ void EditorUI::Toolbar()
 				if (ImGui::MenuItem(ICON_LC_SPOTLIGHT " Spot"))        SpawnLight(2, "Spot Light");
 				ImGui::EndMenu();
 			}
+			if (ImGui::MenuItem(ICON_LC_CLOUD_SUN " Environment")) SpawnEnvironment();
 			ImGui::EndPopup();
 		}
 		// World/Local space toggle for the gizmo (also hotkey X).

@@ -274,6 +274,7 @@ public:
 	void SpawnCube();
 	void SpawnCamera();
 	void SpawnLight(int type, const char* atomName);   // type 0=dir 1=point 2=spot
+	void SpawnEnvironment();                           // atom + Environment (sky/ambient)
 	void Toolbar();
 	void Draw();
 	// undo/redo (generic command stack)
