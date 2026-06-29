@@ -214,6 +214,7 @@ void EditorUI::EditorMenu()
 			MenuHotkeyItem("Save World As...",    "editor.world.saveas");
 			ImGui::Separator();
 			MenuHotkeyItem("Project Settings...", "editor.settings");
+			if (ImGui::MenuItem("World Settings...")) worldSettingsOpen = true;
 			ImGui::Separator();
 			if (ImGui::MenuItem("Quit", "Alt+F4")) {}
 			ImGui::EndMenu();
@@ -243,6 +244,7 @@ void EditorUI::EditorMenu()
 			ImGui::MenuItem("About", nullptr, &win->about);
 			ImGui::Separator();
 			ImGui::MenuItem("Project Settings", nullptr, &settingsOpen);
+			ImGui::MenuItem("World Settings", nullptr, &worldSettingsOpen);
 			ImGui::EndMenu();
 		}
 		ImGui::EndMainMenuBar();

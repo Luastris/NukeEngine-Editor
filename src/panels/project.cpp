@@ -269,6 +269,7 @@ void EditorUI::SaveEditorState()
 	nlohmann::json wo = nlohmann::json::object();   // host-owned window open flags (e.g. plugin windows)
 	for (auto& kv : AppInstance::GetSingleton()->windowOpen) wo[kv.first] = kv.second;
 	j["windowOpen"] = wo;
+	j["worldSettingsOpen"] = worldSettingsOpen;   // keep the World Settings window open across restarts
 	if (iRender* r = AppInstance::GetSingleton()->render) j["maximized"] = r->isWindowMaximized();
 	bfs::ofstream f{bfs::path(projectDir + "/editor_state.json")};
 	if (f) f << j.dump(2);
@@ -316,6 +317,7 @@ void EditorUI::LoadEditorState()
 	if (j.contains("windowOpen") && j["windowOpen"].is_object())
 		for (auto& kv : j["windowOpen"].items())
 			AppInstance::GetSingleton()->windowOpen[kv.key()] = kv.value().get<bool>();
+	worldSettingsOpen = j.value("worldSettingsOpen", false);
 	if (j.contains("maximized"))
 		if (iRender* r = AppInstance::GetSingleton()->render) r->setWindowMaximized(j["maximized"].get<bool>());
 }

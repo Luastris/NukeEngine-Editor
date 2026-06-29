@@ -195,6 +195,7 @@ void EditorUI::Draw()
 		tup.second();
 
 	winSettings();        // Project Settings window (default world + hotkeys)
+	winWorldSettings();   // World Settings window (global shadows etc., saved in the .nuworld)
 	DrawSaveAsPopup();    // "Save World As" modal
 	TrackUndo();          // capture a selected-atom edit for undo when the UI settles
 	TrackDirty();         // refresh the dirty "*" marker

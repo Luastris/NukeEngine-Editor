@@ -213,6 +213,10 @@ public:
 	void RegisterInspectorOverrides();
 	void DrawMeshRendererInspector(nuke::MeshRenderer* mr);
 	void DrawPostProcessInspector(nuke::PostProcess* pp);
+	void winWorldSettings();   // World Settings window (global shadow settings, saved in the .nuworld)
+	bool worldSettingsOpen = false;
+	World::Settings wsBefore;  // pre-edit snapshot of world settings (idle baseline for undo)
+	bool wsEditing = false;
 	bool DrawFields(void* obj, nuke::TypeInfo* ti);
 	void DrawDynamicProps(nuke::Component* cmp);
 	bool EditV3(const char* rowLabel, double v[3]);

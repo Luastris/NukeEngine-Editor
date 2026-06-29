@@ -285,3 +285,59 @@ void EditorUI::winSettings()
 	}
 	ImGui::End();
 }
+
+// World Settings window — world-level render settings (saved in the .nuworld). Currently global shadows;
+// WHICH lights cast shadows stays per-Light. Edits push to the renderer live + mark the world dirty.
+void EditorUI::winWorldSettings()
+{
+	if (!worldSettingsOpen) return;
+	ImGui::SetNextWindowSize(ImVec2(440, 0), ImGuiCond_FirstUseEver);
+	if (ImGui::Begin("World Settings", &worldSettingsOpen))
+	{
+		World* w = AppInstance::GetSingleton()->currentScene;
+		if (!w) { ImGui::TextDisabled("No world loaded."); ImGui::End(); return; }
+		World::Settings& s = w->settings;
+		auto apply = [this](const World::Settings& st) {
+			World* ww = AppInstance::GetSingleton()->currentScene; if (!ww) return;
+			ww->settings = st;
+			if (iRender* r = AppInstance::GetSingleton()->render)
+				r->setShadowSettings(st.shadowRes, st.shadowDistance, st.shadowDepthBias, st.shadowNormalBias, st.shadowSoftness);
+			worldDirty = true; UpdateWindowTitle();
+		};
+		auto same = [](const World::Settings& a, const World::Settings& b) {
+			return a.shadowRes == b.shadowRes && a.shadowDistance == b.shadowDistance && a.shadowDepthBias == b.shadowDepthBias
+			    && a.shadowNormalBias == b.shadowNormalBias && a.shadowSoftness == b.shadowSoftness;
+		};
+
+		ImGui::SeparatorText("Shadows (global)");
+		ImGui::TextDisabled("Which lights cast is per-Light; these tune all shadow maps.");
+		bool changed = false;
+		const char* resLabels[] = { "1024", "2048", "4096" };
+		const int   resVals[]   = { 1024, 2048, 4096 };
+		int ri = (s.shadowRes >= 4096) ? 2 : (s.shadowRes >= 2048 ? 1 : 0);
+		if (ImGui::Combo("Resolution", &ri, resLabels, IM_ARRAYSIZE(resLabels))) { s.shadowRes = resVals[ri]; changed = true; }
+		changed |= ImGui::SliderFloat("Distance (directional)", &s.shadowDistance, 5.0f, 300.0f, "%.0f");
+		changed |= ImGui::SliderFloat("Depth Bias", &s.shadowDepthBias, 0.0f, 0.01f, "%.4f");
+		changed |= ImGui::SliderFloat("Normal Bias", &s.shadowNormalBias, 0.0f, 0.5f, "%.3f");
+		changed |= ImGui::SliderFloat("Softness (PCF)", &s.shadowSoftness, 0.0f, 4.0f, "%.2f");
+
+		if (changed) apply(s);   // live apply + mark dirty
+
+		// Undo: snapshot while idle (true pre-edit value), push ONE command when an edit settles.
+		bool active = ImGui::IsAnyItemActive();
+		if (active) wsEditing = true;
+		else if (wsEditing)
+		{
+			wsEditing = false;
+			if (!same(s, wsBefore))
+			{
+				World::Settings before = wsBefore, after = s;
+				PushUndo("World settings",
+					[this, apply, before]{ apply(before); },
+					[this, apply, after ]{ apply(after ); });
+			}
+		}
+		if (!active) wsBefore = s;   // refresh the idle baseline for the next edit
+	}
+	ImGui::End();
+}
