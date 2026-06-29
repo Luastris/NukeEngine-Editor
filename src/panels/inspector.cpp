@@ -171,9 +171,27 @@ void EditorUI::DrawPostProcessInspector(nuke::PostProcess* pp)
 {
 	ResDB* db = ResDB::getSingleton();
 	pp->EnsureParsed();
-	ImGui::SeparatorText("Post Effects (run in order)");
+	ImGui::SeparatorText("Post Effects (run in order — drag to reorder)");
 
-	int removeAt = -1, moveUp = -1, moveDown = -1;
+	int removeAt = -1, dragFrom = -1, dragTo = -1;
+	const ImGuiPayload* dpl = ImGui::GetDragDropPayload();
+	bool dndActive = dpl && dpl->IsDataType("PP_FX");
+	// Thin "insert before index N" zone on the top edge of a row (drag only; adds no layout height) — same
+	// technique as the hierarchy, so the drop position follows the cursor instead of always landing on top.
+	auto gapZone = [&](int beforeIdx, ImVec2 mn, ImVec2 mx)
+	{
+		if (!dndActive) return;
+		ImVec2 saved = ImGui::GetCursorScreenPos();
+		ImGui::SetCursorScreenPos(ImVec2(mn.x, mn.y - 3.0f));
+		ImGui::InvisibleButton(("##gap" + std::to_string(beforeIdx)).c_str(), ImVec2(mx.x - mn.x, 6.0f));
+		if (ImGui::BeginDragDropTarget())
+		{
+			ImGui::GetWindowDrawList()->AddLine(ImVec2(mn.x, mn.y), ImVec2(mx.x, mn.y), IM_COL32(255, 160, 30, 255), 2.0f);
+			if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("PP_FX")) { dragFrom = *(const int*)p->Data; dragTo = beforeIdx; }
+			ImGui::EndDragDropTarget();
+		}
+		ImGui::SetCursorScreenPos(saved);
+	};
 	for (size_t i = 0; i < pp->effects.size(); ++i)
 	{
 		nuke::PostEffect& e = pp->effects[i];
@@ -183,13 +201,18 @@ void EditorUI::DrawPostProcessInspector(nuke::PostProcess* pp)
 		ImGui::SameLine();
 		nuke::Shader* sh = db->GetShader(e.shaderGuid);
 		std::string title = sh ? sh->name : (e.shaderGuid.empty() ? std::string("(pick a shader)") : e.shaderGuid);
+		ImGui::SetNextItemAllowOverlap();   // so the X button (drawn over the header) takes its own clicks
 		bool open = ImGui::CollapsingHeader((title + "##h" + std::to_string(i)).c_str());
-		ImGui::SameLine(ImGui::GetContentRegionMax().x - 78);
-		if (ImGui::SmallButton("Up"))  moveUp = (int)i;
-		ImGui::SameLine();
-		if (ImGui::SmallButton("Dn"))  moveDown = (int)i;
-		ImGui::SameLine();
+		ImVec2 hmn = ImGui::GetItemRectMin(), hmx = ImGui::GetItemRectMax();   // header rect (for the gap line)
+		if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_None))
+		{
+			int src = (int)i; ImGui::SetDragDropPayload("PP_FX", &src, sizeof(int));
+			ImGui::TextUnformatted(title.c_str());
+			ImGui::EndDragDropSource();
+		}
+		ImGui::SameLine(ImGui::GetContentRegionMax().x - 24);
 		if (ImGui::SmallButton(ICON_LC_X "##x")) removeAt = (int)i;
+		gapZone((int)i, hmn, hmx);   // drop here = insert BEFORE effect i
 		if (open)
 		{
 			if (AssetPicker("Shader", e.shaderGuid, "postshader")) { e.props.clear(); pp->Commit(); }
@@ -211,9 +234,30 @@ void EditorUI::DrawPostProcessInspector(nuke::PostProcess* pp)
 		}
 		ImGui::PopID();
 	}
-	if      (removeAt >= 0)             { pp->effects.erase(pp->effects.begin() + removeAt); pp->Commit(); }
-	else if (moveUp > 0)               { std::swap(pp->effects[moveUp], pp->effects[moveUp - 1]); pp->Commit(); }
-	else if (moveDown >= 0 && moveDown + 1 < (int)pp->effects.size()) { std::swap(pp->effects[moveDown], pp->effects[moveDown + 1]); pp->Commit(); }
+	// Tail zone: drop below the last effect = move to the END of the chain.
+	if (dndActive && !pp->effects.empty())
+	{
+		ImVec2 mn = ImGui::GetCursorScreenPos();
+		float w = ImGui::GetContentRegionAvail().x;
+		ImGui::InvisibleButton("##gapend", ImVec2(w, 8.0f));
+		if (ImGui::BeginDragDropTarget())
+		{
+			ImGui::GetWindowDrawList()->AddLine(ImVec2(mn.x, mn.y + 1), ImVec2(mn.x + w, mn.y + 1), IM_COL32(255, 160, 30, 255), 2.0f);
+			if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("PP_FX")) { dragFrom = *(const int*)p->Data; dragTo = (int)pp->effects.size(); }
+			ImGui::EndDragDropTarget();
+		}
+	}
+	if (removeAt >= 0) { pp->effects.erase(pp->effects.begin() + removeAt); pp->Commit(); }
+	else if (dragFrom >= 0 && dragTo >= 0 && dragFrom != dragTo
+	         && dragFrom < (int)pp->effects.size() && dragTo <= (int)pp->effects.size())
+	{
+		nuke::PostEffect moved = pp->effects[dragFrom];
+		pp->effects.erase(pp->effects.begin() + dragFrom);
+		int dst = (dragTo > dragFrom) ? dragTo - 1 : dragTo;   // index shifts after the erase
+		if (dst < 0) dst = 0; if (dst > (int)pp->effects.size()) dst = (int)pp->effects.size();
+		pp->effects.insert(pp->effects.begin() + dst, moved);
+		pp->Commit();
+	}
 
 	ImGui::Separator();
 	if (ImGui::Button(ICON_LC_PLUS " Add Effect")) { pp->effects.push_back(nuke::PostEffect{}); pp->Commit(); }
