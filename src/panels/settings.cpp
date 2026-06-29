@@ -306,7 +306,7 @@ void EditorUI::winWorldSettings()
 		};
 		auto same = [](const World::Settings& a, const World::Settings& b) {
 			return a.shadowRes == b.shadowRes && a.shadowDistance == b.shadowDistance && a.shadowDepthBias == b.shadowDepthBias
-			    && a.shadowNormalBias == b.shadowNormalBias && a.shadowSoftness == b.shadowSoftness;
+			    && a.shadowNormalBias == b.shadowNormalBias && a.shadowSoftness == b.shadowSoftness && a.frustumCull == b.frustumCull;
 		};
 
 		ImGui::SeparatorText("Shadows (global)");
@@ -320,6 +320,10 @@ void EditorUI::winWorldSettings()
 		changed |= ImGui::SliderFloat("Depth Bias", &s.shadowDepthBias, 0.0f, 0.01f, "%.4f");
 		changed |= ImGui::SliderFloat("Normal Bias", &s.shadowNormalBias, 0.0f, 0.5f, "%.3f");
 		changed |= ImGui::SliderFloat("Softness (PCF)", &s.shadowSoftness, 0.0f, 4.0f, "%.2f");
+
+		ImGui::SeparatorText("Culling");
+		changed |= ImGui::Checkbox("Frustum Culling", &s.frustumCull);
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Skip drawing objects outside the camera frustum (perf).\nTurn off if off-screen geometry must still render (e.g. reflections).");
 
 		if (changed) apply(s);   // live apply + mark dirty
 
