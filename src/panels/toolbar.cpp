@@ -2,6 +2,7 @@
 #include <editor/editorui.h>
 #include <API/Model/Light.h>
 #include <API/Model/Environment.h>
+#include <API/Model/ReflectionProbe.h>
 
 // ---- toolbar ----
 // A flat button that stays highlighted while `active` (radio/toggle look).
@@ -60,6 +61,15 @@ void EditorUI::SpawnEnvironment()
 	app->selectedInHieararchy = go;
 	RecordAdd(go);
 }
+void EditorUI::SpawnReflectionProbe()
+{
+	AppInstance* app = AppInstance::GetSingleton();
+	Atom* go = new Atom("Reflection Probe");
+	go->AddComponent(new ReflectionProbe());
+	app->currentScene->Add(go);
+	app->selectedInHieararchy = go;
+	RecordAdd(go);
+}
 void EditorUI::SpawnCamera()
 {
 	AppInstance* app = AppInstance::GetSingleton();
@@ -109,6 +119,7 @@ void EditorUI::Toolbar()
 				ImGui::EndMenu();
 			}
 			if (ImGui::MenuItem(ICON_LC_CLOUD_SUN " Environment")) SpawnEnvironment();
+			if (ImGui::MenuItem(ICON_LC_GLOBE " Reflection Probe")) SpawnReflectionProbe();
 			ImGui::EndPopup();
 		}
 		// World/Local space toggle for the gizmo (also hotkey X).
