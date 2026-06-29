@@ -253,7 +253,7 @@ void EditorUI::SaveEditorState()
 		j["editorCamera"]["rot"] = { t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w };
 	}
 	if (auto sel = AppInstance::GetSingleton()->selectedInHieararchy)
-		j["selected"] = sel->GetName();
+		j["selected"] = (long long)sel->id.id;   // stable id (recursive lookup), not name (name misses children)
 	nlohmann::json o = nlohmann::json::object();
 	for (auto& kv : uiOpen) o[kv.first] = kv.second;
 	j["uiOpen"]  = o;
@@ -277,8 +277,8 @@ void EditorUI::LoadEditorState()
 	if (j.is_discarded()) return;
 	if (j.contains("uiOpen") && j["uiOpen"].is_object())
 		for (auto& kv : j["uiOpen"].items()) uiOpen[kv.key()] = kv.value().get<bool>();
-	if (j.contains("selected") && j["selected"].is_string())
-		pendingSelect = j["selected"].get<std::string>();
+	if (j.contains("selected") && j["selected"].is_number_integer())
+		pendingSelectId = (long)j["selected"].get<long long>();
 	if (j.contains("editorCamera") && editorCam && editorCam->transform)
 	{
 		nlohmann::json& jc = j["editorCamera"];

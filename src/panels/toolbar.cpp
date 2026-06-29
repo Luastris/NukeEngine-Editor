@@ -176,12 +176,12 @@ void EditorUI::Draw()
 	if (AppInstance::GetSingleton()->playState == 1)
 		AppInstance::GetSingleton()->currentScene->Update();
 
-	// Restore the selection saved in editor_state.json, once the scene is loaded.
-	if (!pendingSelect.empty())
+	// Restore the selection saved in editor_state.json, once the scene is loaded (by stable id, recursive).
+	if (pendingSelectId)
 	{
-		if (Atom* a = AppInstance::GetSingleton()->currentScene->Get(pendingSelect.c_str()))
+		if (Atom* a = AppInstance::GetSingleton()->currentScene->GetById(pendingSelectId))
 			AppInstance::GetSingleton()->selectedInHieararchy = a;
-		pendingSelect.clear();
+		pendingSelectId = 0;
 	}
 	// Order matters: main menu, then the toolbar side-bar, then the dock space —
 	// each reserves viewport work-area for the next, so panels sit below both bars.

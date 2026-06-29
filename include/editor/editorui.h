@@ -82,7 +82,7 @@ private:
 	uint64_t camPreviewRT = 0;          // small RT for the selected camera's preview
 	nuke::Camera* previewCam = nullptr; // camera currently retargeted to the preview RT
 	std::map<std::string, bool> uiOpen; // persisted CollapsingHeader states (Components + per atom/component)
-	std::string pendingSelect;          // atom name to reselect after load (from editor_state.json)
+	long pendingSelectId = 0;           // atom id to reselect after load (from editor_state.json; recursive)
 	int  browserView = 0;               // asset browser: 0 Tiles, 1 List, 2 Tree, 3 By Type
 	char browserSearch[128] = "";
 	bool fMesh = true, fMat = true, fTex = true, fPrefab = true;   // browser type filters
