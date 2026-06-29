@@ -235,7 +235,7 @@ void EditorUI::PushUndo(const std::string& label, std::function<void()> undoFn, 
 	redoStack.clear();
 }
 
-void EditorUI::ResetUndo() { undoStack.clear(); redoStack.clear(); editing = false; editAtomId = 0; editBefore.clear(); }
+void EditorUI::ResetUndo() { undoStack.clear(); redoStack.clear(); editing = false; editAtomId = 0; editBefore.clear(); idleSnap.clear(); idleAtomId = 0; }
 
 void EditorUI::Undo()
 {
@@ -274,28 +274,49 @@ void EditorUI::TrackUndo()
 {
 	AppInstance* app = AppInstance::GetSingleton();
 	if (app->playState != 0) return;   // never track during PIE
-	bool active = ImGui::IsAnyItemActive() || ImGuizmo::IsUsing();
+	ImGuiID activeId = ImGui::GetActiveID();
+	bool active = (activeId != 0) || ImGuizmo::IsUsing();
 	Atom* sel = app->selectedInHieararchy;
-	if (active && !editing)
-	{
-		editing    = true;
-		editAtomId = sel ? sel->id.id : 0;
-		editBefore = sel ? SaveAtomToString(sel) : std::string();
-	}
-	else if (!active && editing)
+	long  selId = sel ? sel->id.id : 0;
+
+	// Flush the in-progress edit when manipulation ends, OR when focus jumps straight to a DIFFERENT widget
+	// (clicking prop B while A is still active — no idle frame between — would otherwise merge both props into
+	// one undo step). The gizmo isn't an ImGui item (activeId 0), so don't treat it as a widget change.
+	bool focusChanged = editing && active && !ImGuizmo::IsUsing() && activeId != editActiveId;
+	std::string flushedAfter;
+	if (editing && (!active || focusChanged))
 	{
 		editing = false;
-		if (!editAtomId) return;
-		Atom* a = app->currentScene->GetById(editAtomId);
-		if (!a) return;
-		std::string after = SaveAtomToString(a);
-		if (after == editBefore) return;                       // nothing actually changed on this atom
-		long id = editAtomId, parent = AtomParentId(a); int index = AtomIndex(app->currentScene, a);
-		std::string before = editBefore;
-		PushUndo("Edit " + a->GetName(),
-			[this, id, parent, index, before]{ ApplyAtomState(id, parent, index, before); },
-			[this, id, parent, index, after ]{ ApplyAtomState(id, parent, index, after ); });
+		Atom* a = editAtomId ? app->currentScene->GetById(editAtomId) : nullptr;
+		if (a)
+		{
+			std::string after = SaveAtomToString(a);
+			flushedAfter = after;
+			if (after != editBefore)                            // something actually changed on this atom
+			{
+				long id = editAtomId, parent = AtomParentId(a); int index = AtomIndex(app->currentScene, a);
+				std::string before = editBefore;
+				PushUndo("Edit " + a->GetName(),
+					[this, id, parent, index, before]{ ApplyAtomState(id, parent, index, before); },
+					[this, id, parent, index, after ]{ ApplyAtomState(id, parent, index, after ); });
+			}
+		}
 	}
+	// Begin a fresh edit. "before" = the state from BEFORE this edit: when chaining straight from another
+	// widget, the just-flushed "after"; otherwise the last idle snapshot (true pre-edit state — dodges the
+	// slider's click-to-position jump that a same-frame snapshot would already include).
+	if (active && !editing)
+	{
+		editing      = true;
+		editAtomId   = selId;
+		editActiveId = activeId;
+		if (focusChanged && !flushedAfter.empty())          editBefore = flushedAfter;
+		else if (selId && selId == idleAtomId && !idleSnap.empty()) editBefore = idleSnap;
+		else                                                editBefore = sel ? SaveAtomToString(sel) : std::string();
+	}
+	// While nothing is being manipulated, keep a fresh snapshot of the selected atom — it is the correct
+	// "before" for the NEXT edit (captured a frame ahead of any widget change).
+	if (!active) { idleAtomId = selId; idleSnap = sel ? SaveAtomToString(sel) : std::string(); }
 }
 
 void EditorUI::RecordAdd(Atom* a)
