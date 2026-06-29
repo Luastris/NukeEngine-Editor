@@ -1,7 +1,11 @@
 // settings panel — hotkeys, world (level) commands, Project Settings window. EditorUI methods.
 #include <editor/editorui.h>
 #include <boost/filesystem.hpp>
+#include <boost/filesystem/fstream.hpp>
+#include <config.h>
+#include <nlohmann/json.hpp>
 #include <vector>
+#include <sstream>
 
 // Register the editor's built-in hotkeys in the shared pool. Plugins register their own the same
 // way (nuke::Hotkeys::Get()->Register(...)); conflicts auto-resolve to UNBOUND for manual fixup.
@@ -222,6 +226,31 @@ void EditorUI::winSettings()
 			if (hdrPeak < hdrPaperWhite) hdrPeak = hdrPaperWhite;
 			if (AppInstance::GetSingleton()->render) AppInstance::GetSingleton()->render->setHDRNits(hdrPaperWhite, hdrPeak);
 			SaveProject();
+		}
+
+		// Render backend (D3D11 / D3D12). The device is created once at launch, so a switch needs a restart.
+		// Persisted to config/main.json window.backend (read by the bootstrap into WindowDesc.backend).
+		{
+			nuke::Config* cfg = nuke::Config::getSingleton();
+			int be = cfg ? cfg->window.backend : 0;
+			const char* beModes[] = { "Direct3D 11", "Direct3D 12 (ray tracing)" };
+			if (cfg && ImGui::Combo("Render Backend", &be, beModes, IM_ARRAYSIZE(beModes)) && be != cfg->window.backend)
+			{
+				cfg->window.backend = be;
+				try   // read-modify-write config/main.json (JSON comments are not preserved on rewrite)
+				{
+					nlohmann::json j;
+					boost::filesystem::ifstream in("config/main.json");
+					if (in) { std::stringstream ss; ss << in.rdbuf(); j = nlohmann::json::parse(ss.str(), nullptr, false, true); }
+					if (!j.is_object()) j = nlohmann::json::object();
+					j["window"]["backend"] = be;
+					boost::filesystem::ofstream out("config/main.json");
+					if (out) out << j.dump(2);
+				}
+				catch (...) {}
+			}
+			ImGui::SameLine(); ImGui::TextDisabled("(?)");
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("D3D12 enables hardware ray tracing (RTX).\nApplied on the next editor restart.");
 		}
 
 		ImGui::SeparatorText("Disk sync");
