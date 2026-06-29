@@ -25,6 +25,8 @@ void EditorUI::SaveProject()
 	j["conflictMode"]    = conflictMode;    // disk changed, editor dirty: 0=ask,1=reload,2=overwrite,3=merge
 	j["msaa"]            = msaaSamples;      // anti-aliasing sample count (1/2/4/8)
 	j["hdr"]             = hdrEnabled;       // HDR pipeline on/off
+	j["hdrPaperWhite"]   = hdrPaperWhite;    // HDR10 diffuse-white nits
+	j["hdrPeak"]         = hdrPeak;          // HDR10 peak nits
 	j["plugins"]      = enabledPlugins;     // which pooled plugins this project loads
 	nlohmann::json hk = nlohmann::json::object();   // hotkey bindings (id -> chord), saved with the project
 	for (auto& kv : nuke::Hotkeys::Get()->ExportBindings()) hk[kv.first] = kv.second;
@@ -45,10 +47,13 @@ void EditorUI::LoadProject()
 	conflictMode    = j.value("conflictMode", 0);
 	msaaSamples     = j.value("msaa", 4);
 	hdrEnabled      = j.value("hdr", true);
+	hdrPaperWhite   = j.value("hdrPaperWhite", 200.0f);
+	hdrPeak         = j.value("hdrPeak", 1000.0f);
 	if (AppInstance::GetSingleton()->render)
 	{
 		AppInstance::GetSingleton()->render->setMSAA(msaaSamples);
 		AppInstance::GetSingleton()->render->setHDR(hdrEnabled);
+		AppInstance::GetSingleton()->render->setHDRNits(hdrPaperWhite, hdrPeak);
 	}
 	contentDir   = projectDir + "/" + j.value("content", std::string("content"));
 	enabledPlugins.clear();

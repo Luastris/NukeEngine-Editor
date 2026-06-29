@@ -106,6 +106,8 @@ private:
 	int         conflictMode    = 0;               // disk changed, editor dirty: 0=ask,1=reload,2=overwrite,3=merge
 	int         msaaSamples     = 4;               // anti-aliasing sample count (1=off,2,4,8); applied via render->setMSAA
 	bool        hdrEnabled      = true;            // HDR pipeline on/off; applied via render->setHDR
+	float       hdrPaperWhite   = 200.0f;          // HDR10 diffuse-white nits (display mapping)
+	float       hdrPeak         = 1000.0f;         // HDR10 highlight peak nits
 	std::string pendingDisk;                        // disk JSON awaiting a reload/conflict decision
 	bool        openReloadPopup = false, openConflictPopup = false;
 	bool        wasWindowFocused = true;            // disk re-check fires on focus-gain (avoids mid-write triggers)

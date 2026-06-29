@@ -213,6 +213,17 @@ void EditorUI::winSettings()
 		ImGui::SameLine(); ImGui::TextDisabled("(?)");
 		if (ImGui::IsItemHovered()) ImGui::SetTooltip("On: float (RGBA16F) rendering, real dynamic range (enables bloom later).\nOff: LDR (RGBA8), cheaper, tonemap inline.");
 
+		// HDR10 display mapping (only affects real HDR10 output in the Player; harmless otherwise).
+		bool nitsCh = false;
+		nitsCh |= ImGui::SliderFloat("HDR Paper White (nits)", &hdrPaperWhite, 80.0f, 400.0f, "%.0f");
+		nitsCh |= ImGui::SliderFloat("HDR Peak (nits)", &hdrPeak, 200.0f, 4000.0f, "%.0f");
+		if (nitsCh)
+		{
+			if (hdrPeak < hdrPaperWhite) hdrPeak = hdrPaperWhite;
+			if (AppInstance::GetSingleton()->render) AppInstance::GetSingleton()->render->setHDRNits(hdrPaperWhite, hdrPeak);
+			SaveProject();
+		}
+
 		ImGui::SeparatorText("Disk sync");
 		const char* cleanModes[] = { "Ask", "Auto-reload" };
 		if (ImGui::Combo("Disk changed (editor clean)", &reloadCleanMode, cleanModes, IM_ARRAYSIZE(cleanModes))) SaveProject();
