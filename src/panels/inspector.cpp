@@ -247,20 +247,41 @@ void EditorUI::DrawPostProcessInspector(nuke::PostProcess* pp)
 			ImGui::EndDragDropTarget();
 		}
 	}
-	if (removeAt >= 0) { pp->effects.erase(pp->effects.begin() + removeAt); pp->Commit(); }
+	// Structural edits (add / remove / reorder) are undoable as one atom-subtree delta (the param drags are
+	// already covered by the active-widget edit detector; these are button/DnD clicks it can't see).
+	nuke::Atom* owner = pp->atom;
+	World* w = AppInstance::GetSingleton()->currentScene;
+	auto recordStructural = [&](const char* label, const std::function<void()>& mutate)
+	{
+		if (!owner || !w) { mutate(); return; }
+		long id = owner->id.id, parent = owner->parent ? owner->parent->id.id : 0;
+		int index = 0; { auto& lst = owner->parent ? owner->parent->children : w->GetHierarchy(); int i = 0; for (Atom* s : lst) { if (s == owner) { index = i; break; } ++i; } }
+		std::string before = nuke::SaveAtomToString(owner);
+		mutate();
+		std::string after = nuke::SaveAtomToString(owner);
+		if (after == before) return;
+		editing = false; editAtomId = 0;   // this is its own command — don't double up with the auto detector
+		PushUndo(label,
+			[this, id, parent, index, before]{ ApplyAtomState(id, parent, index, before); },
+			[this, id, parent, index, after ]{ ApplyAtomState(id, parent, index, after ); });
+	};
+
+	if (removeAt >= 0)
+		recordStructural("Remove effect", [&] { pp->effects.erase(pp->effects.begin() + removeAt); pp->Commit(); });
 	else if (dragFrom >= 0 && dragTo >= 0 && dragFrom != dragTo
 	         && dragFrom < (int)pp->effects.size() && dragTo <= (int)pp->effects.size())
-	{
-		nuke::PostEffect moved = pp->effects[dragFrom];
-		pp->effects.erase(pp->effects.begin() + dragFrom);
-		int dst = (dragTo > dragFrom) ? dragTo - 1 : dragTo;   // index shifts after the erase
-		if (dst < 0) dst = 0; if (dst > (int)pp->effects.size()) dst = (int)pp->effects.size();
-		pp->effects.insert(pp->effects.begin() + dst, moved);
-		pp->Commit();
-	}
+		recordStructural("Reorder effect", [&] {
+			nuke::PostEffect moved = pp->effects[dragFrom];
+			pp->effects.erase(pp->effects.begin() + dragFrom);
+			int dst = (dragTo > dragFrom) ? dragTo - 1 : dragTo;   // index shifts after the erase
+			if (dst < 0) dst = 0; if (dst > (int)pp->effects.size()) dst = (int)pp->effects.size();
+			pp->effects.insert(pp->effects.begin() + dst, moved);
+			pp->Commit();
+		});
 
 	ImGui::Separator();
-	if (ImGui::Button(ICON_LC_PLUS " Add Effect")) { pp->effects.push_back(nuke::PostEffect{}); pp->Commit(); }
+	if (ImGui::Button(ICON_LC_PLUS " Add Effect"))
+		recordStructural("Add effect", [&] { pp->effects.push_back(nuke::PostEffect{}); pp->Commit(); });
 }
 
 // MeshRenderer's custom panel: the selected material's sub-properties (shader/color/textures).
