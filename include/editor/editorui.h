@@ -215,6 +215,7 @@ public:
 	void DrawPostProcessInspector(nuke::PostProcess* pp);
 	void winWorldSettings();   // World Settings window (global shadow settings, saved in the .nuworld)
 	bool worldSettingsOpen = false;
+	bool worldSettingsFocus = false;   // focus the window only when opened via menu, not when restored on load
 	World::Settings wsBefore;  // pre-edit snapshot of world settings (idle baseline for undo)
 	bool wsEditing = false;
 	bool DrawFields(void* obj, nuke::TypeInfo* ti);

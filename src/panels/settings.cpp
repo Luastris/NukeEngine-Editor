@@ -291,8 +291,11 @@ void EditorUI::winSettings()
 void EditorUI::winWorldSettings()
 {
 	if (!worldSettingsOpen) return;
+	if (worldSettingsFocus) { ImGui::SetNextWindowFocus(); worldSettingsFocus = false; }   // only when opened via menu
 	ImGui::SetNextWindowSize(ImVec2(440, 0), ImGuiCond_FirstUseEver);
-	if (ImGui::Begin("World Settings", &worldSettingsOpen))
+	// NoFocusOnAppearing: restored-open on load it must NOT steal the dock's active tab (explicit menu-open
+	// focuses it via SetNextWindowFocus above).
+	if (ImGui::Begin("World Settings", &worldSettingsOpen, ImGuiWindowFlags_NoFocusOnAppearing))
 	{
 		World* w = AppInstance::GetSingleton()->currentScene;
 		if (!w) { ImGui::TextDisabled("No world loaded."); ImGui::End(); return; }
