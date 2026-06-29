@@ -19,6 +19,7 @@
 #include "interface/AppInstance.h"
 #include "interface/Modular.h"
 #include "API/Model/MeshRenderer.h"
+#include "API/Model/PostProcess.h"   // custom post-effect chain inspector
 #include "API/Model/UnknownComponent.h"
 #include "API/Model/resdb.h"   // asset database (meshes by GUID, browser)
 #include "import/assimporter.h" // external model import -> native .numesh
@@ -130,6 +131,8 @@ private:
 	struct UndoCmd { std::function<void()> undo, redo; std::string label; };
 	std::vector<UndoCmd> undoStack, redoStack;
 	std::string editBefore; long editAtomId = 0; bool editing = false;   // selected-atom edit detector
+	unsigned int editActiveId = 0;   // ImGui active-widget id of the in-progress edit (flush when it changes)
+	std::string  idleSnap; long idleAtomId = 0;   // last snapshot taken while NOTHING was being edited = true pre-edit "before"
 	Atom* pendingCompAtom = nullptr; Component* pendingCompDel = nullptr;   // deferred component removal
 	std::string rebindId;                          // hotkey id currently being rebound ("" = none)
 	bool        settingsOpen = false;              // Project Settings window open?
@@ -207,6 +210,7 @@ public:
 	bool AssetPicker(const char* label, std::string& guid, const std::string& kind, const std::string& defGuid = "");
 	void RegisterInspectorOverrides();
 	void DrawMeshRendererInspector(nuke::MeshRenderer* mr);
+	void DrawPostProcessInspector(nuke::PostProcess* pp);
 	bool DrawFields(void* obj, nuke::TypeInfo* ti);
 	void DrawDynamicProps(nuke::Component* cmp);
 	bool EditV3(const char* rowLabel, double v[3]);

@@ -1,5 +1,6 @@
 // inspector panel — EditorUI method definitions (translation unit).
 #include <editor/editorui.h>
+#include <API/Model/Camera.h>   // restrict the PostProcess component to camera atoms
 
 void EditorUI::CamComponent(Camera* cam)
 {
@@ -62,7 +63,7 @@ bool EditorUI::AssetPicker(const char* label, std::string& guid, const std::stri
 	auto disp = [&](const std::string& g) -> std::string {
 		if (g.empty()) return "(none)";
 		if (kind == "script") return bfs::path(g).stem().string();   // value is a content-relative path
-		if (kind == "shader") { Shader* s = db->GetShader(g); return s ? s->name : g; }
+		if (kind == "shader" || kind == "postshader") { Shader* s = db->GetShader(g); return s ? s->name : g; }
 		std::string p = db->PathForGuid(g);
 		if (!p.empty()) return bfs::path(p).stem().string();
 		if (kind == "mesh")     { Mesh* m = db->GetMesh(g);     return m ? std::string(m->name) : g; }
@@ -124,7 +125,8 @@ bool EditorUI::AssetPicker(const char* label, std::string& guid, const std::stri
 			if (ImGui::Selectable("(none)", guid.empty())) { guid.clear(); changed = true; ImGui::CloseCurrentPopup(); }
 		if      (kind == "mesh")     for (Mesh* m : db->meshes)      { if (m) item(m->guid, disp(m->guid)); }
 		else if (kind == "material") for (Material* m : db->materials) { if (m) item(m->guid, disp(m->guid)); }
-		else if (kind == "shader")   for (Shader* s : db->shaders)   { if (s) item(s->guid, disp(s->guid)); }
+		else if (kind == "shader")   for (Shader* s : db->shaders)   { if (s && !s->isPost) item(s->guid, disp(s->guid)); }
+		else if (kind == "postshader") for (Shader* s : db->shaders) { if (s && s->isPost) item(s->guid, disp(s->guid)); }
 		else if (kind == "texture")  for (Texture* t : db->textures) { if (t) item(t->guid, disp(t->guid)); }
 		else if (kind == "script")   // scan the project content for .lua files (value = content-relative path)
 		{
@@ -157,6 +159,64 @@ void EditorUI::RegisterInspectorOverrides()
 	inspectorOverrides["MeshRenderer"] = [this](nuke::Component* c) {
 		DrawMeshRendererInspector(static_cast<nuke::MeshRenderer*>(c));
 	};
+	inspectorOverrides["PostProcess"] = [this](nuke::Component* c) {
+		DrawPostProcessInspector(static_cast<nuke::PostProcess*>(c));
+	};
+}
+
+// PostProcess panel: the ordered chain of custom post-effect shaders. Each effect = a post-shader pick +
+// its params (parsed from the shader's PostParams), reorder + remove + add. Effects edit the runtime list
+// and Commit() back to the serialized field.
+void EditorUI::DrawPostProcessInspector(nuke::PostProcess* pp)
+{
+	ResDB* db = ResDB::getSingleton();
+	pp->EnsureParsed();
+	ImGui::SeparatorText("Post Effects (run in order)");
+
+	int removeAt = -1, moveUp = -1, moveDown = -1;
+	for (size_t i = 0; i < pp->effects.size(); ++i)
+	{
+		nuke::PostEffect& e = pp->effects[i];
+		ImGui::PushID((int)i);
+		bool en = e.enabled;
+		if (ImGui::Checkbox("##en", &en)) { e.enabled = en; pp->Commit(); }
+		ImGui::SameLine();
+		nuke::Shader* sh = db->GetShader(e.shaderGuid);
+		std::string title = sh ? sh->name : (e.shaderGuid.empty() ? std::string("(pick a shader)") : e.shaderGuid);
+		bool open = ImGui::CollapsingHeader((title + "##h" + std::to_string(i)).c_str());
+		ImGui::SameLine(ImGui::GetContentRegionMax().x - 78);
+		if (ImGui::SmallButton("Up"))  moveUp = (int)i;
+		ImGui::SameLine();
+		if (ImGui::SmallButton("Dn"))  moveDown = (int)i;
+		ImGui::SameLine();
+		if (ImGui::SmallButton(ICON_LC_X "##x")) removeAt = (int)i;
+		if (open)
+		{
+			if (AssetPicker("Shader", e.shaderGuid, "postshader")) { e.props.clear(); pp->Commit(); }
+			sh = db->GetShader(e.shaderGuid);
+			if (sh)
+				for (const nuke::ShaderProp& sp : sh->props)
+				{
+					auto it = e.props.find(sp.name);
+					std::array<float, 4> val = (it != e.props.end()) ? it->second
+						: std::array<float, 4>{ sp.def[0], sp.def[1], sp.def[2], sp.def[3] };
+					bool ch = false;
+					if (sp.components == 1)      ch = ImGui::DragFloat(sp.name.c_str(), val.data(), 0.01f);
+					else if (sp.components == 2) ch = ImGui::DragFloat2(sp.name.c_str(), val.data(), 0.01f);
+					else if (sp.components == 3) ch = ImGui::DragFloat3(sp.name.c_str(), val.data(), 0.01f);
+					else                         ch = ImGui::DragFloat4(sp.name.c_str(), val.data(), 0.01f);
+					if (ch) { e.props[sp.name] = val; pp->Commit(); }
+				}
+			if (!sh) ImGui::TextDisabled("Pick a post shader (a *.post.hlsl asset).");
+		}
+		ImGui::PopID();
+	}
+	if      (removeAt >= 0)             { pp->effects.erase(pp->effects.begin() + removeAt); pp->Commit(); }
+	else if (moveUp > 0)               { std::swap(pp->effects[moveUp], pp->effects[moveUp - 1]); pp->Commit(); }
+	else if (moveDown >= 0 && moveDown + 1 < (int)pp->effects.size()) { std::swap(pp->effects[moveDown], pp->effects[moveDown + 1]); pp->Commit(); }
+
+	ImGui::Separator();
+	if (ImGui::Button(ICON_LC_PLUS " Add Effect")) { pp->effects.push_back(nuke::PostEffect{}); pp->Commit(); }
 }
 
 // MeshRenderer's custom panel: the selected material's sub-properties (shader/color/textures).
@@ -468,6 +528,7 @@ void EditorUI::winInspector()
 				bool& st = OpenState(atomName + "/" + label);
 				ImGui::SetNextItemOpen(st);
 				std::string hdr = uc ? (label + "  (plugin not loaded)") : label;
+				ImGui::SetNextItemAllowOverlap();   // let the X button (drawn over the header) take its own clicks
 				st = ImGui::CollapsingHeader(hdr.c_str());
 				ImGui::SameLine(ImGui::GetContentRegionMax().x - 22);   // remove (undoable)
 				if (ImGui::SmallButton(ICON_LC_X "##delcomp")) { pendingCompAtom = sltd; pendingCompDel = cmp; }
@@ -516,6 +577,9 @@ void EditorUI::winInspector()
 			for (nuke::TypeInfo* ti : nuke::Registry_All())
 			{
 				if (!ti->create || ti->base != "Component")
+					continue;
+				// PostProcess is a per-camera effect — only offer it on an atom that has a Camera component.
+				if (ti->name == "PostProcess" && !sltd->GetComponent<nuke::Camera>())
 					continue;
 				if (ImGui::MenuItem(ti->name.c_str()))
 					sltd->AddComponent((nuke::Component*)ti->create());
