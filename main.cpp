@@ -307,6 +307,7 @@ int main(int argc, char** argv)
     wd.fullscreen  = config->window.fullscreen;
     wd.transparent = config->window.transparent;
     wd.opacity     = config->window.opacity;
+    wd.backend     = config->window.backend;   // D3D11 / D3D12 (from config.json window.backend)
     LoadBuiltinShaders(render, "shaders");   // engine loads built-in shaders + feeds the renderer
     render->init(wd);
     cout << "[main]\t\t\t" << "> Render: " << render << endl;
