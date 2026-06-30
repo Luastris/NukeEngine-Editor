@@ -664,7 +664,7 @@ void EditorUI::CreateShaderAsset(const std::string& folder)
 		ResDB::getSingleton()->RegisterShader(s);
 		ResDB::getSingleton()->SetAssetPath(base, vsp.string());
 		if (iRender* r = AppInstance::GetSingleton()->render)
-			s->rendererHandle = r->createShaderPipeline(s->vsSource.c_str(), s->psSource.c_str());
+			s->rendererHandle = r->createShaderPipeline(s->name.c_str(), s->vsSource.c_str(), s->psSource.c_str());
 	}
 	browserSel = vsp.string();
 }

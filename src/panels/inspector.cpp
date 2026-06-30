@@ -224,7 +224,10 @@ void EditorUI::DrawPostProcessInspector(nuke::PostProcess* pp)
 					std::array<float, 4> val = (it != e.props.end()) ? it->second
 						: std::array<float, 4>{ sp.def[0], sp.def[1], sp.def[2], sp.def[3] };
 					bool ch = false;
-					if (sp.components == 1)      ch = ImGui::DragFloat(sp.name.c_str(), val.data(), 0.01f);
+					if (sp.isColor && sp.components >= 3)
+						ch = (sp.components == 3) ? ImGui::ColorEdit3(sp.name.c_str(), val.data(), ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR)
+						                          : ImGui::ColorEdit4(sp.name.c_str(), val.data(), ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR);
+					else if (sp.components == 1) ch = ImGui::DragFloat(sp.name.c_str(), val.data(), 0.01f);
 					else if (sp.components == 2) ch = ImGui::DragFloat2(sp.name.c_str(), val.data(), 0.01f);
 					else if (sp.components == 3) ch = ImGui::DragFloat3(sp.name.c_str(), val.data(), 0.01f);
 					else                         ch = ImGui::DragFloat4(sp.name.c_str(), val.data(), 0.01f);
@@ -322,7 +325,10 @@ void EditorUI::DrawMeshRendererInspector(nuke::MeshRenderer* mr)
 				const char* lbl = sp.name.c_str();
 				if (sp.name.rfind("g_", 0) == 0) lbl += 2;   // strip g_ prefix for display
 				bool ch = false;
-				switch (sp.components)
+				if (sp.isColor && sp.components >= 3)   // @color: HDR-capable colour picker (tints may exceed 1)
+					ch = (sp.components == 3) ? ImGui::ColorEdit3(lbl, v, ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR)
+					                          : ImGui::ColorEdit4(lbl, v, ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR);
+				else switch (sp.components)
 				{
 				case 1:  ch = ImGui::DragFloat(lbl, v, 0.01f); break;
 				case 2:  ch = ImGui::DragFloat2(lbl, v, 0.01f); break;
