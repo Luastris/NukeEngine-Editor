@@ -1,5 +1,6 @@
 // project panel — EditorUI method definitions (translation unit).
 #include <editor/editorui.h>
+#include <API/Model/PostProcess.h>   // serialize the editor camera's post-effect chain (RTX/rtreflect)
 #include <iterator>   // istreambuf_iterator (read world file for disk-sync)
 
 // The project manifest (project/game.nuproj): content dir, startup world, plugin load list.
@@ -254,8 +255,16 @@ void EditorUI::SaveEditorState()
 	if (editorCam && editorCam->transform)
 	{
 		Transform& t = *editorCam->transform;
-		j["editorCamera"]["pos"] = { t.position.x, t.position.y, t.position.z };
-		j["editorCamera"]["rot"] = { t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w };
+		nlohmann::json& jc = j["editorCamera"];
+		jc["pos"] = { t.position.x, t.position.y, t.position.z };
+		jc["rot"] = { t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w };
+		jc["fov"] = editorCam->fov; jc["near"] = editorCam->_near; jc["far"] = editorCam->_far;
+		jc["rw"] = editorCam->r_width; jc["rh"] = editorCam->r_height; jc["depth"] = editorCam->depth;
+		jc["free"] = editorCam->freeMode; jc["invMouse"] = editorCam->invertMouse;
+		jc["yaw"] = camYaw; jc["pitch"] = camPitch;   // editor look angles (not on the Camera component)
+		// Post-effect chain (RTX/rtreflect/...) lives on a PostProcess sibling component — persist it too.
+		if (Atom* a = AppInstance::GetSingleton()->currentScene->Get("Editor Camera"))
+			if (nuke::PostProcess* pp = a->GetComponent<nuke::PostProcess>()) { pp->Commit(); jc["post"] = pp->effectsData; }
 	}
 	if (auto sel = AppInstance::GetSingleton()->selectedInHieararchy)
 		j["selected"] = (long long)sel->id.id;   // stable id (recursive lookup), not name (name misses children)
@@ -291,6 +300,22 @@ void EditorUI::LoadEditorState()
 		Transform& t = *editorCam->transform;
 		if (jc.contains("pos")) { auto p = jc["pos"]; t.position.x = p[0]; t.position.y = p[1]; t.position.z = p[2]; }
 		if (jc.contains("rot")) { auto r = jc["rot"]; t.rotation.x = r[0]; t.rotation.y = r[1]; t.rotation.z = r[2]; t.rotation.w = r[3]; }
+		editorCam->fov = jc.value("fov", editorCam->fov);
+		editorCam->_near = jc.value("near", editorCam->_near); editorCam->_far = jc.value("far", editorCam->_far);
+		editorCam->r_width = jc.value("rw", editorCam->r_width); editorCam->r_height = jc.value("rh", editorCam->r_height);
+		editorCam->depth = jc.value("depth", editorCam->depth);
+		editorCam->freeMode = jc.value("free", editorCam->freeMode); editorCam->invertMouse = jc.value("invMouse", editorCam->invertMouse);
+		camYaw = jc.value("yaw", camYaw); camPitch = jc.value("pitch", camPitch);
+		if (jc.contains("post"))   // restore the post-effect chain (RTX/rtreflect/...); recreate the component if needed
+		{
+			if (Atom* a = AppInstance::GetSingleton()->currentScene->Get("Editor Camera"))
+			{
+				nuke::PostProcess* pp = a->GetComponent<nuke::PostProcess>();
+				if (!pp) { pp = new nuke::PostProcess(); a->AddComponent(pp); }
+				pp->effectsData = jc["post"].get<std::string>();
+				pp->EnsureParsed();
+			}
+		}
 	}
 	if (j.contains("browser"))
 	{
