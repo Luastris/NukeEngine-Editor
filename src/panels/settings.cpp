@@ -253,6 +253,37 @@ void EditorUI::winSettings()
 			if (ImGui::IsItemHovered()) ImGui::SetTooltip("D3D12 enables hardware ray tracing (RTX).\nApplied on the next editor restart.");
 		}
 
+		// Ray Tracing (RTX) — GLOBAL reflection quality. The per-camera "rtreflect" post effect is the on/off
+		// switch; these control how it traces. Persisted to config/main.json ["raytracing"].
+		{
+			nuke::Config* cfg = nuke::Config::getSingleton();
+			if (cfg)
+			{
+				nuke::NukeRT& rt = cfg->rt;
+				bool ch = false, done = false;
+				ch |= ImGui::SliderFloat("RTX Intensity", &rt.intensity, 0.0f, 2.0f, "%.2f");        done |= ImGui::IsItemDeactivatedAfterEdit();
+				ch |= ImGui::SliderFloat("RTX Max Distance", &rt.maxDist, 1.0f, 1000.0f, "%.0f");     done |= ImGui::IsItemDeactivatedAfterEdit();
+				ch |= ImGui::SliderInt("RTX Bounces", &rt.bounces, 1, 7);                             done |= ImGui::IsItemDeactivatedAfterEdit();
+				ch |= ImGui::SliderFloat("RTX Roughness Cutoff", &rt.roughCutoff, 0.05f, 1.0f, "%.2f"); done |= ImGui::IsItemDeactivatedAfterEdit();
+				ImGui::SameLine(); ImGui::TextDisabled("(?)");
+				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Global RT reflection quality. Add the 'rtreflect' post effect to a camera to enable RT there (needs D3D12).");
+				if (ch && AppInstance::GetSingleton()->render)   // live preview
+					AppInstance::GetSingleton()->render->setRTReflection(rt.intensity, rt.maxDist, rt.bounces, rt.roughCutoff);
+				if (done)   // persist to config/main.json on edit-end (read-modify-write; comments not preserved)
+					try
+					{
+						nlohmann::json j;
+						boost::filesystem::ifstream in("config/main.json");
+						if (in) { std::stringstream ss; ss << in.rdbuf(); j = nlohmann::json::parse(ss.str(), nullptr, false, true); }
+						if (!j.is_object()) j = nlohmann::json::object();
+						j["raytracing"] = { {"intensity", rt.intensity}, {"maxDist", rt.maxDist}, {"bounces", rt.bounces}, {"roughCutoff", rt.roughCutoff} };
+						boost::filesystem::ofstream out("config/main.json");
+						if (out) out << j.dump(2);
+					}
+					catch (...) {}
+			}
+		}
+
 		ImGui::SeparatorText("Disk sync");
 		const char* cleanModes[] = { "Ask", "Auto-reload" };
 		if (ImGui::Combo("Disk changed (editor clean)", &reloadCleanMode, cleanModes, IM_ARRAYSIZE(cleanModes))) SaveProject();
