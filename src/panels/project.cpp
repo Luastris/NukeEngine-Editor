@@ -13,6 +13,18 @@ void EditorUI::SetProjectFile(const std::string& path)
 	projectDir  = p.has_parent_path() ? p.parent_path().string() : std::string(".");
 }
 
+// Phase-1 boot helper: read a single service-provider choice from the .nuproj without
+// running the full LoadProject() (which needs the render/UI up). Tolerant of a missing
+// or invalid file — "" lets the loader fall back to the first discovered provider.
+std::string EditorUI::EarlyProjectService(const std::string& service)
+{
+	bfs::ifstream f{bfs::path(projectFile)};
+	if (!f) return "";
+	nlohmann::json j = nlohmann::json::parse(f, nullptr, false);
+	if (j.is_discarded() || !j.contains("services") || !j["services"].is_object()) return "";
+	return j["services"].value(service, std::string());
+}
+
 void EditorUI::SaveProject()
 {
 	boost::system::error_code ec; bfs::create_directories(projectDir, ec);
@@ -29,6 +41,16 @@ void EditorUI::SaveProject()
 	j["hdrPaperWhite"]   = hdrPaperWhite;    // HDR10 diffuse-white nits
 	j["hdrPeak"]         = hdrPeak;          // HDR10 peak nits
 	j["plugins"]      = enabledPlugins;     // which pooled plugins this project loads
+	// Service provider choices (service -> dll). For hot-swappable services the LIVE
+	// provider is the truth; for PHASE_BOOT services (render) a persisted choice may be a
+	// pending restart-switch from the plugin window — never overwrite it with the live one.
+	for (auto& m : nuke::GetModules())
+	{
+		if (!m || !m->loaded || !*m->provides()) continue;
+		if (m->phase() == nuke::PHASE_BOOT && serviceChoices.count(m->provides())) continue;
+		serviceChoices[m->provides()] = m->moduleFile;
+	}
+	j["services"] = serviceChoices;
 	nlohmann::json hk = nlohmann::json::object();   // hotkey bindings (id -> chord), saved with the project
 	for (auto& kv : nuke::Hotkeys::Get()->ExportBindings()) hk[kv.first] = kv.second;
 	j["hotkeys"] = hk;
@@ -57,6 +79,10 @@ void EditorUI::LoadProject()
 		AppInstance::GetSingleton()->render->setHDRNits(hdrPaperWhite, hdrPeak);
 	}
 	contentDir   = projectDir + "/" + j.value("content", std::string("content"));
+	serviceChoices.clear();
+	if (j.contains("services") && j["services"].is_object())
+		for (auto& kv : j["services"].items())
+			if (kv.value().is_string()) serviceChoices[kv.key()] = kv.value().get<std::string>();
 	enabledPlugins.clear();
 	if (j.contains("plugins") && j["plugins"].is_array())
 	{
@@ -221,18 +247,22 @@ void EditorUI::DrawConflictPopup()
 
 // Activate the project's chosen plugins from the shared (already-discovered) pool. On a
 // project with no list yet (first run), default every discovered plugin ON and persist it.
+// PHASE_BOOT providers (the renderer) are NOT part of the plugin list — they were enabled
+// in boot phase 1 and are driven by serviceChoices instead.
 void EditorUI::ApplyProjectPlugins()
 {
 	auto& mods = nuke::GetModules();
 	if (!pluginListLoaded)
 	{
 		enabledPlugins.clear();
-		for (auto& m : mods) enabledPlugins.push_back(m->moduleFile);
+		for (auto& m : mods)
+			if (m->phase() != nuke::PHASE_BOOT) enabledPlugins.push_back(m->moduleFile);
 		pluginListLoaded = true;
 		SaveProject();
 	}
 	for (auto& m : mods)
 	{
+		if (m->phase() == nuke::PHASE_BOOT) continue;
 		bool want = std::find(enabledPlugins.begin(), enabledPlugins.end(), m->moduleFile) != enabledPlugins.end();
 		if (want) nuke::EnablePlugin(m.get());
 	}
@@ -243,7 +273,7 @@ void EditorUI::SyncEnabledPlugins()
 {
 	enabledPlugins.clear();
 	for (auto& m : nuke::GetModules())
-		if (m->loaded) enabledPlugins.push_back(m->moduleFile);
+		if (m->loaded && m->phase() != nuke::PHASE_BOOT) enabledPlugins.push_back(m->moduleFile);
 	SaveProject();
 }
 

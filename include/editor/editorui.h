@@ -147,7 +147,12 @@ private:
 	std::string startupWorld = "scene.nuworld";    // from the .nuproj
 	std::vector<std::string> enabledPlugins;       // per-project plugin load list (dll names)
 	bool pluginListLoaded = false;                 // did the .nuproj specify a plugin list?
+	// Per-project service provider choice (unified plugin model): service -> dll name, e.g.
+	// "render" -> "NukeRenderDiligent.dll". Boot services (render) apply on next start.
+	std::map<std::string, std::string> serviceChoices;
 	std::vector<std::pair<nuke::NUKEModule*, bool>> pendingPluginToggle;   // applied after the window loop
+	char        pluginFilter[128] = "";            // plugin window: text search over name + tags
+	int         pluginServiceFilter = 0;           // plugin window: 0=All, 1=Utility, 2+=service index
 	float camYaw = 0.0f, camPitch = 0.0f;   // editor camera look angles (radians)
 	float gizmoMatrix[16] = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };   // persistent during a gizmo drag
 	std::string pieSnapshot;   // scene serialized on Play, restored on Stop (PIE)
@@ -169,6 +174,10 @@ public:
 
 	// --- panel methods (definitions in src/panels/*.cpp) ---
 	// project
+	// Read one "services.<service>" choice straight from the .nuproj — used during phase-1
+	// boot, BEFORE LoadProject() (the render provider must come up before any UI exists).
+	// Returns "" when the project/key doesn't exist (caller falls back to the first provider).
+	std::string EarlyProjectService(const std::string& service);
 	void SaveProject();
 	void LoadProject();
 	void ApplyProjectPlugins();

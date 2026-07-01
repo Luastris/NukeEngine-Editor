@@ -1,5 +1,5 @@
 #include <API/Model/Atom.h>
-#include <interface/RenderModular.h>
+#include <interface/Services.h>
 #include <nukeui.h>
 #include "imgui.h"
 #include <editor/editorui.h>
@@ -276,11 +276,24 @@ int main(int argc, char** argv)
 		EditorUI::getSingleton()->SetProjectFile(projectArg);
 	}
 
-	// The renderer is loaded as a module (plugin), selected by id, with fallback
-	// to the first render module found in modules/.
-	iRender* render = LoadRenderModule("diligent");
+	// Two-phase startup, phase 1 (PHASE_BOOT). Discover the shared plugin pool first —
+	// metadata only, nothing activated — then enable the project's chosen render provider
+	// ("services.render" in the .nuproj, read early because the full LoadProject() runs
+	// after the window/UI exist). The renderer is an ordinary plugin now; the host gets
+	// its iRender through the service registry.
+	cout << "[main]\t\t\t" << "Discovering plugins..." << endl;
+	InitModules(instance);
+	NUKEModule* renderPlugin = FindServiceProvider("render",
+		EditorUI::getSingleton()->EarlyProjectService("render"));
+	if (!renderPlugin) {
+		cout << "[main]\t\t\t" << "No render provider found in modules/. Aborting." << endl;
+		return 1;
+	}
+	EnablePlugin(renderPlugin);
+	iRender* render = GetService<iRender>();
 	if (!render) {
-		cout << "[main]\t\t\t" << "No render module found in modules/. Aborting." << endl;
+		cout << "[main]\t\t\t" << "Render provider '" << renderPlugin->title
+		     << "' registered no iRender. Aborting." << endl;
 		return 1;
 	}
 	instance->render = render;
@@ -315,9 +328,6 @@ int main(int argc, char** argv)
 	// Bring up the UI module (ImGui) — it renders through the renderer's neutral
 	// seam, so this works regardless of which renderer module is loaded.
 	NukeUI::Init(render);
-
-	cout << "[main]\t\t\t" << "Discovering plugins..." << endl;
-    InitModules(instance);              // discover the shared plugin pool (no activation yet)
 
 	editorinit();                       // SetUp: loads the project + activates its chosen plugins
 	NukeUI::AddDrawCallback(editorDraw); // editor draws via the UI module each frame
@@ -360,7 +370,6 @@ int main(int argc, char** argv)
 
     cout << "[main]\t\t\t" << "shit down..." << endl;
     EditorUI::getSingleton()->SaveEditorState();   // persist editor state (camera, selection, panels)
-    Unload();
-    render->deinit();
+    Unload();   // runtime plugins first, then the render provider (its Shutdown deinits the renderer)
     return 0;
 }

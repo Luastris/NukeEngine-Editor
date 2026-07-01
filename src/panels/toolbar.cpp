@@ -222,6 +222,18 @@ void EditorUI::Draw()
 	{
 		for (auto& pt : pendingPluginToggle)
 		{
+			// PHASE_BOOT providers (the renderer) can't be swapped live: enabling one only
+			// persists the choice — it becomes the project's provider on next start. A live
+			// boot provider can't be turned OFF either (the engine can't run without it).
+			if (pt.first->phase() == nuke::PHASE_BOOT)
+			{
+				if (pt.second && *pt.first->provides())
+				{
+					serviceChoices[pt.first->provides()] = pt.first->moduleFile;
+					SaveProject();
+				}
+				continue;
+			}
 			if (pt.second) nuke::EnablePlugin(pt.first);
 			else           nuke::DisablePlugin(pt.first);
 		}
