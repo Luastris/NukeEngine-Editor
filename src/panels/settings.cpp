@@ -157,12 +157,88 @@ void EditorUI::OpenWorldFromBrowser(const std::string& fullPath)
 	SyncWorldBaseline();
 }
 
+// Apply a full project-settings snapshot: update editor members + engine config, push everything to the renderer
+// (live), and persist (game.nuproj via SaveProject + config/main.json for RTX). Used by the undo/redo closures and
+// "Reset to Defaults" so a single call fully restores a state.
+void EditorUI::ApplyProjectSettings(const ProjectSettings& ps)
+{
+	msaaSamples     = ps.msaa;
+	hdrEnabled      = ps.hdr;
+	hdrPaperWhite   = ps.paperWhite;
+	hdrPeak         = (ps.peak < ps.paperWhite) ? ps.paperWhite : ps.peak;
+	reloadCleanMode = ps.reloadClean;
+	conflictMode    = ps.conflict;
+	if (nuke::Config* cfg = nuke::Config::getSingleton())
+	{
+		cfg->rt.intensity   = ps.rtIntensity;
+		cfg->rt.maxDist     = ps.rtMaxDist;
+		cfg->rt.bounces     = ps.rtBounces;
+		cfg->rt.roughCutoff = ps.rtRoughCutoff;
+	}
+	if (iRender* r = AppInstance::GetSingleton()->render)
+	{
+		r->setMSAA(msaaSamples); msaaSamples = r->getMSAA();   // device may clamp
+		r->setHDR(hdrEnabled);
+		r->setHDRNits(hdrPaperWhite, hdrPeak);
+		r->setRTReflection(ps.rtIntensity, ps.rtMaxDist, ps.rtBounces, ps.rtRoughCutoff);
+	}
+	SaveProject();   // msaa/hdr/nits/disk-modes live in game.nuproj
+	try              // RTX lives in config/main.json ["raytracing"] (read-modify-write; comments not preserved)
+	{
+		nlohmann::json j;
+		boost::filesystem::ifstream in("config/main.json");
+		if (in) { std::stringstream ss; ss << in.rdbuf(); j = nlohmann::json::parse(ss.str(), nullptr, false, true); }
+		if (!j.is_object()) j = nlohmann::json::object();
+		j["raytracing"] = { {"intensity", ps.rtIntensity}, {"maxDist", ps.rtMaxDist}, {"bounces", ps.rtBounces}, {"roughCutoff", ps.rtRoughCutoff} };
+		boost::filesystem::ofstream out("config/main.json");
+		if (out) out << j.dump(2);
+	}
+	catch (...) {}
+}
+
 void EditorUI::winSettings()
 {
 	if (!settingsOpen) return;
 	ImGui::SetNextWindowSize(ImVec2(460, 420), ImGuiCond_FirstUseEver);
 	if (ImGui::Begin("Project Settings", &settingsOpen))
 	{
+		// Snapshot helpers for the undoable project settings (rendering + RTX + disk sync).
+		auto capturePS = [this]() -> ProjectSettings {
+			nuke::NukeRT rt; if (nuke::Config* c = nuke::Config::getSingleton()) rt = c->rt;
+			return { msaaSamples, hdrEnabled, hdrPaperWhite, hdrPeak, rt.intensity, rt.maxDist, rt.bounces, rt.roughCutoff, reloadCleanMode, conflictMode };
+		};
+		auto defaultPS = []() -> ProjectSettings {
+			nuke::NukeRT d;   // engine config defaults
+			return { 4, true, 200.0f, 1000.0f, d.intensity, d.maxDist, d.bounces, d.roughCutoff, 0, 0 };
+		};
+		auto samePS = [](const ProjectSettings& a, const ProjectSettings& b) {
+			return a.msaa == b.msaa && a.hdr == b.hdr && a.paperWhite == b.paperWhite && a.peak == b.peak
+			    && a.rtIntensity == b.rtIntensity && a.rtMaxDist == b.rtMaxDist && a.rtBounces == b.rtBounces
+			    && a.rtRoughCutoff == b.rtRoughCutoff && a.reloadClean == b.reloadClean && a.conflict == b.conflict;
+		};
+		// Per-field reset: a small ↺ button placed after a control that reverts JUST that field to its default
+		// (`after` = the current snapshot with the one field defaulted). Undoable as one command.
+		auto resetBtn = [&](const char* id, const ProjectSettings& after, const char* label) {
+			ImGui::SameLine();
+			ImGui::PushID(id);
+			bool hit = ImGui::SmallButton(ICON_LC_ROTATE_CCW);
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Reset to default");
+			ImGui::PopID();
+			if (hit)
+			{
+				ProjectSettings before = capturePS();
+				if (!samePS(before, after))
+				{
+					ApplyProjectSettings(after);
+					psBefore = capturePS();   // adopt as new idle baseline so the settler doesn't double-record
+					PushUndo(label, [this, before]{ ApplyProjectSettings(before); },
+					                [this, after ]{ ApplyProjectSettings(after ); });
+				}
+			}
+		};
+
+		const ProjectSettings PSD = defaultPS();   // per-field default source for the ↺ reset buttons
+
 		// --- Default world (the game loads this one after loading the project) ---
 		ImGui::SeparatorText("World");
 		std::vector<std::string> worlds;
@@ -206,6 +282,7 @@ void EditorUI::winSettings()
 			}
 			SaveProject();
 		}
+		{ ProjectSettings a = capturePS(); a.msaa = PSD.msaa; resetBtn("rst_aa", a, "Reset Anti-aliasing"); }
 		ImGui::SameLine(); ImGui::TextDisabled("(?)");
 		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Hardware multisampling for the world. Clamped to GPU support.");
 
@@ -214,13 +291,16 @@ void EditorUI::winSettings()
 			if (AppInstance::GetSingleton()->render) AppInstance::GetSingleton()->render->setHDR(hdrEnabled);
 			SaveProject();
 		}
+		{ ProjectSettings a = capturePS(); a.hdr = PSD.hdr; resetBtn("rst_hdr", a, "Reset HDR"); }
 		ImGui::SameLine(); ImGui::TextDisabled("(?)");
 		if (ImGui::IsItemHovered()) ImGui::SetTooltip("On: float (RGBA16F) rendering, real dynamic range (enables bloom later).\nOff: LDR (RGBA8), cheaper, tonemap inline.");
 
 		// HDR10 display mapping (only affects real HDR10 output in the Player; harmless otherwise).
 		bool nitsCh = false;
 		nitsCh |= ImGui::SliderFloat("HDR Paper White (nits)", &hdrPaperWhite, 80.0f, 400.0f, "%.0f");
+		{ ProjectSettings a = capturePS(); a.paperWhite = PSD.paperWhite; resetBtn("rst_pw", a, "Reset HDR Paper White"); }
 		nitsCh |= ImGui::SliderFloat("HDR Peak (nits)", &hdrPeak, 200.0f, 4000.0f, "%.0f");
+		{ ProjectSettings a = capturePS(); a.peak = PSD.peak; resetBtn("rst_peak", a, "Reset HDR Peak"); }
 		if (nitsCh)
 		{
 			if (hdrPeak < hdrPaperWhite) hdrPeak = hdrPaperWhite;
@@ -262,9 +342,13 @@ void EditorUI::winSettings()
 				nuke::NukeRT& rt = cfg->rt;
 				bool ch = false, done = false;
 				ch |= ImGui::SliderFloat("RTX Intensity", &rt.intensity, 0.0f, 2.0f, "%.2f");        done |= ImGui::IsItemDeactivatedAfterEdit();
+				{ ProjectSettings a = capturePS(); a.rtIntensity = PSD.rtIntensity; resetBtn("rst_rti", a, "Reset RTX Intensity"); }
 				ch |= ImGui::SliderFloat("RTX Max Distance", &rt.maxDist, 1.0f, 1000.0f, "%.0f");     done |= ImGui::IsItemDeactivatedAfterEdit();
+				{ ProjectSettings a = capturePS(); a.rtMaxDist = PSD.rtMaxDist; resetBtn("rst_rtd", a, "Reset RTX Max Distance"); }
 				ch |= ImGui::SliderInt("RTX Bounces", &rt.bounces, 1, 7);                             done |= ImGui::IsItemDeactivatedAfterEdit();
+				{ ProjectSettings a = capturePS(); a.rtBounces = PSD.rtBounces; resetBtn("rst_rtb", a, "Reset RTX Bounces"); }
 				ch |= ImGui::SliderFloat("RTX Roughness Cutoff", &rt.roughCutoff, 0.05f, 1.0f, "%.2f"); done |= ImGui::IsItemDeactivatedAfterEdit();
+				{ ProjectSettings a = capturePS(); a.rtRoughCutoff = PSD.rtRoughCutoff; resetBtn("rst_rtr", a, "Reset RTX Roughness Cutoff"); }
 				ImGui::SameLine(); ImGui::TextDisabled("(?)");
 				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Global RT reflection quality. Add the 'rtreflect' post effect to a camera to enable RT there (needs D3D12).");
 				if (ch && AppInstance::GetSingleton()->render)   // live preview
@@ -287,8 +371,29 @@ void EditorUI::winSettings()
 		ImGui::SeparatorText("Disk sync");
 		const char* cleanModes[] = { "Ask", "Auto-reload" };
 		if (ImGui::Combo("Disk changed (editor clean)", &reloadCleanMode, cleanModes, IM_ARRAYSIZE(cleanModes))) SaveProject();
+		{ ProjectSettings a = capturePS(); a.reloadClean = PSD.reloadClean; resetBtn("rst_rc", a, "Reset disk (clean)"); }
 		const char* conflModes[] = { "Ask", "Reload (use disk)", "Overwrite (use editor)", "Merge / resolve" };
 		if (ImGui::Combo("Disk changed (editor dirty)", &conflictMode, conflModes, IM_ARRAYSIZE(conflModes))) SaveProject();
+		{ ProjectSettings a = capturePS(); a.conflict = PSD.conflict; resetBtn("rst_cf", a, "Reset disk (dirty)"); }
+
+		// Undo for the value edits above: snapshot while idle (true pre-edit baseline), push ONE command when an
+		// edit settles. Widgets apply/persist live; this records the reversible delta. Default World + hotkeys
+		// keep their own undo/persist and are excluded from this snapshot (samePS ignores them).
+		bool psActive = ImGui::IsAnyItemActive();
+		if (psActive) psEditing = true;
+		else if (psEditing)
+		{
+			psEditing = false;
+			ProjectSettings after = capturePS();
+			if (!samePS(after, psBefore))
+			{
+				ProjectSettings before = psBefore;
+				PushUndo("Project settings",
+					[this, before]{ ApplyProjectSettings(before); },
+					[this, after ]{ ApplyProjectSettings(after ); });
+			}
+		}
+		if (!psActive) psBefore = capturePS();
 
 		// --- Hotkeys (centralized pool: rebind, see conflicts) ---
 		ImGui::SeparatorText("Hotkeys");

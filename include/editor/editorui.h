@@ -218,6 +218,18 @@ public:
 	bool worldSettingsFocus = false;   // focus the window only when opened via menu, not when restored on load
 	World::Settings wsBefore;  // pre-edit snapshot of world settings (idle baseline for undo)
 	bool wsEditing = false;
+
+	// Project Settings undo: a snapshot of the value-based project settings (rendering + RTX + disk sync).
+	// Same idle-snapshot -> PushUndo-on-settle scheme as world settings. Backend (restart-required) and the
+	// Default World (own undo) are intentionally NOT part of this snapshot.
+	struct ProjectSettings {
+		int   msaa; bool hdr; float paperWhite, peak;
+		float rtIntensity, rtMaxDist; int rtBounces; float rtRoughCutoff;
+		int   reloadClean, conflict;
+	};
+	ProjectSettings psBefore{};   // idle baseline for undo
+	bool psEditing = false;
+	void ApplyProjectSettings(const ProjectSettings& ps);   // set members+config, push to renderer, persist (nuproj+config)
 	bool DrawFields(void* obj, nuke::TypeInfo* ti);
 	void DrawDynamicProps(nuke::Component* cmp);
 	bool EditV3(const char* rowLabel, double v[3]);
