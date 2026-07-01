@@ -889,7 +889,7 @@ void EditorUI::winBrowser()
 			if (seld) ImGui::PopStyleColor();
 			BrowserDragSource(e.path);                       // drag this entry
 			if (e.isDir) BrowserFolderDropTarget(e.path);    // drop a file onto this folder = move
-			if (clicked) browserSel = e.path;                // single click = select only
+			if (clicked) { browserSel = e.path; AppInstance::GetSingleton()->selectedInHieararchy = nullptr; }   // select asset -> inspector shows it
 			if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0))   // double click = activate (all items)
 			{
 				if      (e.isDir)              BrowserNavigate(e.path);
@@ -924,6 +924,7 @@ void EditorUI::winBrowser()
 			if (clicked)
 			{
 				browserSel = e.path;
+				AppInstance::GetSingleton()->selectedInHieararchy = nullptr;   // select asset -> inspector shows it
 				if (ImGui::IsMouseDoubleClicked(0))
 				{
 					if (e.isDir)                   BrowserNavigate(e.path);

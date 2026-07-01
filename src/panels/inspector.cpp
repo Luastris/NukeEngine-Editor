@@ -1,6 +1,10 @@
 // inspector panel — EditorUI method definitions (translation unit).
 #include <editor/editorui.h>
 #include <API/Model/Camera.h>   // restrict the PostProcess component to camera atoms
+#include <API/Model/Texture.h>  // asset inspector: .nutex usage/info
+#include <API/Model/Material.h> // asset inspector: .numat fields
+#include <boost/filesystem.hpp>
+namespace bfs = boost::filesystem;
 
 void EditorUI::CamComponent(Camera* cam)
 {
@@ -658,9 +662,125 @@ void EditorUI::winInspector()
 			ImGui::EndPopup();
 		}
 	}
+	else if (!browserSel.empty() && bfs::is_regular_file(bfs::path(browserSel)))
+	{
+		DrawAssetInspector(browserSel);
+	}
 	else
 	{
-		ImGui::TextWrapped("Select an object in the Hierarchy.");
+		ImGui::TextWrapped("Select an object in the Hierarchy, or an asset in the Browser.");
 	}
 	ImGui::End();
+}
+
+// Inspector for a project asset selected in the Browser. Dispatched by extension: .nutex (usage + info),
+// .numat (reflected material fields), else read-only info + Open. Loaded assets are cached (reloaded on
+// selection change) so edits persist to the file (and are undoable).
+void EditorUI::DrawAssetInspector(const std::string& path)
+{
+	std::string ext = bfs::path(path).extension().string();
+	for (char& c : ext) c = (char)std::tolower((unsigned char)c);
+
+	boost::system::error_code mec;
+	long long mtime = (long long)bfs::last_write_time(bfs::path(path), mec);
+	if (path != inspAssetPath || mtime != inspAssetMtime)   // selection changed OR file changed on disk (reimport) -> refresh
+	{
+		if (inspTex) { delete inspTex; inspTex = nullptr; }
+		if (inspMat) { delete inspMat; inspMat = nullptr; }
+		inspAssetPath = path; inspAssetMtime = mtime;
+		if      (ext == ".nutex") inspTex = nuke::Texture::LoadFromFile(path);
+		else if (ext == ".numat") inspMat = nuke::Material::LoadFromFile(path);
+	}
+
+	ImGui::TextUnformatted(bfs::path(path).filename().string().c_str());
+	ImGui::SameLine(); ImGui::TextDisabled("%s", ext.c_str());
+	ImGui::Separator();
+
+	if (ext == ".nutex" && inspTex)
+	{
+		if (inspTex->renderTexture) { ImGui::TextDisabled("Render texture (%dx%d).", inspTex->width, inspTex->height); return; }
+		const char* fmt = inspTex->format == nuke::Texture::FMT_BC1 ? "BC1" : inspTex->format == nuke::Texture::FMT_BC3 ? "BC3"
+		                : inspTex->format == nuke::Texture::FMT_BC5 ? "BC5" : "RGBA8";
+		ImGui::Text("%d x %d   %s   %d mip(s)", inspTex->width, inspTex->height, fmt, inspTex->mipCount);
+		if (inspTex->frameCount > 1) ImGui::Text("Animated: %d frames", inspTex->frameCount);
+		ImGui::Spacing();
+		const char* usages[] = { "Color (sRGB)", "Normal Map", "Data (linear)", "Emissive (sRGB)" };
+		int u = inspTex->usage;
+		if (ImGui::Combo("Texture Type", &u, usages, IM_ARRAYSIZE(usages)) && u != inspTex->usage)
+		{
+			int before = inspTex->usage;
+			auto setUsage = [this, path](int val) {
+				if (inspAssetPath == path && inspTex) { inspTex->usage = val; inspTex->SaveToFile(path); }
+				else if (nuke::Texture* t = nuke::Texture::LoadFromFile(path)) { t->usage = val; t->SaveToFile(path); delete t; }
+			};
+			setUsage(u);
+			PushUndo("Texture type", [setUsage, before]{ setUsage(before); }, [setUsage, u]{ setUsage(u); });
+		}
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("How the engine treats this texture (color space / compression / normal handling).\nAuto-guessed from the filename at import; override here.\nNormal -> BC5 + green flip (re-import to re-compress after changing to/from Normal).");
+
+		if (inspTex->usage == nuke::Texture::UsageNormal)   // green convention (only meaningful for normal maps)
+		{
+			bool ig = inspTex->invertGreen;
+			if (ImGui::Checkbox("Invert Green (OpenGL +Y)", &ig) && ig != inspTex->invertGreen)
+			{
+				bool before = inspTex->invertGreen;
+				auto setIG = [this, path](bool val) {
+					std::string guid;
+					if (inspAssetPath == path && inspTex) { inspTex->invertGreen = val; inspTex->SaveToFile(path); guid = inspTex->guid; }
+					else if (nuke::Texture* t = nuke::Texture::LoadFromFile(path)) { t->invertGreen = val; t->SaveToFile(path); guid = t->guid; delete t; }
+					// live: update the ResDB-registered copy the renderer reads (green flip applies next frame, no reload)
+					if (!guid.empty()) if (nuke::Texture* live = nuke::ResDB::getSingleton()->GetTexture(guid)) live->invertGreen = val;
+				};
+				setIG(ig);
+				PushUndo("Normal green convention", [setIG, before]{ setIG(before); }, [setIG, ig]{ setIG(ig); });
+			}
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("On = OpenGL convention (+Y up, green flipped) — glTF/Blender/Substance default.\nOff = DirectX (-Y). Toggle if the relief looks inverted.");
+		}
+
+		// Compression override — re-compresses the .nutex in place (quality vs size). Normals default to BC5 (8bpp);
+		// BC1 halves the size but is blocky. Applied immediately (decode -> re-encode) + live in the renderer.
+		if (inspTex->format != nuke::Texture::FMT_RGBA8)
+		{
+			bool isNormal = (inspTex->usage == nuke::Texture::UsageNormal);
+			const char* opts[2]; int vals[2];
+			if (isNormal) { opts[0] = "BC5 (quality)"; opts[1] = "BC1 (small)";  vals[0] = nuke::Texture::FMT_BC5; vals[1] = nuke::Texture::FMT_BC1; }
+			else          { opts[0] = "BC1 (opaque)";  opts[1] = "BC3 (alpha)";  vals[0] = nuke::Texture::FMT_BC1; vals[1] = nuke::Texture::FMT_BC3; }
+			int cur = (inspTex->format == vals[1]) ? 1 : 0;
+			if (ImGui::Combo("Compression", &cur, opts, 2) && inspTex->format != vals[cur])
+			{
+				int before = inspTex->format, after = vals[cur];
+				auto applyFmt = [this, path](int f) {
+					bool owned = false;
+					nuke::Texture* t = (inspAssetPath == path && inspTex) ? inspTex : nullptr;
+					if (!t) { t = nuke::Texture::LoadFromFile(path); owned = true; }
+					if (!t) return;
+					if (t->Recompress(f)) t->SaveToFile(path);
+					if (nuke::Texture* live = nuke::ResDB::getSingleton()->GetTexture(t->guid))
+					{
+						if (live != t) { live->format = t->format; live->mipCount = t->mipCount; live->pixels = t->pixels; }
+						if (iRender* r = AppInstance::GetSingleton()->render) r->invalidateTexture(live);   // renderer re-uploads
+					}
+					if (owned) delete t;
+				};
+				applyFmt(after);
+				PushUndo("Texture compression", [applyFmt, before]{ applyFmt(before); }, [applyFmt, after]{ applyFmt(after); });
+			}
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Re-compress now. BC5 = 8 bpp (normals, quality); BC1 = 4 bpp (half the size, blocky). BC1<->BC5 is lossy.");
+		}
+	}
+	else if (ext == ".numat" && inspMat)
+	{
+		if (nuke::TypeInfo* ti = inspMat->GetType())
+			if (DrawFields(inspMat, ti)) inspMat->SaveToFile(path);   // reflected material fields; save on edit
+	}
+	else
+	{
+		boost::system::error_code ec;
+		uintmax_t sz = bfs::file_size(bfs::path(path), ec);
+		if (!ec) ImGui::Text("Size: %.1f KB", (double)sz / 1024.0);
+		if (ext == ".nuworld")  { if (ImGui::Button("Open World"))  OpenWorldFromBrowser(path); }
+		else if (ext == ".nuprefab") ImGui::TextDisabled("Prefab — drag into the world to instantiate.");
+		else if (ext == ".numesh")   ImGui::TextDisabled("Mesh asset.");
+		else ImGui::TextDisabled("No editable properties.");
+	}
 }

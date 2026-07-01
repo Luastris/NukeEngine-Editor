@@ -234,6 +234,13 @@ public:
 	void DrawDynamicProps(nuke::Component* cmp);
 	bool EditV3(const char* rowLabel, double v[3]);
 	void winInspector();
+	// Asset inspector: when nothing is selected in the Hierarchy but a project file is selected in the Browser,
+	// the Inspector shows that asset's properties (texture usage/info, material fields, or read-only info + Open).
+	void DrawAssetInspector(const std::string& path);
+	std::string     inspAssetPath;                 // cache key: asset currently loaded into the inspector
+	long long       inspAssetMtime = 0;            // + its last-write time, so a reimport (same path) reloads
+	nuke::Texture*  inspTex = nullptr;             // cached loaded .nutex (usage editing)
+	nuke::Material* inspMat = nullptr;             // cached loaded .numat (field editing)
 	// viewport
 	void winRender();
 	// dialogs
