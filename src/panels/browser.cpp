@@ -740,17 +740,35 @@ void EditorUI::winBrowser()
 		if (ImGui::MenuItem(ICON_LC_PALETTE " Material"))  CreateMaterialAsset(folder);
 		if (ImGui::MenuItem(ICON_LC_FILE_CODE " Shader"))  CreateShaderAsset(folder);
 		if (ImGui::MenuItem(ICON_LC_IMAGE " RenderTexture")) CreateRenderTextureAsset(folder);
-		// Plugin-registered creators (they supply only label/ext/template; the editor writes the file).
+		// Plugin-registered file types (descriptors: label/ext/template/category/icon; the
+		// editor writes the file). Grouped by category (submenu); "" = flat entry.
 		const std::vector<nuke::AssetCreator>& creators = nuke::AssetCreators();
 		if (!creators.empty()) ImGui::Separator();
-		for (const nuke::AssetCreator& ac : creators)
-			if (ImGui::MenuItem((std::string(ICON_LC_FILE_CODE " ") + ac.label).c_str()))
+		auto creatorItem = [&](const nuke::AssetCreator& ac)
+		{
+			const char* icon = ac.icon.empty() ? ICON_LC_FILE_CODE : ac.icon.c_str();
+			if (ImGui::MenuItem((std::string(icon) + " " + ac.label).c_str()))
 			{
 				bfs::path p = UniquePath(bfs::path(folder) / (ac.baseName + ac.ext));
 				bfs::ofstream wf(p); if (wf) wf << ac.content;
 				browserSel = p.string();
 				StartRename(p.string());
 			}
+		};
+		std::vector<std::string> doneCategories;
+		for (const nuke::AssetCreator& ac : creators)
+		{
+			if (ac.category.empty()) { creatorItem(ac); continue; }
+			if (std::find(doneCategories.begin(), doneCategories.end(), ac.category) != doneCategories.end())
+				continue;   // whole category rendered on its first appearance
+			doneCategories.push_back(ac.category);
+			if (ImGui::BeginMenu(ac.category.c_str()))
+			{
+				for (const nuke::AssetCreator& in : creators)
+					if (in.category == ac.category) creatorItem(in);
+				ImGui::EndMenu();
+			}
+		}
 		ImGui::EndPopup();
 	}
 	if (ImGui::BeginPopup("bfilters"))
