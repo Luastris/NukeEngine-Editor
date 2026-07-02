@@ -330,6 +330,7 @@ int main(int argc, char** argv)
 	NukeUI::Init(render);
 
 	editorinit();                       // SetUp: loads the project + activates its chosen plugins
+	instance->StartFixedThread();       // fixed-frequency update thread (idles until PIE plays)
 	NukeUI::AddDrawCallback(editorDraw); // editor draws via the UI module each frame
 	cout << "[main]\t\t\t" << "Editor UI initialized." << endl;
 
@@ -369,6 +370,7 @@ int main(int argc, char** argv)
     render->loop();
 
     cout << "[main]\t\t\t" << "shit down..." << endl;
+    AppInstance::GetSingleton()->StopFixedThread();
     EditorUI::getSingleton()->SaveEditorState();   // persist editor state (camera, selection, panels)
     Unload();   // runtime plugins first, then the render provider (its Shutdown deinits the renderer)
     return 0;

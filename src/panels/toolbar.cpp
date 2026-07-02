@@ -183,7 +183,9 @@ void EditorUI::Draw()
 		ResDB::getSingleton()->HotReloadAssets(AppInstance::GetSingleton()->render);
 	}
 
-	// PIE: while playing, run game logic (component Update) each frame.
+	// PIE: while playing, run game logic (component Update) each frame. The fixed-step
+	// update (physics + Component::FixedUpdate) runs on AppInstance's fixed-frequency
+	// thread — gated on playState internally, independent of the frame rate.
 	if (AppInstance::GetSingleton()->playState == 1)
 		AppInstance::GetSingleton()->currentScene->Update();
 

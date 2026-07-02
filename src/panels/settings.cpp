@@ -474,7 +474,9 @@ void EditorUI::winWorldSettings()
 		};
 		auto same = [](const World::Settings& a, const World::Settings& b) {
 			return a.shadowRes == b.shadowRes && a.shadowDistance == b.shadowDistance && a.shadowDepthBias == b.shadowDepthBias
-			    && a.shadowNormalBias == b.shadowNormalBias && a.shadowSoftness == b.shadowSoftness && a.frustumCull == b.frustumCull;
+			    && a.shadowNormalBias == b.shadowNormalBias && a.shadowSoftness == b.shadowSoftness && a.frustumCull == b.frustumCull
+			    && a.gravity[0] == b.gravity[0] && a.gravity[1] == b.gravity[1] && a.gravity[2] == b.gravity[2]
+			    && a.fixedDt == b.fixedDt;
 		};
 
 		ImGui::SeparatorText("Shadows (global)");
@@ -492,6 +494,12 @@ void EditorUI::winWorldSettings()
 		ImGui::SeparatorText("Culling");
 		changed |= ImGui::Checkbox("Frustum Culling", &s.frustumCull);
 		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Skip drawing objects outside the camera frustum (perf).\nTurn off if off-screen geometry must still render (e.g. reflections).");
+
+		ImGui::SeparatorText("Physics");
+		changed |= ImGui::DragFloat3("Gravity", s.gravity, 0.05f);
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("World gravity (m/s^2), pushed to the physics service each step.");
+		changed |= ImGui::DragFloat("Fixed Timestep", &s.fixedDt, 0.0005f, 0.001f, 0.1f, "%.4f s");
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Fixed simulation step (seconds). 1/60 by default;\nsmaller = more precise, more CPU.");
 
 		if (changed) apply(s);   // live apply + mark dirty
 
