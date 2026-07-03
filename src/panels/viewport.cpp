@@ -2,6 +2,10 @@
 #include <editor/editorui.h>
 #include "API/Model/Math.h"
 #include "API/Model/resdb.h"   // RenderTexture camera preview (resolve targetTexGuid -> RT)
+#include "API/Model/Light.h"             // entity icons: glyph/tint per component
+#include "API/Model/ReflectionProbe.h"
+#include "API/Model/Environment.h"
+#include <functional>
 #include <cmath>
 #include <algorithm>
 #include <cctype>
@@ -25,6 +29,106 @@ static nuke::Atom* PickAtScreen(nuke::Camera* cam, ImVec2 rmin, ImVec2 sz, ImVec
 	                  f.y + ndcx * thf * aspect * rr.y + ndcy * thf * uu.y,
 	                  f.z + ndcx * thf * aspect * rr.z + ndcy * thf * uu.z);
 	return nuke::AppInstance::GetSingleton()->currentScene->Pick(o, dir);
+}
+
+// Billboard icons for invisible entities (2.1): cameras, lights, reflection probes and
+// environments have no mesh — in EDIT mode each gets a screen-space Lucide glyph (the
+// hierarchy's icon language) at its world position, drawn back-to-front on the viewport
+// overlay. Hovering shows the atom name; the click handler picks icons before the ray.
+void EditorUI::DrawEntityIcons(ImVec2 rmin, ImVec2 sz)
+{
+	iconHits.clear();
+	AppInstance* app = AppInstance::GetSingleton();
+	if (!editorCam || !editorCam->transform || !app->currentScene) return;
+	if (app->playState != 0) return;                       // edit mode only
+	if (sz.x <= 1.0f || sz.y <= 1.0f) return;
+
+	// The EXACT view/proj the gizmo uses (renderer convention: LH, depth 0..1), so the
+	// icons sit on the rendered image precisely.
+	glm::mat4 vp;
+	{
+		Transform* c = editorCam->transform;
+		Vector3 e = c->globalPosition();
+		Vector3 f = c->direction(), u = c->up();
+		float aspect = sz.x / sz.y;
+		float fovy = (float)editorCam->fov * 0.01745329252f;
+		glm::mat4 v = glm::lookAtLH(
+			glm::vec3((float)e.x, (float)e.y, (float)e.z),
+			glm::vec3((float)(e.x + f.x), (float)(e.y + f.y), (float)(e.z + f.z)),
+			glm::vec3((float)u.x, (float)u.y, (float)u.z));
+		vp = glm::perspectiveLH_ZO(fovy, aspect, editorCam->_near, editorCam->_far) * v;
+	}
+
+	struct Icon { float depth; ImVec2 c; const char* glyph; ImU32 col; Atom* atom; };
+	std::vector<Icon> icons;
+	std::function<void(bc::list<Atom*>&)> walk = [&](bc::list<Atom*>& gos)
+	{
+		for (Atom* go : gos)
+		{
+			if (!go) continue;
+			const char* glyph = nullptr;
+			ImU32 col = IM_COL32(230, 230, 230, 235);
+			if (Camera* cam = go->GetComponent<Camera>())
+			{
+				if (cam != editorCam) glyph = ICON_LC_VIDEO;   // the editor camera has no icon
+			}
+			else if (Light* l = go->GetComponent<Light>())
+			{
+				glyph = l->type == 0 ? ICON_LC_SUN : (l->type == 2 ? ICON_LC_SPOTLIGHT : ICON_LC_LIGHTBULB);
+				// tint with the light color, floored so a dark light stays readable
+				const double fl = 0.35;
+				col = IM_COL32((int)(255.0 * std::max(l->color.r, fl)),
+				               (int)(255.0 * std::max(l->color.g, fl)),
+				               (int)(255.0 * std::max(l->color.b, fl)), 235);
+			}
+			else if (go->GetComponent<ReflectionProbe>()) { glyph = ICON_LC_APERTURE;  col = IM_COL32(200, 140, 255, 235); }
+			else if (go->GetComponent<Environment>())     { glyph = ICON_LC_CLOUD_SUN; col = IM_COL32(150, 200, 255, 235); }
+			if (glyph)
+			{
+				Vector3 p = go->GetTransform().globalPosition();
+				glm::vec4 clip = vp * glm::vec4((float)p.x, (float)p.y, (float)p.z, 1.0f);
+				if (clip.w > 0.01f)   // in front of the camera
+				{
+					float nx = clip.x / clip.w, ny = clip.y / clip.w;
+					if (nx >= -1.02f && nx <= 1.02f && ny >= -1.02f && ny <= 1.02f)
+						icons.push_back({ clip.w,
+							ImVec2(rmin.x + (nx * 0.5f + 0.5f) * sz.x,
+							       rmin.y + (0.5f - ny * 0.5f) * sz.y),
+							glyph, col, go });
+				}
+			}
+			if (!go->children.empty()) walk(go->children);
+		}
+	};
+	walk(app->currentScene->GetHierarchy());
+	if (icons.empty()) return;
+
+	// Far first, so nearer icons draw ON TOP (and win the click, tested back-to-front).
+	std::sort(icons.begin(), icons.end(), [](const Icon& a, const Icon& b) { return a.depth > b.depth; });
+
+	ImDrawList* dl = ImGui::GetWindowDrawList();
+	ImFont* font = ImGui::GetFont();
+	const float isz = ImGui::GetFontSize() * 1.45f;
+	Atom* sel = app->selectedInHieararchy;
+	for (const Icon& ic : icons)
+	{
+		ImVec2 ts = font->CalcTextSizeA(isz, FLT_MAX, 0.0f, ic.glyph);
+		ImVec2 p0(ic.c.x - ts.x * 0.5f, ic.c.y - ts.y * 0.5f);
+		if (ic.atom == sel)   // selection ring, matching the gizmo's accent
+			dl->AddCircle(ic.c, ts.x * 0.85f, IM_COL32(255, 190, 60, 220), 0, 1.5f);
+		dl->AddText(font, isz, ImVec2(p0.x + 1.0f, p0.y + 1.0f), IM_COL32(0, 0, 0, 170), ic.glyph);   // shadow
+		dl->AddText(font, isz, p0, ic.col, ic.glyph);
+		iconHits.emplace_back(ImVec4(p0.x, p0.y, p0.x + ts.x, p0.y + ts.y), ic.atom);
+	}
+
+	// Hover tooltip: topmost icon under the mouse (list is back-to-front — walk it backwards).
+	ImVec2 mp = ImGui::GetIO().MousePos;
+	for (auto it = iconHits.rbegin(); it != iconHits.rend(); ++it)
+		if (mp.x >= it->first.x && mp.x <= it->first.z && mp.y >= it->first.y && mp.y <= it->first.w)
+		{
+			ImGui::SetTooltip("%s", it->second->GetName().c_str());
+			break;
+		}
 }
 
 void EditorUI::winRender()
@@ -109,6 +213,9 @@ void EditorUI::winRender()
 			app->uiTarget = sceneRTId;
 			app->uiX = (int)imin.x; app->uiY = (int)imin.y;
 			app->uiW = (int)avail.x; app->uiH = (int)avail.y;
+
+			// Invisible-entity icons (edit mode): drawn UNDER the camera preview and the gizmo.
+			DrawEntityIcons(imin, avail);
 		}
 		else
 			ImGui::Text("No scene texture.");
@@ -245,17 +352,31 @@ void EditorUI::winRender()
 				ImVec2 rmin = ImGui::GetItemRectMin();
 				ImVec2 sz   = ImGui::GetItemRectSize();
 				ImVec2 mp   = io.MousePos;
-				float ndcx = ((mp.x - rmin.x) / sz.x) * 2.0f - 1.0f;
-				float ndcy = 1.0f - ((mp.y - rmin.y) / sz.y) * 2.0f;
-				Vector3 o = t->globalPosition();
-				Vector3 f = t->direction(), rr = t->right(), uu = t->up();
-				float aspect = (sz.y > 0.0f) ? sz.x / sz.y : 1.0f;
-				float thf = tanf((float)editorCam->fov * 0.5f * 0.01745329252f);
-				Vector3 dir(f.x + ndcx * thf * aspect * rr.x + ndcy * thf * uu.x,
-				            f.y + ndcx * thf * aspect * rr.y + ndcy * thf * uu.y,
-				            f.z + ndcx * thf * aspect * rr.z + ndcy * thf * uu.z);
-				AppInstance::GetSingleton()->selectedInHieararchy =
-					AppInstance::GetSingleton()->currentScene->Pick(o, dir);
+				// Entity icons first (topmost wins): invisible entities have no mesh, the
+				// scene ray can't hit them — their icon IS their clickable body.
+				Atom* iconPick = nullptr;
+				for (auto it = iconHits.rbegin(); it != iconHits.rend(); ++it)
+					if (mp.x >= it->first.x && mp.x <= it->first.z && mp.y >= it->first.y && mp.y <= it->first.w)
+					{
+						iconPick = it->second;
+						break;
+					}
+				if (iconPick)
+					AppInstance::GetSingleton()->selectedInHieararchy = iconPick;
+				else
+				{
+					float ndcx = ((mp.x - rmin.x) / sz.x) * 2.0f - 1.0f;
+					float ndcy = 1.0f - ((mp.y - rmin.y) / sz.y) * 2.0f;
+					Vector3 o = t->globalPosition();
+					Vector3 f = t->direction(), rr = t->right(), uu = t->up();
+					float aspect = (sz.y > 0.0f) ? sz.x / sz.y : 1.0f;
+					float thf = tanf((float)editorCam->fov * 0.5f * 0.01745329252f);
+					Vector3 dir(f.x + ndcx * thf * aspect * rr.x + ndcy * thf * uu.x,
+					            f.y + ndcx * thf * aspect * rr.y + ndcy * thf * uu.y,
+					            f.z + ndcx * thf * aspect * rr.z + ndcy * thf * uu.z);
+					AppInstance::GetSingleton()->selectedInHieararchy =
+						AppInstance::GetSingleton()->currentScene->Pick(o, dir);
+				}
 			}
 
 			// Sync the orbit angles from the camera when the drag STARTS. Derive them from the FORWARD

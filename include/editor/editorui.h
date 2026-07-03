@@ -252,6 +252,13 @@ public:
 	nuke::Material* inspMat = nullptr;             // cached loaded .numat (field editing)
 	// viewport
 	void winRender();
+	// Billboard icons for INVISIBLE entities (camera / light / probe / environment):
+	// screen-space Lucide glyphs (same mapping as the hierarchy) overlaid on the viewport
+	// image in EDIT mode — projected with the exact gizmo view/proj, clickable to select.
+	void DrawEntityIcons(ImVec2 rmin, ImVec2 sz);
+	// This frame's icon hit-rects (min.xy, max.zw -> atom), ordered back-to-front; the
+	// viewport click handler tests these BEFORE the scene ray-pick (topmost icon wins).
+	std::vector<std::pair<ImVec4, Atom*>> iconHits;
 	// dialogs
 	void winAbout();
 	void winConsole();
