@@ -3,8 +3,64 @@
 #include <API/Model/Camera.h>   // restrict the PostProcess component to camera atoms
 #include <API/Model/Texture.h>  // asset inspector: .nutex usage/info
 #include <API/Model/Material.h> // asset inspector: .numat fields
+#include <API/Model/Light.h>       // asset preview world: sun
+#include <API/Model/Environment.h> // asset preview world: sky/ambient
 #include <boost/filesystem.hpp>
 namespace bfs = boost::filesystem;
+
+// ---------------------------------------------------------------------------
+// Inspector's asset 3D preview — one POOLED preview scene (see asseteditor.cpp for
+// the pool: sky + shadowless sun + one mesh atom + camera into an own RT), staged
+// with whatever the browser has selected.
+// ---------------------------------------------------------------------------
+
+void EditorUI::StageAssetPreview(const std::string& path, const std::string& ext)
+{
+	if (!inspPv) inspPv = AcquirePreview();
+	if (!inspPv) return;
+	ResDB* db = ResDB::getSingleton();
+	const std::string guid = db->GuidForPath(path);
+
+	if (ext == ".numesh")
+	{
+		inspPv->mr->meshGuid = guid;
+		inspPv->mr->mesh = db->GetMesh(guid);
+		inspPv->mr->matGuid = "builtin:default";
+		if (inspPv->mr->mat) { delete inspPv->mr->mat; inspPv->mr->mat = nullptr; }   // re-resolve
+	}
+	else if (ext == ".numat")
+	{
+		inspPv->mr->meshGuid = "builtin:sphere";
+		inspPv->mr->mesh = db->GetMesh("builtin:sphere");
+		inspPv->mr->matGuid = guid;
+		if (inspPv->mr->mat) { delete inspPv->mr->mat; inspPv->mr->mat = nullptr; }
+	}
+	FramePreview(*inspPv, nullptr);
+	pvStaged = path;
+}
+
+void EditorUI::DrawAssetPreview3D(const std::string& path, const std::string& ext)
+{
+	if (pvStaged != path) StageAssetPreview(path, ext);
+	if (!inspPv || !inspPv->mr || !inspPv->mr->mesh) return;
+	float side = ImGui::GetContentRegionAvail().x;
+	if (side > 384.0f) side = 384.0f;
+	DrawPreviewImage(*inspPv, ImVec2(side, side));   // inline thumbnail: square
+}
+
+// Render hook (main.cpp), BEFORE the live scene: draw EVERY preview scene that was shown
+// this frame (inspector + open asset editors); the live scene then re-pushes its own
+// lights/sky/TLAS, so nothing leaks into the viewport image.
+void EditorUI::RenderAssetPreview(iRender* r)
+{
+	if (!r) return;
+	for (PreviewScene* s : pvPool)
+	{
+		if (s->inUse && s->visible && s->world)
+			s->world->Render(r);
+		s->visible = false;
+	}
+}
 
 void EditorUI::CamComponent(Camera* cam)
 {
@@ -687,18 +743,53 @@ void EditorUI::DrawAssetInspector(const std::string& path)
 	{
 		if (inspTex) { delete inspTex; inspTex = nullptr; }
 		if (inspMat) { delete inspMat; inspMat = nullptr; }
+		// Drop the GPU preview of the previous texture (rebuilt below for the new one).
+		if (inspTexPreviewId)
+		{
+			if (iRender* r = AppInstance::GetSingleton()->render) r->destroyTexture2D(inspTexPreviewId);
+			inspTexPreviewId = 0;
+		}
+		pvStaged.clear();   // restage the 3D preview for the new selection
 		inspAssetPath = path; inspAssetMtime = mtime;
 		if      (ext == ".nutex") inspTex = nuke::Texture::LoadFromFile(path);
 		else if (ext == ".numat") inspMat = nuke::Material::LoadFromFile(path);
+		// Texture preview: decode mip0 to RGBA8 and upload once per selection/change.
+		if (inspTex && !inspTex->renderTexture)
+			if (iRender* r = AppInstance::GetSingleton()->render)
+			{
+				std::vector<unsigned char> rgba = inspTex->DecodeRGBA();
+				if (!rgba.empty())
+					inspTexPreviewId = r->createTexture2D(rgba.data(), inspTex->width, inspTex->height);
+			}
 	}
 
 	ImGui::TextUnformatted(bfs::path(path).filename().string().c_str());
 	ImGui::SameLine(); ImGui::TextDisabled("%s", ext.c_str());
+	// Any text-editable type opens in the text editor (2.2); assets open their own editor window.
+	if (IsTextFile(ext))
+	{
+		ImGui::SameLine(ImGui::GetContentRegionAvail().x - 60.0f);
+		if (ImGui::SmallButton(ICON_LC_FILE_PEN " Edit")) OpenTextFile(path);
+	}
+	else if (ext == ".numat" || ext == ".numesh" || ext == ".nuprefab")
+	{
+		ImGui::SameLine(ImGui::GetContentRegionAvail().x - 120.0f);
+		if (ImGui::SmallButton(ICON_LC_PENCIL_RULER " Open in Editor")) OpenAssetEditor(path);
+	}
 	ImGui::Separator();
 
 	if (ext == ".nutex" && inspTex)
 	{
 		if (inspTex->renderTexture) { ImGui::TextDisabled("Render texture (%dx%d).", inspTex->width, inspTex->height); return; }
+		// Image preview (fit to the panel width, aspect kept; mip0 / frame 0).
+		if (inspTexPreviewId)
+		{
+			float w = ImGui::GetContentRegionAvail().x;
+			if (w > 384.0f) w = 384.0f;
+			float h = (inspTex->width > 0) ? w * (float)inspTex->height / (float)inspTex->width : w;
+			ImGui::Image((ImTextureID)inspTexPreviewId, ImVec2(w, h));
+			ImGui::Spacing();
+		}
 		const char* fmt = inspTex->format == nuke::Texture::FMT_BC1 ? "BC1" : inspTex->format == nuke::Texture::FMT_BC3 ? "BC3"
 		                : inspTex->format == nuke::Texture::FMT_BC5 ? "BC5" : "RGBA8";
 		ImGui::Text("%d x %d   %s   %d mip(s)", inspTex->width, inspTex->height, fmt, inspTex->mipCount);
@@ -770,17 +861,44 @@ void EditorUI::DrawAssetInspector(const std::string& path)
 	}
 	else if (ext == ".numat" && inspMat)
 	{
+		// Live 3D preview on a sphere (edits below re-stage through the mtime refresh).
+		DrawAssetPreview3D(path, ext);
 		if (nuke::TypeInfo* ti = inspMat->GetType())
-			if (DrawFields(inspMat, ti)) inspMat->SaveToFile(path);   // reflected material fields; save on edit
+			if (DrawFields(inspMat, ti))
+			{
+				inspMat->SaveToFile(path);   // reflected material fields; save on edit
+				pvStaged.clear();            // re-resolve the preview instance from the saved asset
+			}
+	}
+	else if (ext == ".numesh")
+	{
+		DrawAssetPreview3D(path, ext);
+		if (inspPv && inspPv->mr->mesh && pvStaged == path)
+		{
+			nuke::Mesh* m = inspPv->mr->mesh;
+			ImGui::Text("%d vertices   %d triangles", m->numVerts, m->numVerts / 3);
+			m->EnsureBounds();
+			ImGui::Text("Bounds: %.2f x %.2f x %.2f",
+				m->aabbMax[0] - m->aabbMin[0], m->aabbMax[1] - m->aabbMin[1], m->aabbMax[2] - m->aabbMin[2]);
+		}
+		else ImGui::TextDisabled("Mesh asset (not in the resource DB).");
 	}
 	else
 	{
 		boost::system::error_code ec;
 		uintmax_t sz = bfs::file_size(bfs::path(path), ec);
 		if (!ec) ImGui::Text("Size: %.1f KB", (double)sz / 1024.0);
-		if (ext == ".nuworld")  { if (ImGui::Button("Open World"))  OpenWorldFromBrowser(path); }
-		else if (ext == ".nuprefab") ImGui::TextDisabled("Prefab — drag into the world to instantiate.");
-		else if (ext == ".numesh")   ImGui::TextDisabled("Mesh asset.");
-		else ImGui::TextDisabled("No editable properties.");
+		if (ext == ".nuworld")  { if (ImGui::Button(ICON_LC_GLOBE " Open World"))  OpenWorldFromBrowser(path); }
+		else if (ext == ".nuprefab")
+		{
+			ImGui::TextDisabled("Prefab — drag into the world to instantiate.");
+			if (ImGui::Button(ICON_LC_PACKAGE_PLUS " Instantiate")) InstantiatePrefab(path);
+		}
+		else if (ext == ".nuproj")
+		{
+			ImGui::TextDisabled("Project descriptor.");
+			if (ImGui::Button(ICON_LC_SETTINGS " Open Project Settings")) settingsOpen = true;
+		}
+		else if (!IsTextFile(ext)) ImGui::TextDisabled("No editable properties.");
 	}
 }

@@ -190,9 +190,14 @@ xcopy "$(SolutionDir)shaders" "$(OutDir)shaders\" /s /e /i /y /d</Command>
     <ClCompile Include="src\panels\settings.cpp" />
     <ClCompile Include="src\panels\toolbar.cpp" />
     <ClCompile Include="src\panels\merge.cpp" />
+    <ClCompile Include="src\panels\texteditorpanel.cpp" />
+    <ClCompile Include="src\panels\asseteditor.cpp" />
+    <ClCompile Include="src\textedit\TextEditor.cpp" />
+    <ClCompile Include="src\textedit\LanguageDefinitions.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="include\editor\editorui.h" />
+    <ClInclude Include="src\textedit\TextEditor.h" />
     <ClInclude Include="resource.h" />
   </ItemGroup>
   <ItemGroup>

@@ -218,9 +218,13 @@ iRender* PreInitRender(){
 
 	cout << "[main]\t\t\t" << "Renderer is: " << render << endl;
     // World rendering lives in the engine lib (World::Render), shared by editor
-    // and game. The renderer just invokes onRender each frame.
+    // and game. The renderer just invokes onRender each frame. The asset-preview
+    // world (inspector 3D preview) renders FIRST, so the live scene re-pushes its
+    // own lights/sky/TLAS afterwards and the viewport image stays untouched.
     render->setOnRender([]{
-        AppInstance::GetSingleton()->currentScene->Render(AppInstance::GetSingleton()->render);
+        iRender* r = AppInstance::GetSingleton()->render;
+        EditorUI::getSingleton()->RenderAssetPreview(r);
+        AppInstance::GetSingleton()->currentScene->Render(r);
     });
     // UI is driven by the UI module (NukeUI); it is wired in main() after the
     // renderer is initialized (NukeUI hooks the renderer's onGUI itself).

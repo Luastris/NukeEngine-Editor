@@ -209,6 +209,8 @@ void EditorUI::Draw()
 
 	winSettings();        // Project Settings window (default world + hotkeys)
 	winWorldSettings();   // World Settings window (global shadows etc., saved in the .nuworld)
+	winTextEditor();      // Text editor (2.2): opened from the browser / asset inspector
+	winAssetEditors();    // Asset editors: material / mesh / prefab windows
 	DrawSaveAsPopup();    // "Save World As" modal
 	TrackUndo();          // capture a selected-atom edit for undo when the UI settles
 	TrackDirty();         // refresh the dirty "*" marker
@@ -265,6 +267,11 @@ void EditorUI::ResetUndo() { undoStack.clear(); redoStack.clear(); editing = fal
 
 void EditorUI::Undo()
 {
+	// Focused editor WINDOWS own their history: a text editor's widget handles Ctrl+Z
+	// itself (do nothing here — a scene undo underneath it would be destructive);
+	// an asset editor routes to ITS per-window snapshot stack.
+	if (textFocused >= 0) return;
+	if (aeFocused >= 0 && aeFocused < (int)assetEds.size()) { AssetEditorUndo(assetEds[aeFocused]); return; }
 	if (AppInstance::GetSingleton()->playState != 0) return;   // not during PIE
 	if (ImGui::GetIO().WantTextInput) return;                  // let text fields keep their own undo
 	if (undoStack.empty()) return;
@@ -275,6 +282,8 @@ void EditorUI::Undo()
 
 void EditorUI::Redo()
 {
+	if (textFocused >= 0) return;
+	if (aeFocused >= 0 && aeFocused < (int)assetEds.size()) { AssetEditorRedo(assetEds[aeFocused]); return; }
 	if (AppInstance::GetSingleton()->playState != 0) return;
 	if (ImGui::GetIO().WantTextInput) return;
 	if (redoStack.empty()) return;

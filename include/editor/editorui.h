@@ -55,6 +55,8 @@ using namespace std;    // cout/endl (previously leaked from engine headers)
 // Returns the picked path, or "" if cancelled.
 std::string EditorPickModelFile();
 
+class TextEditor;   // vendored ImGuiColorTextEdit (src/textedit), compiled into the editor
+
 // Register the .nuproj file extension (HKEY_CURRENT_USER) so double-clicking a project opens it in
 // this editor. User-scope + reversible; defined in main.cpp (isolates <windows.h>). Returns success.
 bool RegisterProjectFileAssociation();
@@ -250,6 +252,104 @@ public:
 	long long       inspAssetMtime = 0;            // + its last-write time, so a reimport (same path) reloads
 	nuke::Texture*  inspTex = nullptr;             // cached loaded .nutex (usage editing)
 	nuke::Material* inspMat = nullptr;             // cached loaded .numat (field editing)
+	// text editor (2.2): tabs of open text files; syntax from the file-type descriptor (0.6);
+	// Ctrl+S saves; saved shaders/materials hot-reload through the existing mtime watcher.
+	struct TextDoc
+	{
+		std::string path;                       // full path on disk
+		std::shared_ptr<TextEditor> ed;         // editor instance (owns text + undo)
+		int  savedUndoIndex = 0;                // undo index at last save -> dirty when it differs
+		bool wantFocus = false;                 // select this tab on the next draw
+		bool open = true;                       // tab close-button state
+	};
+	std::vector<TextDoc> textDocs;
+	bool textEditorOpen  = false;               // window visibility (opened on demand)
+	int  textCloseConfirm = -1;                 // doc index awaiting the discard-changes modal
+	bool IsTextFile(const std::string& ext);    // descriptor textEditable OR a known text extension
+	void OpenTextFile(const std::string& path); // open (or focus) a file in the text editor
+	void SaveTextDoc(TextDoc& d);
+	void winTextEditor();
+
+	// --- shared 3D-preview infrastructure: POOLED mini-worlds (sky + shadowless sun +
+	// one mesh atom + camera into an own RT). Pooled because the render seam has no
+	// destroyRenderTarget — closed editors return their scene for reuse. Each World
+	// pushes its own globals per Render() call, so extra worlds never taint the scene.
+	struct PreviewScene
+	{
+		World*        world = nullptr;
+		uint64_t      rt = 0;
+		Camera*       cam = nullptr;
+		Atom*         meshAtom = nullptr;   // holds the MeshRenderer below
+		MeshRenderer* mr = nullptr;
+		float   yaw = 0.7f, pitch = 0.35f;  // orbit (LMB drag on the preview image)
+		float   dist = 0.0f;                // dolly (wheel); 0 = re-frame from bounds
+		Vector3 center;                     // framed bounds
+		float   radius = 1.0f;
+		int     rtW = 384, rtH = 384;       // current RT size — follows the on-screen size (crisp)
+		bool    visible = false;            // wants a render this frame (consumed by the hook)
+		bool    inUse = false;
+		ImVec2  rectMin, rectSize;          // last drawn screen rect (gizmo overlay target)
+		int     wantW = 0, wantH = 0;       // debounced resize request (see DrawPreviewImage)
+		int     wantFrames = 0;
+		// The overlay gizmo is hovered/grabbed (set by the CALLER inside its ImGuizmo ID
+		// scope — IsUsing()/IsOver() queried outside the PushID scope lie). Orbit is
+		// suppressed while true.
+		bool    gizmoBusy = false;
+	};
+	std::vector<PreviewScene*> pvPool;      // every created scene (in use or free)
+	PreviewScene* AcquirePreview();
+	void ReleasePreview(PreviewScene* s);
+	// The interactive 3D view: fills exactly `size` (any aspect — the RT follows it),
+	// LMB drag orbits (captured — never drags the window), wheel dollies.
+	void DrawPreviewImage(PreviewScene& s, ImVec2 size);
+	void FramePreview(PreviewScene& s, Atom* subtree);       // bounds of a subtree (or the mesh atom) -> center/radius
+
+	// Inspector's asset preview (one pooled scene, staged by browser selection).
+	uint64_t inspTexPreviewId = 0;          // GPU texture of the decoded .nutex (destroyTexture2D on change)
+	PreviewScene* inspPv = nullptr;
+	std::string   pvStaged;                 // asset path currently staged ("" = none)
+	void StageAssetPreview(const std::string& path, const std::string& ext);
+	void DrawAssetPreview3D(const std::string& path, const std::string& ext);   // inspector widget
+	void RenderAssetPreview(iRender* r);    // render hook: draws every visible preview scene BEFORE the live scene
+
+	// --- ASSET EDITORS: each .numat / .numesh / .nuprefab opens its OWN window with a
+	// live 3D view (own preview scene) and type-specific editing; saves back to the file.
+	struct AssetEditorWin
+	{
+		std::string path, ext;              // full path + lowercase extension
+		PreviewScene* pv = nullptr;
+		Material* mat = nullptr;            // .numat: owned editing copy (saved to the file)
+		Atom*     prefabRoot = nullptr;     // .nuprefab: loaded subtree (lives in pv->world)
+		long      prefabSelId = 0;          // selected atom in the prefab tree (stable id)
+		int       previewMesh = 0;          // .numat: 0 sphere / 1 cube / 2 plane
+		int       gizmoOp = 1;              // prefab 3D view: 0 none / 1 move / 2 rotate / 3 scale
+		bool      gizmoWorld = true;        // gizmo space: world / local (X toggles, like the viewport)
+		long      pendingDeleteId = 0;      // tree ops applied AFTER the tree walk
+		long      pendingAddParentId = 0;
+		float     gizmoMtx[16] = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };   // persistent during a drag
+		// Per-WINDOW undo/redo: Ctrl+Z/Ctrl+Y route here while this window is focused
+		// (EditorUI::Undo/Redo check aeFocused). Snapshots — prefab: atom-subtree JSON;
+		// material: owned clones. An edit BURST (drag) coalesces into ONE entry via the
+		// idle-baseline latch, same idiom as the scene's TrackUndo.
+		std::vector<std::string> undoP, redoP;   // .nuprefab history
+		std::vector<Material*>   undoM, redoM;   // .numat history (owned clones)
+		std::string idleP;                       // pre-edit baseline (prefab JSON)
+		Material*   idleM = nullptr;             // pre-edit baseline (material clone)
+		bool      editing = false;               // edit burst in progress (coalescing)
+		bool      editedNow = false;             // an edit happened THIS frame (latch input)
+		bool dirty = false, open = true, wantFocus = false;
+	};
+	std::vector<AssetEditorWin> assetEds;
+	int  aeCloseConfirm = -1;               // editor index awaiting the discard-changes modal
+	int  aeFocused   = -1;                  // asset-editor window focused THIS frame (undo routing)
+	int  textFocused = -1;                  // text-editor window focused THIS frame (undo routing)
+	void OpenAssetEditor(const std::string& path);   // open (or focus) the editor for an asset
+	void winAssetEditors();
+	void AssetEditorUndo(AssetEditorWin& w);
+	void AssetEditorRedo(AssetEditorWin& w);
+	void DrawPrefabTree(AssetEditorWin& w, Atom* a);        // recursive tree rows (select by id)
+	bool DrawPrefabAtomEditor(AssetEditorWin& w, Atom* a);  // transform + components; true if edited
+
 	// viewport
 	void winRender();
 	// Billboard icons for INVISIBLE entities (camera / light / probe / environment):

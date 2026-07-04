@@ -137,6 +137,23 @@ void EditorUI::EntryContextMenu(const std::string& path, bool isDir)
 			}
 			ImGui::Separator();
 		}
+		// Type-specific openers: asset editors (material/mesh/prefab) and the text editor.
+		if (!isDir)
+		{
+			std::string cext = bfs::path(path).extension().string();
+			for (char& c : cext) c = (char)std::tolower((unsigned char)c);
+			if (cext == ".numat" || cext == ".numesh" || cext == ".nuprefab")
+			{
+				if (ImGui::MenuItem(ICON_LC_PENCIL_RULER " Open in Editor")) OpenAssetEditor(path);
+				if (cext == ".nuprefab" && ImGui::MenuItem(ICON_LC_PACKAGE_PLUS " Instantiate")) InstantiatePrefab(path);
+				ImGui::Separator();
+			}
+			else if (IsTextFile(cext))
+			{
+				if (ImGui::MenuItem(ICON_LC_FILE_PEN " Edit")) OpenTextFile(path);
+				ImGui::Separator();
+			}
+		}
 		if (ImGui::MenuItem(ICON_LC_SCISSORS " Cut",  "Ctrl+X"))  { clipboard = { path }; clipboardCut = true;  }
 		if (ImGui::MenuItem(ICON_LC_COPY " Copy",     "Ctrl+C"))  { clipboard = { path }; clipboardCut = false; }
 		if (ImGui::MenuItem(ICON_LC_CLIPBOARD_PASTE " Paste", "Ctrl+V", false, !clipboard.empty())) BrowserPaste();
@@ -911,8 +928,10 @@ void EditorUI::winBrowser()
 			if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0))   // double click = activate (all items)
 			{
 				if      (e.isDir)              BrowserNavigate(e.path);
-				else if (e.ext == ".nuprefab") InstantiatePrefab(e.path);
 				else if (e.ext == ".nuworld")  OpenWorldFromBrowser(e.path);
+				else if (e.ext == ".nuprefab" || e.ext == ".numat" || e.ext == ".numesh")
+					OpenAssetEditor(e.path);   // asset editor window (instantiate prefabs via drag / context menu)
+				else if (IsTextFile(e.ext))    OpenTextFile(e.path);   // scripts/shaders/configs -> text editor
 			}
 			EntryContextMenu(e.path, e.isDir);   // right-click: Rename / Delete
 			std::string disp = isDirty(e) ? e.name + " *" : e.name;
@@ -946,8 +965,10 @@ void EditorUI::winBrowser()
 				if (ImGui::IsMouseDoubleClicked(0))
 				{
 					if (e.isDir)                   BrowserNavigate(e.path);
-					else if (e.ext == ".nuprefab") InstantiatePrefab(e.path);
 					else if (e.ext == ".nuworld")  OpenWorldFromBrowser(e.path);
+					else if (e.ext == ".nuprefab" || e.ext == ".numat" || e.ext == ".numesh")
+						OpenAssetEditor(e.path);   // asset editor window (instantiate prefabs via drag / context menu)
+					else if (IsTextFile(e.ext))    OpenTextFile(e.path);   // scripts/shaders/configs -> text editor
 				}
 			}
 			EntryContextMenu(e.path, e.isDir);   // right-click: Rename / Delete
