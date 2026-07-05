@@ -9,6 +9,7 @@
 #ifdef EDITOR
 #include <interface/AppInstance.h>
 #include <import/assimporter.h>
+#include <API/Model/Jobs.h>                 // core job system (2.4)
 #else
 #include <interface/AppInstance.h>
 #endif
@@ -335,6 +336,7 @@ int main(int argc, char** argv)
 
 	editorinit();                       // SetUp: loads the project + activates its chosen plugins
 	instance->StartFixedThread();       // fixed-frequency update thread (idles until PIE plays)
+	nuke::Jobs::Init(Config::getSingleton()->jobWorkers, Config::getSingleton()->jobPinCores);   // worker pool (2.4)
 	NukeUI::AddDrawCallback(editorDraw); // editor draws via the UI module each frame
 	cout << "[main]\t\t\t" << "Editor UI initialized." << endl;
 
@@ -375,6 +377,7 @@ int main(int argc, char** argv)
 
     cout << "[main]\t\t\t" << "shit down..." << endl;
     AppInstance::GetSingleton()->StopFixedThread();
+    nuke::Jobs::Shutdown();
     EditorUI::getSingleton()->SaveEditorState();   // persist editor state (camera, selection, panels)
     Unload();   // runtime plugins first, then the render provider (its Shutdown deinits the renderer)
     return 0;

@@ -740,8 +740,11 @@ void EditorUI::winBrowser()
 		if (!src.empty())
 		{
 			std::string dest = browserCwd.empty() ? contentDir : browserCwd;
-			bool ok = AssImporter::getSingleton()->ImportAny(src.c_str(), dest.c_str());
-			cout << "[editor]\timport " << (ok ? "ok" : "FAILED") << ": " << src << " -> " << dest << endl;
+			// ASYNC (2.4): heavy conversion on a worker; the editor stays responsive
+			// (the status bar shows the import field until completion).
+			AssImporter::getSingleton()->ImportAnyAsync(src, dest, [src, dest](bool ok) {
+				cout << "[editor]\timport " << (ok ? "ok" : "FAILED") << ": " << src << " -> " << dest << endl;
+			});
 		}
 	}
 	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Import a model (OBJ/FBX/glTF) or image (PNG/JPG/TGA/...) into this folder");

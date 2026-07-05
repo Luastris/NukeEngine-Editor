@@ -3,6 +3,7 @@
 #include <API/Model/Light.h>
 #include <API/Model/Environment.h>
 #include <API/Model/ReflectionProbe.h>
+#include <API/Model/Jobs.h>   // PumpMain each editor frame (2.4)
 
 // ---- toolbar ----
 // A flat button that stays highlighted while `active` (radio/toggle look).
@@ -175,6 +176,8 @@ void EditorUI::Draw()
 	ImGuizmo::BeginFrame();   // must come right after ImGui::NewFrame (done by NukeUI)
 
 	nuke::Time::getSingleton()->NewFrame();   // real frame delta/elapsed (scripts & systems)
+
+	nuke::Jobs::PumpMain();   // deliver background-job results to the game thread (2.4)
 
 	// Hot-reload shaders + materials/textures edited on disk (~twice a second; cheap mtime checks).
 	if ((++hotReloadTick % 30) == 0)
