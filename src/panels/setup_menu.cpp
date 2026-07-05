@@ -82,11 +82,15 @@ void EditorUI::SetUp()
 		r->setRTReflection(rt.intensity, rt.maxDist, rt.bounces, rt.roughCutoff);
 	}
 
-	// Drag&drop from the desktop/Explorer -> import the dropped model/image into the current browser folder.
+	// Drag&drop from the desktop/Explorer -> import the dropped model/image into the current
+	// browser folder. ASYNC (2.4): the conversion runs on a worker — a dropped FBX must not
+	// freeze the frame (this was the last synchronous import path).
 	AppInstance::GetSingleton()->render->setOnFileDrop([this](const char* p) {
 		std::string dest = browserCwd.empty() ? contentDir : browserCwd;
-		bool ok = AssImporter::getSingleton()->ImportAny(p, dest.c_str());
-		std::cout << "[editor]\tdrop-import " << (ok ? "ok" : "FAILED") << ": " << p << " -> " << dest << std::endl;
+		std::string src = p;
+		AssImporter::getSingleton()->ImportAnyAsync(src, dest, [src, dest](bool ok) {
+			std::cout << "[editor]\tdrop-import " << (ok ? "ok" : "FAILED") << ": " << src << " -> " << dest << std::endl;
+		});
 	});
 
 	// Editor state (project-tied): camera, selection, inspector + browser + panel state.
