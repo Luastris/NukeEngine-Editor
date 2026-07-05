@@ -225,6 +225,7 @@ void EditorUI::winRender()
 		{
 			Atom* sel = AppInstance::GetSingleton()->selectedInHieararchy;
 			Camera* selCam = sel ? sel->GetComponent<Camera>() : nullptr;
+			if (selCam && !selCam->enabled) selCam = nullptr;   // disabled camera: no preview (it renders nothing)
 			if (tex && selCam && selCam != editorCam)
 			{
 				uint64_t ptex = 0;
