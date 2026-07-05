@@ -200,6 +200,7 @@ void EditorUI::Draw()
 	// each reserves viewport work-area for the next, so panels sit below both bars.
 	EditorMenu();
 	Toolbar();
+	StatusBarPanel();   // bottom side-bar reserves its strip before the dock space
 	// Full-window dock space so panels can be docked/tabbed/split (sticky).
 	// PassthruCentralNode leaves the centre transparent for the scene viewport.
 	ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport(), ImGuiDockNodeFlags_PassthruCentralNode);

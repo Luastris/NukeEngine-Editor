@@ -415,6 +415,8 @@ public:
 	void CreateRenderTextureAsset(const std::string& folder);   // .nutex RenderTexture (camera target)
 	// plugins
 	void PluginMGRWindow();
+	// status bar (2.3): frame stats + scene counters + plugin fields (nuke::StatusBar)
+	void StatusBarPanel();
 	// toolbar
 	bool ToolBtn(const char* icon, const char* tip, bool active, float w);
 	void SpawnEmpty();
