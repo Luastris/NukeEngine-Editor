@@ -157,6 +157,7 @@ private:
 	std::string projectDir  = "project";           // project root
 	std::string projectFile = "project/game.nuproj";
 	std::string startupWorld = "scene.nuworld";    // from the .nuproj
+	std::string lastWorld;                         // from editor_state.json: world open when the editor last exited
 	std::vector<std::string> enabledPlugins;       // per-project plugin load list (dll names)
 	bool pluginListLoaded = false;                 // did the .nuproj specify a plugin list?
 	// Per-project service provider choice (unified plugin model): service -> dll name, e.g.

@@ -1,6 +1,7 @@
 // setup_menu panel — EditorUI method definitions (translation unit).
 #include <editor/editorui.h>
 #include <import/assimporter.h>   // drag&drop import (ImportAny)
+namespace bfs = boost::filesystem;
 
 void EditorUI::SetUp()
 {
@@ -105,10 +106,17 @@ void EditorUI::SetUp()
 		editor->currentScene->Add(cube);
 	}
 
-	// Open the project's default world from content (replaces the demo cube if present). Plugins are
-	// already active, so its components deserialize correctly.
-	if (editor->OpenWorld(startupWorld))
-		cout << "[editorui]\t\t" << "Opened default world '" << startupWorld << "'." << endl;
+	// Open the last world the editor had open (editor_state.json); fall back to the project's
+	// default world if none was recorded or its file is gone (renamed/deleted outside). Plugins
+	// are already active, so its components deserialize correctly.
+	{
+		boost::system::error_code ec;
+		std::string bootWorld = (!lastWorld.empty() && bfs::exists(bfs::path(editor->WorldFullPath(lastWorld)), ec))
+		                      ? lastWorld : startupWorld;
+		if (editor->OpenWorld(bootWorld))
+			cout << "[editorui]\t\t" << "Opened " << (bootWorld == startupWorld ? "default" : "last")
+			     << " world '" << bootWorld << "'." << endl;
+	}
 
 	SyncWorldBaseline();   // baseline = the world we just opened; title "NukeEngine Editor - <project> - <world>"
 	cout << "[editorui]\t\t" << "EditorUI ready." << endl;

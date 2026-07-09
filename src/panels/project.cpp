@@ -314,6 +314,7 @@ void EditorUI::SaveEditorState()
 	for (auto& kv : AppInstance::GetSingleton()->windowOpen) wo[kv.first] = kv.second;
 	j["windowOpen"] = wo;
 	j["worldSettingsOpen"] = worldSettingsOpen;   // keep the World Settings window open across restarts
+	j["lastWorld"] = AppInstance::GetSingleton()->currentWorldPath;   // reopened on next launch ("" = unsaved -> default)
 	if (iRender* r = AppInstance::GetSingleton()->render) j["maximized"] = r->isWindowMaximized();
 	bfs::ofstream f{bfs::path(projectDir + "/editor_state.json")};
 	if (f) f << j.dump(2);
@@ -335,6 +336,7 @@ void EditorUI::LoadEditorState()
 		if (devOpen[0]) OpenAssetEditor(devOpen);
 	if (j.contains("selected") && j["selected"].is_number_integer())
 		pendingSelectId = (long)j["selected"].get<long long>();
+	lastWorld = j.value("lastWorld", std::string());
 	if (j.contains("editorCamera") && editorCam && editorCam->transform)
 	{
 		nlohmann::json& jc = j["editorCamera"];
