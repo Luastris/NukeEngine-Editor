@@ -126,8 +126,9 @@ static std::string Canon(const std::string& s)
 void EditorUI::SyncWorldBaseline()
 {
 	AppInstance* app = AppInstance::GetSingleton();
-	worldOnDisk = app->currentScene->SaveToString();   // already canonical (dump())
+	worldOnDisk = app->currentScene->SaveToString();   // kept for the merge/conflict flows (once per open/save)
 	worldDirty  = false;
+	savedWorldSerial = WorldEditSerial();              // dirty tracking = undo cursor vs this
 	worldMtime  = 0;
 	boost::system::error_code ec;
 	if (!app->currentWorldPath.empty())
@@ -140,9 +141,12 @@ void EditorUI::SyncWorldBaseline()
 
 void EditorUI::TrackDirty()
 {
-	if ((++dirtyTick % 15) != 0) return;
-	AppInstance* app = AppInstance::GetSingleton();
-	bool d = app->currentScene->SaveToString() != worldOnDisk;
+	// Dirty = the undo cursor moved since the last save/load. NOTHING is serialized
+	// here: the old implementation diffed the WHOLE world JSON every 15 frames, which
+	// froze the editor on big scenes (a 200+-atom prefab = tens of ms, 4x per second —
+	// the "editor stutters, Player is fine" asymmetry). Every edit path pushes through
+	// PushUndo, so the cursor IS the edit state.
+	const bool d = WorldEditSerial() != savedWorldSerial;
 	if (d != worldDirty) { worldDirty = d; UpdateWindowTitle(); }
 }
 
@@ -154,6 +158,7 @@ void EditorUI::ReloadWorld(const std::string& diskJson)
 	worldOnDisk = Canon(diskJson);
 	worldDirty  = false;
 	ResetUndo();
+	savedWorldSerial = WorldEditSerial();   // = 0 (stacks just cleared)
 	UpdateWindowTitle();
 }
 
@@ -322,6 +327,12 @@ void EditorUI::LoadEditorState()
 	if (j.is_discarded()) return;
 	if (j.contains("uiOpen") && j["uiOpen"].is_object())
 		for (auto& kv : j["uiOpen"].items()) uiOpen[kv.key()] = kv.value().get<bool>();
+	// NOTE: asset editors deliberately do NOT auto-reopen (user: surprise windows at
+	// startup; and a bad asset would crash every launch). Stale "assetEditors" keys in
+	// old state files are simply ignored. DEV HOOK: the env var below opens one at boot
+	// for headless testing of the secondary-window render path.
+	if (const char* devOpen = std::getenv("NUKE_OPEN_ASSET"))
+		if (devOpen[0]) OpenAssetEditor(devOpen);
 	if (j.contains("selected") && j["selected"].is_number_integer())
 		pendingSelectId = (long)j["selected"].get<long long>();
 	if (j.contains("editorCamera") && editorCam && editorCam->transform)

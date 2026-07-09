@@ -100,6 +100,8 @@ static bool KindMatchesFile(const std::string& kind, const std::string& path)
 	if (kind == "mesh")     return e == ".numesh";
 	if (kind == "material") return e == ".numat";
 	if (kind == "texture")  return e == ".nutex";
+	if (kind == "anim")     return e == ".nuanim";
+	if (kind == "bonemap")  return e == ".nubonemap";
 	if (kind == "script")   return e == ".lua";
 	if (kind == "shader")   { std::string fn = bfs::path(path).filename().string(); return EndsWithCI(fn, ".vs.hlsl") || EndsWithCI(fn, ".ps.hlsl"); }
 	return false;
@@ -128,6 +130,8 @@ bool EditorUI::AssetPicker(const char* label, std::string& guid, const std::stri
 		if (!p.empty()) return bfs::path(p).stem().string();
 		if (kind == "mesh")     { Mesh* m = db->GetMesh(g);     return m ? std::string(m->name) : g; }
 		if (kind == "material") { Material* m = db->GetMaterial(g); return m ? (m->matName.empty() ? g : m->matName) : g; }
+		if (kind == "anim")     { AnimClip* c = db->GetClip(g); return c ? c->name : g; }
+		if (kind == "bonemap")  { BoneMap* b = db->GetBoneMap(g); return b ? b->name : g; }
 		return g;   // texture
 	};
 
@@ -188,6 +192,8 @@ bool EditorUI::AssetPicker(const char* label, std::string& guid, const std::stri
 		else if (kind == "shader")   for (Shader* s : db->shaders)   { if (s && !s->isPost) item(s->guid, disp(s->guid)); }
 		else if (kind == "postshader") for (Shader* s : db->shaders) { if (s && s->isPost) item(s->guid, disp(s->guid)); }
 		else if (kind == "texture")  for (Texture* t : db->textures) { if (t) item(t->guid, disp(t->guid)); }
+		else if (kind == "anim")     for (AnimClip* c : db->clips)   { if (c) item(c->guid, disp(c->guid)); }
+		else if (kind == "bonemap")  for (BoneMap* b : db->boneMaps) { if (b) item(b->guid, disp(b->guid)); }
 		else if (kind == "script")   // scan the project content for .lua files (value = content-relative path)
 		{
 			boost::system::error_code ec;
@@ -222,6 +228,110 @@ void EditorUI::RegisterInspectorOverrides()
 	inspectorOverrides["PostProcess"] = [this](nuke::Component* c) {
 		DrawPostProcessInspector(static_cast<nuke::PostProcess*>(c));
 	};
+	inspectorOverrides["Animator"] = [this](nuke::Component* c) {
+		DrawAnimatorInspector(static_cast<nuke::Animator*>(c));
+	};
+}
+
+// Animator: the serialized state machine, editable in place (states table + transitions +
+// entry). Every edit goes through the component's own mutators, so smJson (the persisted
+// form) stays in sync and saves with the world/prefab.
+void EditorUI::DrawAnimatorInspector(nuke::Animator* an)
+{
+	an->EnsureSM();
+	ImGui::SeparatorText("State Machine");
+
+	// entry state combo
+	{
+		const char* cur = an->entryState.empty() ? "(none)" : an->entryState.c_str();
+		ImGui::SetNextItemWidth(160);
+		if (ImGui::BeginCombo("Entry", cur))
+		{
+			if (ImGui::Selectable("(none)", an->entryState.empty())) { an->SetEntry(""); worldDirty = true; }
+			for (const auto& s : an->states)
+				if (ImGui::Selectable(s.first.c_str(), s.first == an->entryState)) { an->SetEntry(s.first); worldDirty = true; }
+			ImGui::EndCombo();
+		}
+	}
+
+	// states: name | clip picker | loop | speed | remove
+	std::string removeState;
+	for (auto& s : an->states)
+	{
+		ImGui::PushID(("st" + s.first).c_str());
+		ImGui::Bullet(); ImGui::SameLine();
+		ImGui::TextUnformatted(s.first.c_str());
+		ImGui::SameLine(ImGui::GetContentRegionAvail().x - 8);
+		if (ImGui::SmallButton("X")) removeState = s.first;
+		std::string clip = s.second.clip;
+		ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.55f);
+		if (AssetPicker("Clip", clip, "anim", "")) { s.second.clip = clip; an->EncodeSM(); worldDirty = true; }
+		bool lp = s.second.loop;
+		if (ImGui::Checkbox("Loop", &lp)) { s.second.loop = lp; an->EncodeSM(); worldDirty = true; }
+		ImGui::SameLine();
+		float sp = (float)s.second.speed;
+		ImGui::SetNextItemWidth(120);
+		if (ImGui::DragFloat("Speed", &sp, 0.01f, 0.0f, 10.0f)) { s.second.speed = sp; an->EncodeSM(); worldDirty = true; }
+		ImGui::PopID();
+	}
+	if (!removeState.empty()) { an->RemoveState(removeState); worldDirty = true; }
+
+	static char newState[64] = "";
+	ImGui::SetNextItemWidth(160);
+	ImGui::InputTextWithHint("##newstate", "state name", newState, sizeof(newState));
+	ImGui::SameLine();
+	if (ImGui::SmallButton(ICON_LC_PLUS " State") && newState[0])
+	{
+		an->AddState(newState, "", true, 1.0);
+		newState[0] = 0;
+		worldDirty = true;
+	}
+
+	// transitions: from -> to | fade | remove
+	if (!an->transitions.empty()) ImGui::SeparatorText("Transitions");
+	std::pair<std::string, std::string> removeTr;
+	for (auto& from : an->transitions)
+		for (auto& to : from.second)
+		{
+			ImGui::PushID(("tr" + from.first + ">" + to.first).c_str());
+			ImGui::Text("%s " ICON_LC_ARROW_RIGHT " %s", from.first.c_str(), to.first.c_str());
+			ImGui::SameLine();
+			float fade = (float)to.second;
+			ImGui::SetNextItemWidth(90);
+			if (ImGui::DragFloat("##fade", &fade, 0.01f, 0.0f, 5.0f, "%.2f s")) { to.second = fade; an->EncodeSM(); worldDirty = true; }
+			ImGui::SameLine();
+			if (ImGui::SmallButton("X")) removeTr = { from.first, to.first };
+			ImGui::PopID();
+		}
+	if (!removeTr.first.empty()) { an->RemoveTransition(removeTr.first, removeTr.second); worldDirty = true; }
+
+	// add transition: two state combos + fade
+	if (an->states.size() >= 2)
+	{
+		static std::string trFrom, trTo;
+		static float trFade = 0.2f;
+		auto stateCombo = [&](const char* id, std::string& v)
+		{
+			ImGui::SetNextItemWidth(110);
+			if (ImGui::BeginCombo(id, v.empty() ? "..." : v.c_str()))
+			{
+				for (const auto& s : an->states)
+					if (ImGui::Selectable(s.first.c_str(), s.first == v)) v = s.first;
+				ImGui::EndCombo();
+			}
+		};
+		stateCombo("##trfrom", trFrom); ImGui::SameLine();
+		ImGui::TextUnformatted(ICON_LC_ARROW_RIGHT); ImGui::SameLine();
+		stateCombo("##trto", trTo); ImGui::SameLine();
+		ImGui::SetNextItemWidth(70);
+		ImGui::DragFloat("##trfade", &trFade, 0.01f, 0.0f, 5.0f, "%.2f s");
+		ImGui::SameLine();
+		if (ImGui::SmallButton(ICON_LC_PLUS "##tradd") && !trFrom.empty() && !trTo.empty() && trFrom != trTo)
+		{
+			an->AddTransition(trFrom, trTo, trFade);
+			worldDirty = true;
+		}
+	}
 }
 
 // PostProcess panel: the ordered chain of custom post-effect shaders. Each effect = a post-shader pick +
@@ -805,7 +915,7 @@ void EditorUI::DrawAssetInspector(const std::string& path)
 				else if (nuke::Texture* t = nuke::Texture::LoadFromFile(path)) { t->usage = val; t->SaveToFile(path); delete t; }
 			};
 			setUsage(u);
-			PushUndo("Texture type", [setUsage, before]{ setUsage(before); }, [setUsage, u]{ setUsage(u); });
+			PushUndo("Texture type", [setUsage, before]{ setUsage(before); }, [setUsage, u]{ setUsage(u); }, false);   // asset edit, not the world
 		}
 		if (ImGui::IsItemHovered()) ImGui::SetTooltip("How the engine treats this texture (color space / compression / normal handling).\nAuto-guessed from the filename at import; override here.\nNormal -> BC5 + green flip (re-import to re-compress after changing to/from Normal).");
 
@@ -823,7 +933,7 @@ void EditorUI::DrawAssetInspector(const std::string& path)
 					if (!guid.empty()) if (nuke::Texture* live = nuke::ResDB::getSingleton()->GetTexture(guid)) live->invertGreen = val;
 				};
 				setIG(ig);
-				PushUndo("Normal green convention", [setIG, before]{ setIG(before); }, [setIG, ig]{ setIG(ig); });
+				PushUndo("Normal green convention", [setIG, before]{ setIG(before); }, [setIG, ig]{ setIG(ig); }, false);   // asset edit, not the world
 			}
 			if (ImGui::IsItemHovered()) ImGui::SetTooltip("On = OpenGL convention (+Y up, green flipped) — glTF/Blender/Substance default.\nOff = DirectX (-Y). Toggle if the relief looks inverted.");
 		}
@@ -854,7 +964,7 @@ void EditorUI::DrawAssetInspector(const std::string& path)
 					if (owned) delete t;
 				};
 				applyFmt(after);
-				PushUndo("Texture compression", [applyFmt, before]{ applyFmt(before); }, [applyFmt, after]{ applyFmt(after); });
+				PushUndo("Texture compression", [applyFmt, before]{ applyFmt(before); }, [applyFmt, after]{ applyFmt(after); }, false);   // asset edit, not the world
 			}
 			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Re-compress now. BC5 = 8 bpp (normals, quality); BC1 = 4 bpp (half the size, blocky). BC1<->BC5 is lossy.");
 		}

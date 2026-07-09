@@ -132,11 +132,21 @@ private:
 	// covers anything that changes — atom edits, spawns, reparenting, project/editor settings, paths —
 	// not just atoms. Atom edits are captured as a delta (the affected atom subtree's before/after
 	// JSON), never the whole world. Use PushUndo / RecordChange<T> at any mutation site.
-	struct UndoCmd { std::function<void()> undo, redo; std::string label; };
+	struct UndoCmd { std::function<void()> undo, redo; std::string label; long serial = 0; };
 	std::vector<UndoCmd> undoStack, redoStack;
+	// Monotonic edit id: every pushed command gets one; the world is DIRTY when the id on
+	// top of the undo stack differs from the id recorded at the last save/load. This is
+	// the whole dirty check — serializing the world to diff it (the old way) froze the
+	// editor 4x/second on big scenes.
+	long editSerial = 0;
+	long savedWorldSerial = 0;
+	long WorldEditSerial() const { return undoStack.empty() ? 0 : undoStack.back().serial; }
 	std::string editBefore; long editAtomId = 0; bool editing = false;   // selected-atom edit detector
 	unsigned int editActiveId = 0;   // ImGui active-widget id of the in-progress edit (flush when it changes)
 	std::string  idleSnap; long idleAtomId = 0;   // last snapshot taken while NOTHING was being edited = true pre-edit "before"
+	bool idleSnapValid = false;   // refresh ON DEMAND (selection change / after an edit) — NOT per
+	                              // frame: serializing a selected 200-atom subtree every frame was
+	                              // the "editor stutters, Player is fine" freeze
 	Atom* pendingCompAtom = nullptr; Component* pendingCompDel = nullptr;   // deferred component removal
 	std::string rebindId;                          // hotkey id currently being rebound ("" = none)
 	bool        settingsOpen = false;              // Project Settings window open?
@@ -205,6 +215,11 @@ public:
 	void SaveAsFolderTree(const std::string& dir);   // recursive folder tree (pick the save folder)
 	void OpenWorldCmd(const std::string& relPath);            // open a world from project content
 	void OpenWorldFromBrowser(const std::string& fullPath);   // open a .nuworld picked in the browser
+	// World switches requested mid-frame (menu/browser clicks land inside the UI pass)
+	// are QUEUED and applied here, first thing in the render callback — tearing a world
+	// down mid-command-list makes D3D12 fail to close the list (render safety).
+	std::string pendingWorldOpen;
+	void ApplyPendingWorldOpen();
 	void winSettings();              // Project Settings window (default world + hotkeys)
 	// hierarchy
 	void winHierarchy();
@@ -224,6 +239,7 @@ public:
 	void RegisterInspectorOverrides();
 	void DrawMeshRendererInspector(nuke::MeshRenderer* mr);
 	void DrawPostProcessInspector(nuke::PostProcess* pp);
+	void DrawAnimatorInspector(nuke::Animator* an);   // serialized state machine (3.1)
 	void winWorldSettings();   // World Settings window (global shadow settings, saved in the .nuworld)
 	bool worldSettingsOpen = false;
 	bool worldSettingsFocus = false;   // focus the window only when opened via menu, not when restored on load
@@ -326,6 +342,10 @@ public:
 		bool      gizmoWorld = true;        // gizmo space: world / local (X toggles, like the viewport)
 		long      pendingDeleteId = 0;      // tree ops applied AFTER the tree walk
 		long      pendingAddParentId = 0;
+		// Animation preview (3.1): the ▶ toggle ticks the subtree's Animators each frame;
+		// the pose snapshot taken at play start restores the prefab on stop (mini-PIE).
+		bool        animPlay = false;
+		std::string animSnap;
 		float     gizmoMtx[16] = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };   // persistent during a drag
 		// Per-WINDOW undo/redo: Ctrl+Z/Ctrl+Y route here while this window is focused
 		// (EditorUI::Undo/Redo check aeFocused). Snapshots — prefab: atom-subtree JSON;
@@ -347,6 +367,8 @@ public:
 	void winAssetEditors();
 	void AssetEditorUndo(AssetEditorWin& w);
 	void AssetEditorRedo(AssetEditorWin& w);
+	void ToggleAnimPreview(AssetEditorWin& w);   // prefab editor ▶/■ (mini-PIE, snapshot-restored)
+	void TickAnimPreview(AssetEditorWin& w);     // tick the subtree's Animators while playing
 	void DrawPrefabTree(AssetEditorWin& w, Atom* a);        // recursive tree rows (select by id)
 	bool DrawPrefabAtomEditor(AssetEditorWin& w, Atom* a);  // transform + components; true if edited
 
@@ -411,6 +433,7 @@ public:
 	void CreateFolderAsset(const std::string& folder);
 	void CreateWorldAsset(const std::string& folder);    // empty .nuworld
 	void CreateMaterialAsset(const std::string& folder); // default .numat (registered in ResDB)
+	void CreateBoneMapAsset(const std::string& folder);  // .nubonemap retarget map (JSON, 3.1)
 	void CreateShaderAsset(const std::string& folder);   // .vs/.ps.hlsl pair (registered + pipeline built)
 	void CreateRenderTextureAsset(const std::string& folder);   // .nutex RenderTexture (camera target)
 	// plugins
@@ -431,7 +454,10 @@ public:
 	// undo/redo (generic command stack)
 	void Undo();
 	void Redo();
-	void PushUndo(const std::string& label, std::function<void()> undoFn, std::function<void()> redoFn);
+	// worldEdit=false for commands that do NOT change the open world (file moves, project
+	// settings, asset tweaks) — they stay undoable but must not flip the world's dirty "*".
+	void PushUndo(const std::string& label, std::function<void()> undoFn, std::function<void()> redoFn,
+	              bool worldEdit = true);
 	void TrackUndo();                  // detect a settled selected-atom edit (inspector/gizmo); not in PIE
 	void ResetUndo();                  // clear history (on world load / new)
 	void ApplyAtomState(long id, long parentId, int index, const std::string& json);   // undo primitive

@@ -66,9 +66,7 @@ void EditorUI::SaveWorldCmd()
 void EditorUI::OpenWorldCmd(const std::string& relPath)
 {
 	if (relPath.empty()) return;
-	AppInstance::GetSingleton()->OpenWorld(relPath);
-	ResetUndo();
-	SyncWorldBaseline();
+	pendingWorldOpen = relPath;   // applied at the FRAME BOUNDARY (see ApplyPendingWorldOpen)
 }
 
 // Open the "Save World As" modal; default the folder to the one currently open in the browser.
@@ -151,8 +149,30 @@ void EditorUI::OpenWorldFromBrowser(const std::string& fullPath)
 {
 	boost::system::error_code ec;
 	bfs::path rel = bfs::relative(bfs::path(fullPath), bfs::path(contentDir), ec);
-	std::string r = (!ec && !rel.empty()) ? rel.generic_string() : fullPath;
-	AppInstance::GetSingleton()->OpenWorld(r);
+	pendingWorldOpen = (!ec && !rel.empty()) ? rel.generic_string() : fullPath;
+}
+
+// World switching is DEFERRED to the frame boundary: the click that requests it lands
+// mid-frame (inside the UI pass), and tearing the world down there destroys resources
+// the half-recorded command list still references — D3D12 then fails to CLOSE the list
+// ("Failed to close the command list") and can remove the device. Called FIRST in the
+// render callback, before any preview/scene recording.
+void EditorUI::ApplyPendingWorldOpen()
+{
+	// Dev hook (headless repro of world-switch bugs): NUKE_OPEN_WORLD=<content-relative>
+	// queues that world ~1.5 s after boot, mimicking a user click without a user.
+	static int devDelay = -2;
+	if (devDelay == -2)
+	{
+		const char* w = std::getenv("NUKE_OPEN_WORLD");
+		devDelay = (w && w[0]) ? 90 : -1;
+	}
+	if (devDelay > 0 && --devDelay == 0) pendingWorldOpen = std::getenv("NUKE_OPEN_WORLD");
+
+	if (pendingWorldOpen.empty()) return;
+	std::string path;
+	path.swap(pendingWorldOpen);
+	AppInstance::GetSingleton()->OpenWorld(path);
 	ResetUndo();
 	SyncWorldBaseline();
 }
@@ -263,7 +283,8 @@ void EditorUI::winSettings()
 					std::string before = startupWorld, after = w;
 					startupWorld = after; SaveProject();
 					PushUndo("Default world", [this, before]{ startupWorld = before; SaveProject(); },
-					                          [this, after ]{ startupWorld = after;  SaveProject(); });
+					                          [this, after ]{ startupWorld = after;  SaveProject(); },
+					         false);   // project setting — not a change of the open world
 				}
 			ImGui::EndCombo();
 		}
@@ -390,7 +411,8 @@ void EditorUI::winSettings()
 				ProjectSettings before = psBefore;
 				PushUndo("Project settings",
 					[this, before]{ ApplyProjectSettings(before); },
-					[this, after ]{ ApplyProjectSettings(after ); });
+					[this, after ]{ ApplyProjectSettings(after ); },
+					false);   // project settings — not a change of the open world
 			}
 		}
 		if (!psActive) psBefore = capturePS();

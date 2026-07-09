@@ -41,7 +41,8 @@ bool EditorUI::IsTextFile(const std::string& ext)
 	if (const nuke::AssetCreator* ac = nuke::AssetCreatorForExt(ext))
 		if (ac->textEditable) return true;
 	static const char* kText[] = { ".lua", ".hlsl", ".fx", ".glsl", ".vert", ".frag",
-	                               ".json", ".txt", ".md", ".ini", ".cfg", ".nuproj" };
+	                               ".json", ".txt", ".md", ".ini", ".cfg", ".nuproj",
+	                               ".nubonemap" };   // retarget map = plain JSON
 	for (const char* t : kText) if (ext == t) return true;
 	return false;
 }

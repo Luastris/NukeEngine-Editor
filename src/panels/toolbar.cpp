@@ -260,14 +260,19 @@ static int  AtomIndex(World* w, Atom* a)
 	return -1;
 }
 
-void EditorUI::PushUndo(const std::string& label, std::function<void()> undoFn, std::function<void()> redoFn)
+void EditorUI::PushUndo(const std::string& label, std::function<void()> undoFn, std::function<void()> redoFn,
+                        bool worldEdit)
 {
-	undoStack.push_back({ std::move(undoFn), std::move(redoFn), label });
+	// Non-world commands (file ops, settings, asset tweaks) inherit the current world
+	// serial: they sit on the stack without flipping the world's dirty state.
+	const long ws = worldEdit ? ++editSerial : WorldEditSerial();
+	undoStack.push_back({ std::move(undoFn), std::move(redoFn), label, ws });
 	if (undoStack.size() > 200) undoStack.erase(undoStack.begin());
 	redoStack.clear();
+	idleSnapValid = false;   // any recorded edit may have touched the selected subtree
 }
 
-void EditorUI::ResetUndo() { undoStack.clear(); redoStack.clear(); editing = false; editAtomId = 0; editBefore.clear(); idleSnap.clear(); idleAtomId = 0; }
+void EditorUI::ResetUndo() { undoStack.clear(); redoStack.clear(); editing = false; editAtomId = 0; editBefore.clear(); idleSnap.clear(); idleAtomId = 0; idleSnapValid = false; }
 
 void EditorUI::Undo()
 {
@@ -282,6 +287,7 @@ void EditorUI::Undo()
 	UndoCmd c = undoStack.back(); undoStack.pop_back();
 	c.undo();
 	redoStack.push_back(c);
+	idleSnapValid = false;   // atoms just changed under the selection
 }
 
 void EditorUI::Redo()
@@ -294,6 +300,7 @@ void EditorUI::Redo()
 	UndoCmd c = redoStack.back(); redoStack.pop_back();
 	c.redo();
 	undoStack.push_back(c);
+	idleSnapValid = false;   // atoms just changed under the selection
 }
 
 // Undo primitive for atom deltas: replace the atom (by id) with the given serialized state at a
@@ -353,9 +360,25 @@ void EditorUI::TrackUndo()
 		else if (selId && selId == idleAtomId && !idleSnap.empty()) editBefore = idleSnap;
 		else                                                editBefore = sel ? SaveAtomToString(sel) : std::string();
 	}
-	// While nothing is being manipulated, keep a fresh snapshot of the selected atom — it is the correct
-	// "before" for the NEXT edit (captured a frame ahead of any widget change).
-	if (!active) { idleAtomId = selId; idleSnap = sel ? SaveAtomToString(sel) : std::string(); }
+	// While nothing is being manipulated, keep a valid snapshot of the selected atom — the
+	// correct "before" for the NEXT edit. Refreshed ON DEMAND only (selection change, or an
+	// edit invalidated it): serializing the subtree EVERY frame froze the editor when a big
+	// prefab root was selected.
+	if (!active)
+	{
+		if (!flushedAfter.empty())   // reuse the flush's serialization — it IS the fresh state
+		{
+			idleAtomId = editAtomId ? editAtomId : selId;
+			idleSnap = flushedAfter;
+			idleSnapValid = (idleAtomId == selId);
+		}
+		if (selId != idleAtomId || !idleSnapValid)
+		{
+			idleAtomId = selId;
+			idleSnap = sel ? SaveAtomToString(sel) : std::string();
+			idleSnapValid = true;
+		}
+	}
 }
 
 void EditorUI::RecordAdd(Atom* a)

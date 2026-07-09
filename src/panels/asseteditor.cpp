@@ -263,6 +263,55 @@ static void RestorePrefabState(EditorUI::AssetEditorWin& w, const std::string& j
 	w.dirty = true;   // restored state differs from the file (editedNow NOT raised: this IS undo)
 }
 
+// ---------------------------------------------------------------------------
+// Animation preview (3.1): a per-window mini-PIE — the ▶ toggle ticks the
+// subtree's Animators; ■ swaps the pre-play snapshot back (transform animation
+// mutates atom transforms, skinning swaps MeshRenderer meshes — both restored).
+// ---------------------------------------------------------------------------
+
+static bool SubtreeHasAnimator(nuke::Atom* a)
+{
+	if (!a) return false;
+	if (a->GetComponent<nuke::Animator>()) return true;
+	for (nuke::Atom* ch : a->children)
+		if (SubtreeHasAnimator(ch)) return true;
+	return false;
+}
+
+static void TickAnimators(nuke::Atom* a)
+{
+	if (!a) return;
+	if (nuke::Animator* an = a->GetComponent<nuke::Animator>())
+		if (an->enabled) an->Update();
+	for (nuke::Atom* ch : a->children) TickAnimators(ch);
+}
+
+void EditorUI::TickAnimPreview(AssetEditorWin& w)
+{
+	if (w.prefabRoot) TickAnimators(w.prefabRoot);
+}
+
+void EditorUI::ToggleAnimPreview(AssetEditorWin& w)
+{
+	if (!w.animPlay)
+	{
+		if (!w.prefabRoot) return;
+		w.animSnap = nuke::SaveAtomToString(w.prefabRoot);   // pose/structure before play
+		w.animPlay = true;
+	}
+	else
+	{
+		w.animPlay = false;
+		if (!w.animSnap.empty())
+		{
+			const bool wasDirty = w.dirty;   // restoring the pre-play state is NOT an edit
+			RestorePrefabState(w, w.animSnap);
+			w.dirty = wasDirty;
+			w.animSnap.clear();
+		}
+	}
+}
+
 static void RestoreMaterialState(EditorUI::AssetEditorWin& w, nuke::Material* snap)
 {
 	if (!snap) return;
@@ -623,6 +672,18 @@ void EditorUI::winAssetEditors()
 					if (ToolBtn(w.gizmoWorld ? ICON_LC_GLOBE : ICON_LC_AXIS_3D,
 					            w.gizmoWorld ? "World space (X)" : "Local space (X)", false, tbw))
 						w.gizmoWorld = !w.gizmoWorld;
+
+					// Animation preview (3.1): ▶ ticks the subtree's Animators (mini-PIE for
+					// this window only); ■ restores the pose snapshot taken at play start.
+					if (SubtreeHasAnimator(w.prefabRoot))
+					{
+						ImGui::SameLine();
+						if (ToolBtn(w.animPlay ? ICON_LC_SQUARE : ICON_LC_PLAY,
+						            w.animPlay ? "Stop animation preview" : "Play animation preview",
+						            w.animPlay, tbw))
+							ToggleAnimPreview(w);
+					}
+					if (w.animPlay) TickAnimPreview(w);
 
 					// The VIEWPORT's hotkeys, scoped to this window: Q/W/E/R tools, X space,
 					// F frame selection, Del delete atom. Not while typing or flying (RMB+WASD).

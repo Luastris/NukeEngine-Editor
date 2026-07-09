@@ -224,6 +224,9 @@ iRender* PreInitRender(){
     // own lights/sky/TLAS afterwards and the viewport image stays untouched.
     render->setOnRender([]{
         iRender* r = AppInstance::GetSingleton()->render;
+        // FIRST: apply a queued world switch at the frame boundary — tearing the world
+        // down mid-command-list (from a click handler) breaks D3D12 (render safety).
+        EditorUI::getSingleton()->ApplyPendingWorldOpen();
         EditorUI::getSingleton()->RenderAssetPreview(r);
         AppInstance::GetSingleton()->currentScene->Render(r);
     });

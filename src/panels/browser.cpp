@@ -33,7 +33,8 @@ void EditorUI::RecordFileMove(const std::string& from, const std::string& to)
 	if (from == to) return;
 	PushUndo("Move " + bfs::path(to).filename().string(),
 		[from, to]{ DoFileMove(to, from); },
-		[from, to]{ DoFileMove(from, to); });
+		[from, to]{ DoFileMove(from, to); },
+		false);   // file operation — undoable, but the open WORLD did not change
 }
 
 // Icon for a (lowercased) file extension.
@@ -43,6 +44,8 @@ const char* EditorUI::ExtIcon(const std::string& ext)
 	if (ext == ".numat")  return ICON_LC_PALETTE;
 	if (ext == ".nutex" || ext == ".png" || ext == ".jpg" || ext == ".jpeg") return ICON_LC_IMAGE;
 	if (ext == ".nuprefab") return ICON_LC_PACKAGE;
+	if (ext == ".nuanim")   return ICON_LC_PLAY;
+	if (ext == ".nubonemap") return ICON_LC_BONE;
 	if (ext == ".nuworld")  return ICON_LC_GLOBE;
 	if (ext == ".lua")      return ICON_LC_FILE_CODE;
 	if (ext == ".hlsl" || ext == ".nushader") return ICON_LC_FILE_CODE;
@@ -632,6 +635,20 @@ void EditorUI::CreateWorldAsset(const std::string& folder)
 	StartRename(path.string());
 }
 
+void EditorUI::CreateBoneMapAsset(const std::string& folder)
+{
+	bfs::path path = UniquePath(bfs::path(folder) / "New BoneMap.nubonemap");
+	nuke::BoneMap* b = new nuke::BoneMap();
+	b->guid = ResDB::NewGuid();
+	b->name = path.stem().string();
+	b->map["sourceBoneName"] = "targetBoneName";
+	b->SaveToFile(path.string());
+	ResDB::getSingleton()->RegisterBoneMap(b);   // show up in bone-map pickers immediately
+	ResDB::getSingleton()->SetAssetPath(b->guid, path.string());
+	browserSel = path.string();
+	StartRename(path.string());
+}
+
 void EditorUI::CreateMaterialAsset(const std::string& folder)
 {
 	bfs::path path = UniquePath(bfs::path(folder) / "New Material.numat");
@@ -758,6 +775,7 @@ void EditorUI::winBrowser()
 		ImGui::Separator();
 		if (ImGui::MenuItem(ICON_LC_GLOBE " World"))       CreateWorldAsset(folder);
 		if (ImGui::MenuItem(ICON_LC_PALETTE " Material"))  CreateMaterialAsset(folder);
+		if (ImGui::MenuItem(ICON_LC_BONE " Bone Map"))     CreateBoneMapAsset(folder);
 		if (ImGui::MenuItem(ICON_LC_FILE_CODE " Shader"))  CreateShaderAsset(folder);
 		if (ImGui::MenuItem(ICON_LC_IMAGE " RenderTexture")) CreateRenderTextureAsset(folder);
 		// Plugin-registered file types (descriptors: label/ext/template/category/icon; the
