@@ -9,6 +9,7 @@
 #include <API/Model/Light.h>
 #include <API/Model/Environment.h>
 #include <API/Model/Prefab.h>
+#include <API/Model/Audio.h>   // audio preview transport (Preview bus)
 #include <boost/filesystem.hpp>
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/gtx/matrix_decompose.hpp>   // prefab gizmo: decompose the manipulated matrix
@@ -369,7 +370,16 @@ void EditorUI::OpenAssetEditor(const std::string& path)
 
 	std::string ext = bfs::path(path).extension().string();
 	for (char& c : ext) c = (char)std::tolower((unsigned char)c);
-	if (ext != ".numat" && ext != ".numesh" && ext != ".nuprefab") return;
+	const bool isAudio = (ext == ".ogg" || ext == ".wav" || ext == ".mp3" || ext == ".flac");
+	if (ext != ".numat" && ext != ".numesh" && ext != ".nuprefab" && !isAudio) return;
+
+	if (isAudio)   // audio preview: no 3D scene — just the file path + a Preview-bus voice
+	{
+		AssetEditorWin w;
+		w.path = path; w.ext = ext; w.wantFocus = true;
+		assetEds.push_back(std::move(w));
+		return;
+	}
 
 	AssetEditorWin w;
 	w.path = path; w.ext = ext; w.wantFocus = true;
@@ -554,8 +564,11 @@ void EditorUI::winAssetEditors()
 		ImGuiWindowClass wcls;
 		wcls.ViewportFlagsOverrideSet = ImGuiViewportFlags_NoAutoMerge;
 		ImGui::SetNextWindowClass(&wcls);
-		ImGui::SetNextWindowSize(ImVec2(w.ext == ".nuprefab" ? 900.0f : 420.0f, 640.0f), ImGuiCond_FirstUseEver);
-		const char* icon = w.ext == ".numat" ? ICON_LC_PALETTE : (w.ext == ".numesh" ? ICON_LC_BOX : ICON_LC_PACKAGE);
+		const bool isAudio = !w.pv;   // audio previews are the only editors without a 3D scene
+		ImGui::SetNextWindowSize(isAudio ? ImVec2(420.0f, 170.0f)
+		                                 : ImVec2(w.ext == ".nuprefab" ? 900.0f : 420.0f, 640.0f), ImGuiCond_FirstUseEver);
+		const char* icon = isAudio ? ICON_LC_MUSIC
+		                 : w.ext == ".numat" ? ICON_LC_PALETTE : (w.ext == ".numesh" ? ICON_LC_BOX : ICON_LC_PACKAGE);
 		std::string title = std::string(icon) + " " + bfs::path(w.path).filename().string() + "###ae:" + w.path;
 		// No window scrollbars: the preview is sized to the free space, and a flickering
 		// scrollbar would oscillate that size every frame (children scroll themselves).
@@ -566,7 +579,7 @@ void EditorUI::winAssetEditors()
 			const bool focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
 			if (focused) aeFocused = i;   // Ctrl+Z/Ctrl+Y route to THIS window's history
 			bool wantSave = false;
-			if (w.ext != ".numesh")
+			if (w.ext != ".numesh" && !isAudio)
 			{
 				if (ImGui::SmallButton(ICON_LC_SAVE " Save")) wantSave = true;
 				ImGui::SameLine();
@@ -818,6 +831,39 @@ void EditorUI::winAssetEditors()
 				}
 				ImGui::EndChild();
 			}
+			else if (isAudio)   // audio preview: transport on the Preview bus (never game-paused)
+			{
+				const bool playing = nuke::Audio::IsPlaying((double)w.audioVoice);
+				if (!nuke::Audio::Available())
+					ImGui::TextDisabled("No audio provider is enabled (Plugins -> NukeAudio).");
+				else
+				{
+					if (ImGui::Button(playing ? ICON_LC_SQUARE " Stop" : ICON_LC_PLAY " Play", ImVec2(90, 0)))
+					{
+						if (playing) { nuke::Audio::Stop((double)w.audioVoice); w.audioVoice = 0; }
+						else         w.audioVoice = (uint64_t)nuke::Audio::Play(w.path, w.audioVol, false, 2);
+					}
+					ImGui::SameLine();
+					ImGui::SetNextItemWidth(140);
+					if (ImGui::SliderFloat("Volume", &w.audioVol, 0.0f, 2.0f, "%.2f"))
+						if (playing) nuke::Audio::SetVolume((double)w.audioVoice, w.audioVol);
+
+					float cur = playing ? (float)nuke::Audio::Time((double)w.audioVoice) : 0.0f;
+					float len = playing ? (float)nuke::Audio::Length((double)w.audioVoice) : 0.0f;
+					if (playing && len > 0.01f)
+					{
+						float pos = cur;
+						ImGui::SetNextItemWidth(-1);
+						if (ImGui::SliderFloat("##seek", &pos, 0.0f, len,
+						                       (std::to_string((int)pos / 60) + ":" + (pos - 60 * (int)(pos / 60) < 9.5f ? "0" : "")
+						                        + std::to_string((int)(pos) % 60) + " / "
+						                        + std::to_string((int)len / 60) + ":" + ((int)len % 60 < 10 ? "0" : "")
+						                        + std::to_string((int)len % 60)).c_str()))
+							nuke::Audio::Seek((double)w.audioVoice, (double)pos);
+					}
+					else ImGui::TextDisabled(playing ? "streaming..." : "stopped");
+				}
+			}
 
 			// Save (button or Ctrl+S while focused).
 			if (focused && ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S, false)) wantSave = true;
@@ -888,17 +934,18 @@ void EditorUI::winAssetEditors()
 		ImGui::EndPopup();
 	}
 
-	// Tear down closed editors (scene goes back to the pool).
+	// Tear down closed editors (scene goes back to the pool; audio voices stop).
 	for (int i = (int)assetEds.size() - 1; i >= 0; --i)
 		if (!assetEds[i].open)
 		{
 			AssetEditorWin& w = assetEds[i];
+			if (w.audioVoice) { nuke::Audio::Stop((double)w.audioVoice); w.audioVoice = 0; }
 			if (w.prefabRoot && w.pv) w.pv->world->RemoveAtomById((long)w.prefabRoot->id.id);
 			if (w.mat) delete w.mat;
 			delete w.idleM;
 			for (Material* m : w.undoM) delete m;
 			for (Material* m : w.redoM) delete m;
-			ReleasePreview(w.pv);
+			if (w.pv) ReleasePreview(w.pv);
 			assetEds.erase(assetEds.begin() + i);
 		}
 }

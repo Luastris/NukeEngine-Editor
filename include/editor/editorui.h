@@ -347,6 +347,9 @@ public:
 		// the pose snapshot taken at play start restores the prefab on stop (mini-PIE).
 		bool        animPlay = false;
 		std::string animSnap;
+		// Audio preview (ogg/wav/mp3/flac): the live Preview-bus voice of this window.
+		uint64_t audioVoice = 0;
+		float    audioVol = 1.0f;
 		float     gizmoMtx[16] = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };   // persistent during a drag
 		// Per-WINDOW undo/redo: Ctrl+Z/Ctrl+Y route here while this window is focused
 		// (EditorUI::Undo/Redo check aeFocused). Snapshots — prefab: atom-subtree JSON;

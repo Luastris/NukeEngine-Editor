@@ -92,6 +92,13 @@ static bool EndsWithCI(const std::string& s, const char* suf)
 		if (tolower((unsigned char)s[s.size() - n + i]) != tolower((unsigned char)suf[i])) return false;
 	return true;
 }
+// Audio clips are PLAIN files in content (no wrapper asset) — every format the audio
+// service decodes. Referenced by content-relative path, exactly like scripts.
+static bool IsAudioExt(std::string e)
+{
+	for (char& c : e) c = (char)tolower((unsigned char)c);
+	return e == ".ogg" || e == ".wav" || e == ".mp3" || e == ".flac";
+}
 // Does a dropped file path match the field's asset kind? (rejects everything else)
 static bool KindMatchesFile(const std::string& kind, const std::string& path)
 {
@@ -103,6 +110,7 @@ static bool KindMatchesFile(const std::string& kind, const std::string& path)
 	if (kind == "anim")     return e == ".nuanim";
 	if (kind == "bonemap")  return e == ".nubonemap";
 	if (kind == "script")   return e == ".lua";
+	if (kind == "audio")    return IsAudioExt(e);
 	if (kind == "shader")   { std::string fn = bfs::path(path).filename().string(); return EndsWithCI(fn, ".vs.hlsl") || EndsWithCI(fn, ".ps.hlsl"); }
 	return false;
 }
@@ -124,7 +132,7 @@ bool EditorUI::AssetPicker(const char* label, std::string& guid, const std::stri
 	// built-ins that have no file. Shaders are keyed by name, so just show that.
 	auto disp = [&](const std::string& g) -> std::string {
 		if (g.empty()) return "(none)";
-		if (kind == "script") return bfs::path(g).stem().string();   // value is a content-relative path
+		if (kind == "script" || kind == "audio") return bfs::path(g).stem().string();   // value is a content-relative path
 		if (kind == "shader" || kind == "postshader") { Shader* s = db->GetShader(g); return s ? s->name : g; }
 		std::string p = db->PathForGuid(g);
 		if (!p.empty()) return bfs::path(p).stem().string();
@@ -149,7 +157,7 @@ bool EditorUI::AssetPicker(const char* label, std::string& guid, const std::stri
 			if (KindMatchesFile(kind, path))
 			{
 				std::string g;
-				if      (kind == "script") { boost::system::error_code ec; g = bfs::relative(bfs::path(path), bfs::path(contentDir), ec).generic_string(); }
+				if      (kind == "script" || kind == "audio") { boost::system::error_code ec; g = bfs::relative(bfs::path(path), bfs::path(contentDir), ec).generic_string(); }
 				else if (kind == "shader") g = ShaderGuidFromPath(path);
 				else                       g = db->GuidForPath(path);
 				if (!g.empty()) { guid = g; changed = true; }
@@ -162,7 +170,7 @@ bool EditorUI::AssetPicker(const char* label, std::string& guid, const std::stri
 	if (ImGui::Button(ICON_LC_FOLDER_SEARCH "##loc"))   // locate the original file in the browser
 	{
 		std::string path;
-		if      (kind == "script") { if (!guid.empty()) path = (bfs::path(contentDir) / guid).string(); }
+		if      (kind == "script" || kind == "audio") { if (!guid.empty()) path = (bfs::path(contentDir) / guid).string(); }
 		else if (kind == "shader" && db->GetShader(guid)) path = db->GetShader(guid)->vsPath;
 		else                       path = db->PathForGuid(guid);
 		if (!path.empty()) { BrowserNavigate(bfs::path(path).parent_path().string()); browserSel = path; if (win) win->browser = true; }
@@ -194,7 +202,7 @@ bool EditorUI::AssetPicker(const char* label, std::string& guid, const std::stri
 		else if (kind == "texture")  for (Texture* t : db->textures) { if (t) item(t->guid, disp(t->guid)); }
 		else if (kind == "anim")     for (AnimClip* c : db->clips)   { if (c) item(c->guid, disp(c->guid)); }
 		else if (kind == "bonemap")  for (BoneMap* b : db->boneMaps) { if (b) item(b->guid, disp(b->guid)); }
-		else if (kind == "script")   // scan the project content for .lua files (value = content-relative path)
+		else if (kind == "script" || kind == "audio")   // scan the project content (value = content-relative path)
 		{
 			boost::system::error_code ec;
 			bfs::path croot(contentDir);
@@ -205,7 +213,7 @@ bool EditorUI::AssetPicker(const char* label, std::string& guid, const std::stri
 					if (bfs::is_directory(it->path())) continue;
 					std::string e = it->path().extension().string();
 					for (char& c : e) c = (char)tolower((unsigned char)c);
-					if (e != ".lua") continue;
+					if (kind == "script" ? (e != ".lua") : !IsAudioExt(e)) continue;
 					std::string rel = bfs::relative(it->path(), croot, ec).generic_string();
 					item(rel, bfs::path(rel).stem().string());
 				}
@@ -390,6 +398,9 @@ void EditorUI::DrawPostProcessInspector(nuke::PostProcess* pp)
 			if (sh)
 				for (const nuke::ShaderProp& sp : sh->props)
 				{
+					// g_Nuke* = SYSTEM params (audio analysis / time), engine-filled per
+					// frame while packing the blob — never user-editable, so not drawn.
+					if (sp.name.compare(0, 6, "g_Nuke") == 0) continue;
 					auto it = e.props.find(sp.name);
 					std::array<float, 4> val = (it != e.props.end()) ? it->second
 						: std::array<float, 4>{ sp.def[0], sp.def[1], sp.def[2], sp.def[3] };

@@ -47,6 +47,7 @@ const char* EditorUI::ExtIcon(const std::string& ext)
 	if (ext == ".nuanim")   return ICON_LC_PLAY;
 	if (ext == ".nubonemap") return ICON_LC_BONE;
 	if (ext == ".nuworld")  return ICON_LC_GLOBE;
+	if (ext == ".ogg" || ext == ".wav" || ext == ".mp3" || ext == ".flac") return ICON_LC_MUSIC;
 	if (ext == ".lua")      return ICON_LC_FILE_CODE;
 	if (ext == ".hlsl" || ext == ".nushader") return ICON_LC_FILE_CODE;
 	return ICON_LC_FILE;
@@ -145,7 +146,8 @@ void EditorUI::EntryContextMenu(const std::string& path, bool isDir)
 		{
 			std::string cext = bfs::path(path).extension().string();
 			for (char& c : cext) c = (char)std::tolower((unsigned char)c);
-			if (cext == ".numat" || cext == ".numesh" || cext == ".nuprefab")
+			if (cext == ".numat" || cext == ".numesh" || cext == ".nuprefab"
+			    || cext == ".ogg" || cext == ".wav" || cext == ".mp3" || cext == ".flac")
 			{
 				if (ImGui::MenuItem(ICON_LC_PENCIL_RULER " Open in Editor")) OpenAssetEditor(path);
 				if (cext == ".nuprefab" && ImGui::MenuItem(ICON_LC_PACKAGE_PLUS " Instantiate")) InstantiatePrefab(path);
@@ -950,8 +952,9 @@ void EditorUI::winBrowser()
 			{
 				if      (e.isDir)              BrowserNavigate(e.path);
 				else if (e.ext == ".nuworld")  OpenWorldFromBrowser(e.path);
-				else if (e.ext == ".nuprefab" || e.ext == ".numat" || e.ext == ".numesh")
-					OpenAssetEditor(e.path);   // asset editor window (instantiate prefabs via drag / context menu)
+				else if (e.ext == ".nuprefab" || e.ext == ".numat" || e.ext == ".numesh"
+				         || e.ext == ".ogg" || e.ext == ".wav" || e.ext == ".mp3" || e.ext == ".flac")
+					OpenAssetEditor(e.path);   // asset editor window (audio opens its preview player)
 				else if (IsTextFile(e.ext))    OpenTextFile(e.path);   // scripts/shaders/configs -> text editor
 			}
 			EntryContextMenu(e.path, e.isDir);   // right-click: Rename / Delete
@@ -987,8 +990,9 @@ void EditorUI::winBrowser()
 				{
 					if (e.isDir)                   BrowserNavigate(e.path);
 					else if (e.ext == ".nuworld")  OpenWorldFromBrowser(e.path);
-					else if (e.ext == ".nuprefab" || e.ext == ".numat" || e.ext == ".numesh")
-						OpenAssetEditor(e.path);   // asset editor window (instantiate prefabs via drag / context menu)
+					else if (e.ext == ".nuprefab" || e.ext == ".numat" || e.ext == ".numesh"
+					         || e.ext == ".ogg" || e.ext == ".wav" || e.ext == ".mp3" || e.ext == ".flac")
+						OpenAssetEditor(e.path);   // asset editor window (audio opens its preview player)
 					else if (IsTextFile(e.ext))    OpenTextFile(e.path);   // scripts/shaders/configs -> text editor
 				}
 			}
