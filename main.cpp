@@ -250,16 +250,16 @@ void InitInput(KeyBoard *keyboard){
 
 int main(int argc, char** argv)
 {
-	// Capture + absolutize a .nuproj argument against the ORIGINAL cwd, BEFORE we change cwd below.
-	std::string projectArg;
+	// Capture + absolutize a .nuproj / .nupak / .numod argument against the ORIGINAL cwd,
+	// BEFORE we change cwd below. Archives extract into an editable work tree (3.2).
+	std::string projectArg, archiveArg;
 	if (argc > 1 && argv[1])
 	{
 		std::string a = argv[1];
-		if (a.size() >= 7 && a.compare(a.size() - 7, 7, ".nuproj") == 0)
-		{
-			boost::system::error_code ec;
-			projectArg = bfs::absolute(bfs::path(a)).string();
-		}
+		auto endsWith = [&](const char* s) { size_t n = strlen(s); return a.size() >= n && a.compare(a.size() - n, n, s) == 0; };
+		boost::system::error_code ec;
+		if (endsWith(".nuproj"))                        projectArg = bfs::absolute(bfs::path(a)).string();
+		else if (endsWith(".nupak") || endsWith(".numod")) archiveArg = bfs::absolute(bfs::path(a)).string();
 	}
 
 	// Always run with cwd = the editor's own directory. Engine resources (config, modules, shaders,
@@ -275,6 +275,23 @@ int main(int argc, char** argv)
 	AppInstance* instance = AppInstance::GetSingleton();
 	instance->setEditor(true);
 	cout << "[main]\t\t\t" << "NukeEngine starting... Welcome!" << endl;
+
+	// "Open with" / double-click an ARCHIVE (.nupak project / .numod mod): extract it into
+	// "<stem>_project" beside the pak — the editable work tree — and open THAT. The base
+	// pak is remembered (".nupak_base"), so Package Mod diffs against it / repacks a mod.
+	if (!archiveArg.empty())
+	{
+		cout << "[main]\t\t\t" << "Opening archive: " << archiveArg << endl;
+		const bool isMod = archiveArg.size() > 6 && archiveArg.compare(archiveArg.size() - 6, 6, ".numod") == 0;
+		// .nupak = read-only MOUNT + overlay (never extracted); .numod = editable, extracts.
+		projectArg = isMod ? EditorUI::PrepareArchiveProject(archiveArg)
+		                   : EditorUI::PrepareMountedProject(archiveArg);
+		if (projectArg.empty())
+		{
+			cout << "[main]\t\t\t" << "Archive open failed. Aborting." << endl;
+			return 1;
+		}
+	}
 
 	// "Open with" / double-click a .nuproj: point the editor at that project (absolute path; cwd stays
 	// the editor dir). The project folder = where the .nuproj lives; its content resolves from there.

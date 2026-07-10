@@ -12,6 +12,30 @@ std::string EditorPickModelFile()
 	return std::string();
 }
 
+std::string EditorPickIconFile()
+{
+	// TODO(linux/mac): native file picker (see EditorPickModelFile).
+	return std::string();
+}
+
+std::string EditorPickFolder()
+{
+	// TODO(linux/mac): native folder picker (see EditorPickModelFile).
+	return std::string();
+}
+
+std::string EditorPickProjectFile()
+{
+	// TODO(linux/mac): native file picker (see EditorPickModelFile).
+	return std::string();
+}
+
+bool EditorRelaunch(const std::string&)
+{
+	// TODO(linux/mac): fork/exec a new editor instance on the picked project.
+	return false;
+}
+
 bool RegisterProjectFileAssociation()
 {
 	// TODO(linux): write ~/.local/share/applications/*.desktop + xdg-mime default for .nuproj.

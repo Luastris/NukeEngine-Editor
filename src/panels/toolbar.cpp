@@ -4,6 +4,7 @@
 #include <API/Model/Environment.h>
 #include <API/Model/ReflectionProbe.h>
 #include <API/Model/Jobs.h>   // PumpMain each editor frame (2.4)
+#include <cstring>            // strcmp (NUKE_PACKAGE_MOD=<name> dev hook)
 
 // ---- toolbar ----
 // A flat button that stays highlighted while `active` (radio/toggle look).
@@ -179,6 +180,37 @@ void EditorUI::Draw()
 
 	nuke::Jobs::PumpMain();   // deliver background-job results to the game thread (2.4)
 
+	// DEV HOOKS (3.2 packaging tests): NUKE_PACKAGE=1 fires Package Project ~2.5 s after
+	// boot, NUKE_PACKAGE_MOD=1 fires Package Mod — headless verification without clicks.
+	{
+		static int pkgDelay = -2;
+		if (pkgDelay == -2) { const char* e = std::getenv("NUKE_PACKAGE"); pkgDelay = (e && *e == '1') ? 150 : -1; }
+		if (pkgDelay > 0 && --pkgDelay == 0) PackageProject();
+		static int modDelay = -2;
+		static std::string modHookName;   // NUKE_PACKAGE_MOD=<name> picks the mod's name; "1" = fallbacks
+		if (modDelay == -2)
+		{
+			const char* e = std::getenv("NUKE_PACKAGE_MOD");
+			modDelay = (e && e[0]) ? 150 : -1;
+			if (modDelay > 0 && strcmp(e, "1") != 0) modHookName = e;
+		}
+		if (modDelay > 0 && --modDelay == 0) PackageMod(modHookName);
+		// NUKE_OPEN_PROJECT=<path> exercises the New/Open Project switch (relaunch + close).
+		// The child INHERITS the env var — skip when the target is already open, else the
+		// spawned editor would relaunch itself forever.
+		static int swDelay = -2;
+		static std::string swPath;
+		if (swDelay == -2)
+		{
+			const char* e = std::getenv("NUKE_OPEN_PROJECT");
+			boost::system::error_code ec;
+			swDelay = (e && e[0]
+			           && !bfs::equivalent(bfs::path(e), bfs::path(projectFile), ec)) ? 150 : -1;
+			if (swDelay > 0) swPath = e;
+		}
+		if (swDelay > 0 && --swDelay == 0) RequestProjectSwitch(swPath);
+	}
+
 	// Hot-reload shaders + materials/textures edited on disk (~twice a second; cheap mtime checks).
 	if ((++hotReloadTick % 30) == 0)
 	{
@@ -216,6 +248,9 @@ void EditorUI::Draw()
 	winTextEditor();      // Text editor (2.2): opened from the browser / asset inspector
 	winAssetEditors();    // Asset editors: material / mesh / prefab windows
 	DrawSaveAsPopup();    // "Save World As" modal
+	DrawNewProjectPopup();      // "New Project" modal (File menu)
+	DrawPackageModPopup();      // "Package Mod" modal (pick the mod's name)
+	DrawSwitchConfirmPopup();   // unsaved-world guard before a project switch
 	TrackUndo();          // capture a selected-atom edit for undo when the UI settles
 	TrackDirty();         // refresh the dirty "*" marker
 	TrackExternalChange();// detect a disk edit of the open world

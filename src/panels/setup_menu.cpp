@@ -1,6 +1,7 @@
 // setup_menu panel — EditorUI method definitions (translation unit).
 #include <editor/editorui.h>
 #include <import/assimporter.h>   // drag&drop import (ImportAny)
+#include <API/Model/Package.h>    // mounted-pak session (3.2)
 namespace bfs = boost::filesystem;
 
 void EditorUI::SetUp()
@@ -70,6 +71,13 @@ void EditorUI::SetUp()
 
 	// Load native assets (.numesh) from content/ so meshGuid refs in saved worlds resolve.
 	ResDB::getSingleton()->LoadContentDir(contentDir);
+	// Opened from a .nupak (3.2): the base game is MOUNTED read-only (Bethesda-style, no
+	// extraction) — register its assets too; the raw dir above is the modder's overlay.
+	if (nuke::Package::MountedCount() > 0)
+	{
+		ResDB::getSingleton()->LoadContentPackaged();
+		ResDB::getSingleton()->LoadShadersPackaged();   // content shaders straight from pak bytes
+	}
 	// Shaders from two roots: engine built-in (shaders/) then project (content/). Engine wins
 	// on name clashes, so a project can't shadow the built-in "world" default by accident.
 	ResDB::getSingleton()->LoadShadersDir("shaders");
@@ -225,13 +233,41 @@ void EditorUI::EditorMenu()
 	{
 		if (ImGui::BeginMenu("File"))
 		{
+			// Projects: create a fresh one, or open ANY form — raw .nuproj (development),
+			// packed .nupak (release game, mounted read-only + mod overlay), .numod (mod).
+			// Switching relaunches the editor on the picked path (project lifecycle = boot).
+			if (ImGui::MenuItem(ICON_LC_FOLDER_PLUS " New Project...")) openNewProjectPopup = true;
+			if (ImGui::MenuItem(ICON_LC_FOLDER_OPEN " Open Project...")) OpenProjectCmd();
+			ImGui::Separator();
 			MenuHotkeyItem("New World",           "editor.world.new");
 			MenuHotkeyItem("Open Default World",  "editor.world.open");
+			// Mounted-pak session: the base game's worlds live in the pak, not the overlay
+			// dir the browser shows — list them here so a modder can open any of them.
+			if (nuke::Package::MountedCount() > 0 && ImGui::BeginMenu("Open World (package)"))
+			{
+				for (const std::string& rel : nuke::Package::List("content/"))
+				{
+					if (rel.size() < 9 || rel.compare(rel.size() - 8, 8, ".nuworld") != 0) continue;
+					std::string worldRel = rel.substr(8);   // strip "content/"
+					if (ImGui::MenuItem(worldRel.c_str())) OpenWorldCmd(worldRel);
+				}
+				ImGui::EndMenu();
+			}
 			MenuHotkeyItem("Save World",          "editor.world.save");
 			MenuHotkeyItem("Save World As...",    "editor.world.saveas");
 			ImGui::Separator();
 			MenuHotkeyItem("Project Settings...", "editor.settings");
 			if (ImGui::MenuItem("World Settings...")) { worldSettingsOpen = true; worldSettingsFocus = true; }
+			ImGui::Separator();
+			// Packaging (3.2) — the two commands are mutually exclusive by session kind.
+			// AUTHORING project (no basePakPath): Package Project only — there is nothing to
+			// mod, you own the game. ARCHIVE session (opened from .nupak/.numod): Package Mod
+			// only — repackaging someone's shipped game into a full second game is forbidden.
+			if (basePakPath.empty())
+			{
+				if (ImGui::MenuItem(ICON_LC_PACKAGE " Package Project (dist)")) PackageProject();
+			}
+			else if (ImGui::MenuItem(ICON_LC_PUZZLE " Package Mod (.numod)..."))   PackageModCmd();
 			ImGui::Separator();
 			if (ImGui::MenuItem("Quit", "Alt+F4")) {}
 			ImGui::EndMenu();

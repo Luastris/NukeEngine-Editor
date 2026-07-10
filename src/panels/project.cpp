@@ -29,9 +29,16 @@ void EditorUI::SaveProject()
 {
 	boost::system::error_code ec; bfs::create_directories(projectDir, ec);
 	nlohmann::json j;
-	j["name"]         = "NukeGame";
+	j["name"]         = projectName;
 	j["engine"]       = "NukeEngine";
 	j["content"]      = "content";          // relative to the project dir
+	// Packaging (3.2): project pak = immutable release artifact (zstd max by default);
+	// mod paks = editable overlays (store by default). 0 store / 1 zlib / 2 zstd.
+	j["pakMethod"] = pakMethod; j["pakLevel"] = pakLevel;
+	j["modMethod"] = modMethod; j["modLevel"] = modLevel;
+	j["gameIcon"]  = gameIcon;              // .ico stamped onto the shipped exe (dist)
+	j["distPath"]  = distPath;              // build output ("" = <project>/dist)
+	j["modName"]   = modName;               // last packaged mod name (same name = update that mod)
 	j["startupWorld"] = startupWorld;        // the default world the game loads
 	j["unlinkOnDelete"] = unlinkOnDelete;   // break refs to a deleted resource (vs leave dangling)
 	j["reloadCleanMode"] = reloadCleanMode; // disk changed, editor clean: 0=ask,1=auto-reload
@@ -65,9 +72,21 @@ void EditorUI::LoadProject()
 	nlohmann::json j = nlohmann::json::parse(f, nullptr, false);
 	if (j.is_discarded()) return;
 	startupWorld   = j.value("startupWorld", startupWorld);
+	projectName    = j.value("name", projectName);
 	unlinkOnDelete = j.value("unlinkOnDelete", false);
 	reloadCleanMode = j.value("reloadCleanMode", 0);
 	conflictMode    = j.value("conflictMode", 0);
+	pakMethod = j.value("pakMethod", 2); pakLevel = j.value("pakLevel", 22);
+	modMethod = j.value("modMethod", 0); modLevel = j.value("modLevel", 0);
+	gameIcon  = j.value("gameIcon", std::string());
+	distPath  = j.value("distPath", std::string());
+	modName   = j.value("modName", std::string());
+	// Opened from an archive? The extractor left a base-pak pointer (Package Mod diffs
+	// against it / repacks an editable .numod in place).
+	{
+		bfs::ifstream bm{bfs::path(projectDir + "/.nupak_base")};
+		if (bm) std::getline(bm, basePakPath);
+	}
 	msaaSamples     = j.value("msaa", 4);
 	hdrEnabled      = j.value("hdr", true);
 	hdrPaperWhite   = j.value("hdrPaperWhite", 200.0f);
@@ -280,6 +299,124 @@ void EditorUI::SyncEnabledPlugins()
 	for (auto& m : nuke::GetModules())
 		if (m->loaded && m->phase() != nuke::PHASE_BOOT) enabledPlugins.push_back(m->moduleFile);
 	SaveProject();
+}
+
+// ---- New / Open Project (File menu) ----------------------------------------------------
+// The project lifecycle (PHASE_BOOT renderer, plugin set, ResDB) is bound to startup, so
+// switching projects = relaunching the editor on the picked path — the same entry every
+// other route uses (CLI arg, double-click, associations). Raw .nuproj opens as-is; a
+// .nupak mounts read-only with a mod overlay; a .numod extracts for editing (see main.cpp).
+void EditorUI::SwitchToProject(const std::string& path)
+{
+	if (path.empty()) return;
+	if (!EditorRelaunch(path))
+	{
+		std::cout << "[editor]	failed to launch the editor on " << path << std::endl;
+		return;
+	}
+	std::cout << "[editor]	switching to " << path << std::endl;
+	if (AppInstance::GetSingleton()->render)
+		AppInstance::GetSingleton()->render->requestClose();   // this instance hands over
+}
+
+void EditorUI::RequestProjectSwitch(const std::string& path)
+{
+	if (path.empty()) return;
+	if (worldDirty) { pendingSwitchPath = path; openSwitchConfirm = true; }
+	else SwitchToProject(path);
+}
+
+void EditorUI::OpenProjectCmd()
+{
+	std::string picked = EditorPickProjectFile();
+	if (!picked.empty()) RequestProjectSwitch(picked);
+}
+
+// Unsaved-world guard for the switch (mirrors the usual Save/Don't Save/Cancel).
+void EditorUI::DrawSwitchConfirmPopup()
+{
+	if (openSwitchConfirm) { ImGui::OpenPopup("Unsaved changes##switch"); openSwitchConfirm = false; }
+	if (ImGui::BeginPopupModal("Unsaved changes##switch", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+	{
+		ImGui::Text("The open world has unsaved changes.");
+		ImGui::Separator();
+		if (ImGui::Button("Save and switch"))
+		{
+			SaveWorldCmd();
+			std::string p = pendingSwitchPath; pendingSwitchPath.clear();
+			ImGui::CloseCurrentPopup();
+			SwitchToProject(p);
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Switch without saving"))
+		{
+			std::string p = pendingSwitchPath; pendingSwitchPath.clear();
+			ImGui::CloseCurrentPopup();
+			SwitchToProject(p);
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Cancel")) { pendingSwitchPath.clear(); ImGui::CloseCurrentPopup(); }
+		ImGui::EndPopup();
+	}
+}
+
+// "New Project" modal: name + location -> scaffolds <location>/<name>/{game.nuproj,
+// content/} and relaunches the editor on it. The first LoadProject fills in every default
+// (plugins all-on, hotkeys, settings), same as any first run.
+void EditorUI::DrawNewProjectPopup()
+{
+	if (openNewProjectPopup)
+	{
+		ImGui::OpenPopup("New Project");
+		openNewProjectPopup = false;
+	}
+	if (ImGui::BeginPopupModal("New Project", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+	{
+		ImGui::SetNextItemWidth(300);
+		ImGui::InputText("Name", newProjName, sizeof(newProjName));
+		std::string locShown = newProjDir.empty() ? std::string("(pick a folder)") : newProjDir;
+		if (ImGui::Button((locShown + "##nploc").c_str(), ImVec2(300, 0)))
+		{
+			std::string d = EditorPickFolder();
+			if (!d.empty()) newProjDir = d;
+		}
+		ImGui::SameLine(0, 6); ImGui::TextUnformatted("Location");
+
+		// Validate: a clean name + a picked folder; refuse to hijack an existing project.
+		std::string name = newProjName;
+		bool nameOk = !name.empty();
+		for (char c : name) nameOk &= (std::isalnum((unsigned char)c) || c == '_' || c == '-' || c == ' ');
+		boost::system::error_code ec;
+		bfs::path target = newProjDir.empty() ? bfs::path() : bfs::path(newProjDir) / name;
+		bool exists = !target.empty() && bfs::exists(target / "game.nuproj", ec);
+		if (!target.empty() && nameOk) ImGui::TextDisabled("-> %s", target.string().c_str());
+		if (!nameOk)  ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.2f, 1), "Name: letters, digits, space, _ and - only.");
+		if (exists)   ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.2f, 1), "A project already exists there.");
+
+		ImGui::Separator();
+		ImGui::BeginDisabled(!nameOk || newProjDir.empty() || exists);
+		if (ImGui::Button("Create", ImVec2(120, 0)))
+		{
+			bfs::create_directories(target / "content", ec);
+			nlohmann::json j;
+			j["name"] = name;
+			j["engine"] = "NukeEngine";
+			j["content"] = "content";
+			bfs::ofstream f{target / "game.nuproj"};
+			if (f)
+			{
+				f << j.dump(2);
+				f.close();
+				ImGui::CloseCurrentPopup();
+				RequestProjectSwitch((target / "game.nuproj").string());
+			}
+			else std::cout << "[editor]	can't create " << (target / "game.nuproj").string() << std::endl;
+		}
+		ImGui::EndDisabled();
+		ImGui::SameLine();
+		if (ImGui::Button("Cancel", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
+		ImGui::EndPopup();
+	}
 }
 
 // Editor state (NOT world state) -> project/editor_state.json: camera, selection, which

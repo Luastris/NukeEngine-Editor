@@ -54,6 +54,10 @@ using namespace std;    // cout/endl (previously leaked from engine headers)
 // Native OS "open file" dialog for importing models. Defined in main.cpp (isolates <windows.h>).
 // Returns the picked path, or "" if cancelled.
 std::string EditorPickModelFile();
+std::string EditorPickIconFile();   // .ico picker (game icon, Project Settings -> Packaging)
+std::string EditorPickFolder();     // native folder picker (build path, Project Settings -> Packaging)
+std::string EditorPickProjectFile();// .nuproj / .nupak / .numod picker (File -> Open Project)
+bool        EditorRelaunch(const std::string& projectPath);   // spawn a new editor on that project
 
 class TextEditor;   // vendored ImGuiColorTextEdit (src/textedit), compiled into the editor
 
@@ -156,6 +160,52 @@ private:
 	std::map<std::string, int> pendingHotkeyBinds; // hotkey bindings from the .nuproj, applied after plugins load
 	std::string projectDir  = "project";           // project root
 	std::string projectFile = "project/game.nuproj";
+	std::string projectName = "NukeGame";          // .nuproj "name" (dist/pak naming)
+	// Packaging (3.2): compression of the project pak (immutable release artifact; zstd max
+	// by default) and of mod paks (editable; store by default). Persisted in the .nuproj.
+	int pakMethod = 2, pakLevel = 22;              // 0 store / 1 zlib / 2 zstd
+	int modMethod = 0, modLevel = 0;
+	std::string gameIcon;                          // .ico (content-relative) stamped onto the shipped exe
+	std::string distPath;                          // build output ("" = default: <project>/dist; abs or project-relative)
+	uint64_t    iconPrevTex = 0;                   // live preview texture of gameIcon (settings window)
+	std::string iconPrevPath;                      // which path iconPrevTex was decoded from
+	// Decode the best image of an .ico into RGBA8 (PNG-compressed and 32-bpp DIB entries).
+	static bool DecodeIcoRGBA(const std::string& path, std::vector<unsigned char>& rgba, int& w, int& h);
+	// New Project modal state (File -> New Project...). Creation + switch happen on OK:
+	// scaffold <location>/<name>/game.nuproj + content/, relaunch the editor on it.
+	bool openNewProjectPopup = false;
+	char newProjName[128] = "MyGame";
+	std::string newProjDir;
+	void DrawNewProjectPopup();
+	void OpenProjectCmd();                         // File -> Open Project... (raw or packed)
+	void RequestProjectSwitch(const std::string& path);   // confirm unsaved world, then switch
+	void DrawSwitchConfirmPopup();
+	std::string pendingSwitchPath;                 // project awaiting the unsaved-world decision
+	bool openSwitchConfirm = false;
+	void SwitchToProject(const std::string& path); // relaunch this editor on `path` + close
+	// Set when this project was opened FROM an archive (.nupak/.numod): the source pak.
+	// Drives Package Mod (diff vs a .nupak base; in-place repack of a .numod).
+	std::string basePakPath;
+	// Package Mod modal state (File -> Package Mod...). The chosen name persists in the
+	// work manifest ("modName") so repacking updates the SAME mod; a new name = a new file.
+	bool openPackageModPopup = false;
+	char packModName[128] = "";
+	std::string modName;                           // last packaged mod name (from the .nuproj)
+	// Mods panel (Project Settings, mounted-pak session): the game's mod list — enable/
+	// disable + order writes config/mods.json; mounts happen at boot -> apply reloads the
+	// session. Rows come from the config (order = load order) + disabled files in mods/.
+	struct ModRow
+	{
+		std::string file, path, name, req;         // req = display string of `reqs`
+		std::vector<std::string> reqs;             // dependency names from mod.json
+		bool enabled = false, mounted = false, found = true;
+		bool reqOk = true;                         // all requirements enabled+loadable (per frame)
+	};
+	std::vector<ModRow> modsUi;
+	int  modsUiTick = -1;                          // frame-count throttle for rescans
+	void ScanModsUi();                             // rebuild modsUi (config + mods/ dir + manifests)
+	void SaveModsUi();                             // write enabled rows (in order) to config/mods.json
+	std::string GameRootFromBase() const;          // the game dir the session's pak belongs to
 	std::string startupWorld = "scene.nuworld";    // from the .nuproj
 	std::string lastWorld;                         // from editor_state.json: world open when the editor last exited
 	std::vector<std::string> enabledPlugins;       // per-project plugin load list (dll names)
@@ -193,6 +243,22 @@ public:
 	std::string EarlyProjectService(const std::string& service);
 	void SaveProject();
 	void LoadProject();
+	// Packaging (3.2, packaging.cpp): build the full release dist/ (player + deps + used
+	// modules + config + the project as content/game.nupak), or a mod overlay (.numod).
+	// Each mod is its OWN file: the modder picks the name in a modal (DrawPackageModPopup),
+	// the same name repacks/updates that mod, a new name creates a separate .numod.
+	void PackageProject();
+	void PackageMod(const std::string& name = "");   // "" -> last used / project name (dev hook)
+	void PackageModCmd();            // open the "Package Mod" modal (prefills the name)
+	void DrawPackageModPopup();      // the modal itself (drawn each frame)
+	// Open-with support (3.2). A .nupak NEVER extracts (the packed project is read-only —
+	// an unpacked tree would be an unprotected copy anyone could repackage): it is MOUNTED
+	// at runtime, Bethesda-style, and edits land in a "<stem>_mod" OVERLAY dir beside it
+	// that holds ONLY the modder's files. A .numod (editable by design) extracts into
+	// "<stem>_project" for full editing + in-place repack. Both return the work project's
+	// .nuproj ("" on failure) and record the base pak for PackageMod.
+	static std::string PrepareMountedProject(const std::string& pakAbs);   // .nupak
+	static std::string PrepareArchiveProject(const std::string& pakAbs);   // .numod
 	void ApplyProjectPlugins();
 	void SyncEnabledPlugins();
 	void SaveEditorState();

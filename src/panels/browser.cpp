@@ -42,7 +42,7 @@ const char* EditorUI::ExtIcon(const std::string& ext)
 {
 	if (ext == ".numesh") return ICON_LC_BOX;
 	if (ext == ".numat")  return ICON_LC_PALETTE;
-	if (ext == ".nutex" || ext == ".png" || ext == ".jpg" || ext == ".jpeg") return ICON_LC_IMAGE;
+	if (ext == ".nutex" || ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".ico") return ICON_LC_IMAGE;
 	if (ext == ".nuprefab") return ICON_LC_PACKAGE;
 	if (ext == ".nuanim")   return ICON_LC_PLAY;
 	if (ext == ".nubonemap") return ICON_LC_BONE;

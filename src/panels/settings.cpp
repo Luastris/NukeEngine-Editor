@@ -6,6 +6,8 @@
 #include <nlohmann/json.hpp>
 #include <vector>
 #include <sstream>
+#include <utility>   // std::swap (mods list reorder)
+#include <set>       // loadability fixpoint over the enabled mods
 
 // Register the editor's built-in hotkeys in the shared pool. Plugins register their own the same
 // way (nuke::Hotkeys::Get()->Register(...)); conflicts auto-resolve to UNBOUND for manual fixup.
@@ -387,6 +389,300 @@ void EditorUI::winSettings()
 					}
 					catch (...) {}
 			}
+		}
+
+		// --- Packaging (3.2): the project pak is the immutable release artifact (max
+		// compression); mod paks are editable overlays (store by default). File menu:
+		// "Package Project (dist)" / "Package Mod (.numod)".
+		ImGui::SeparatorText("Packaging");
+		{
+			// The shipped exe carries the game's own identity: <name>.exe + this icon +
+			// the window title (all applied by Package Project).
+			char nameBuf[128];
+			strncpy(nameBuf, projectName.c_str(), sizeof(nameBuf) - 1); nameBuf[sizeof(nameBuf) - 1] = 0;
+			if (ImGui::InputText("Game name", nameBuf, sizeof(nameBuf), ImGuiInputTextFlags_EnterReturnsTrue)
+			    || (ImGui::IsItemDeactivatedAfterEdit()))
+			{
+				if (projectName != nameBuf && nameBuf[0]) { projectName = nameBuf; SaveProject(); }
+			}
+			// Game icon: live PREVIEW + content picker + native Browse dialog + drag&drop
+			// from the browser + reset. The value stays content-relative; a file picked
+			// outside the project is COPIED into content (the pak must be self-contained).
+			{
+				nuke::iRender* r = AppInstance::GetSingleton()->render;
+				if (gameIcon != iconPrevPath)   // (re)build the preview texture lazily
+				{
+					if (iconPrevTex && r) { r->destroyTexture2D(iconPrevTex); iconPrevTex = 0; }
+					iconPrevPath = gameIcon;
+					std::vector<unsigned char> rgba; int iw = 0, ih = 0;
+					if (!gameIcon.empty() && r
+					    && DecodeIcoRGBA(AppInstance::GetSingleton()->ResolveContent(gameIcon), rgba, iw, ih)
+					    && iw > 0 && ih > 0)
+						iconPrevTex = r->createTexture2D(rgba.data(), iw, ih);
+				}
+				const float box = 40.0f;
+				if (iconPrevTex) ImGui::Image((ImTextureID)iconPrevTex, ImVec2(box, box));
+				else
+				{
+					ImVec2 p0 = ImGui::GetCursorScreenPos();
+					ImGui::Dummy(ImVec2(box, box));
+					ImGui::GetWindowDrawList()->AddRect(p0, ImVec2(p0.x + box, p0.y + box), IM_COL32(120, 120, 130, 255));
+					ImGui::GetWindowDrawList()->AddText(ImVec2(p0.x + 7, p0.y + box * 0.3f), IM_COL32(120, 120, 130, 255), "ico");
+				}
+				ImGui::SameLine();
+				ImGui::BeginGroup();
+				std::string cur = gameIcon.empty() ? "(none)" : bfs::path(gameIcon).filename().string();
+				if (ImGui::Button((cur + "##gicon").c_str(), ImVec2(220, 0))) ImGui::OpenPopup("##giconpop");
+				// Drag an .ico from the content browser straight onto the button.
+				if (ImGui::BeginDragDropTarget())
+				{
+					if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("NUKE_ASSET"))
+					{
+						std::string path((const char*)p->Data);
+						std::string e = bfs::path(path).extension().string();
+						for (char& c : e) c = (char)tolower((unsigned char)c);
+						if (e == ".ico")
+						{
+							boost::system::error_code ec;
+							std::string rel = bfs::relative(bfs::path(path), bfs::path(contentDir), ec).generic_string();
+							if (!ec && !rel.empty()) { gameIcon = rel; SaveProject(); }
+						}
+					}
+					ImGui::EndDragDropTarget();
+				}
+				if (ImGui::BeginPopup("##giconpop"))   // every .ico in the project content
+				{
+					if (ImGui::Selectable("(none)", gameIcon.empty())) { gameIcon.clear(); SaveProject(); ImGui::CloseCurrentPopup(); }
+					boost::system::error_code ec;
+					bfs::path croot(contentDir);
+					if (bfs::exists(croot, ec))
+						for (bfs::recursive_directory_iterator dit(croot, ec), dend; dit != dend; dit.increment(ec))
+						{
+							if (ec) break;
+							if (bfs::is_directory(dit->path())) continue;
+							std::string e = dit->path().extension().string();
+							for (char& c : e) c = (char)tolower((unsigned char)c);
+							if (e != ".ico") continue;
+							std::string rel = bfs::relative(dit->path(), croot, ec).generic_string();
+							if (ImGui::Selectable((rel + "##gi").c_str(), rel == gameIcon))
+							{ gameIcon = rel; SaveProject(); ImGui::CloseCurrentPopup(); }
+						}
+					ImGui::EndPopup();
+				}
+				ImGui::SameLine(0, 2);
+				if (ImGui::Button(ICON_LC_FOLDER_SEARCH "##gibrowse"))   // native dialog; copies into content
+				{
+					std::string picked = EditorPickIconFile();
+					if (!picked.empty())
+					{
+						boost::system::error_code ec;
+						bfs::path src(picked);
+						bfs::path rel = bfs::relative(src, bfs::path(contentDir), ec);
+						if (ec || rel.empty() || rel.string().compare(0, 2, "..") == 0)
+						{
+							bfs::path dst = bfs::path(contentDir) / src.filename();
+							for (int k = 1; bfs::exists(dst, ec); ++k)
+								dst = bfs::path(contentDir) / (src.stem().string() + "_" + std::to_string(k) + ".ico");
+							bfs::copy_file(src, dst, ec);
+							if (!ec) { gameIcon = bfs::relative(dst, bfs::path(contentDir), ec).generic_string(); SaveProject(); }
+						}
+						else { gameIcon = rel.generic_string(); SaveProject(); }
+					}
+				}
+				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Browse for an .ico (copied into content if outside the project)");
+				ImGui::SameLine(0, 2);
+				if (ImGui::Button(ICON_LC_ROTATE_CCW "##girst")) { gameIcon.clear(); SaveProject(); }
+				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Clear (ship the default player icon)");
+				ImGui::SameLine(0, 6); ImGui::TextUnformatted("Game icon");
+				ImGui::EndGroup();
+			}
+			// Build output folder: default = <project>/dist (project root, beside content
+			// and the manifest). Relative settings resolve against the project.
+			{
+				std::string shown = distPath.empty() ? std::string("dist  (default, in the project root)") : distPath;
+				if (ImGui::Button((shown + "##distp").c_str(), ImVec2(320, 0)))
+				{
+					std::string picked = EditorPickFolder();
+					if (!picked.empty())
+					{
+						boost::system::error_code ec;
+						bfs::path rel = bfs::relative(bfs::path(picked), bfs::path(projectDir), ec);
+						std::string r = ec ? std::string() : rel.generic_string();
+						// Inside the project -> keep it relative (portable .nuproj); outside -> absolute.
+						distPath = (!r.empty() && r != "." && r.compare(0, 2, "..") != 0) ? r : picked;
+						if (r == ".") distPath.clear();   // the project root itself is not a build dir — default
+						SaveProject();
+					}
+				}
+				if (ImGui::IsItemHovered())
+				{
+					std::string eff = distPath.empty() ? (bfs::path(projectDir) / "dist").string()
+					                : (bfs::path(distPath).is_absolute() ? distPath : (bfs::path(projectDir) / distPath).string());
+					ImGui::SetTooltip("Package Project output:\n%s\nClick to pick a folder.", eff.c_str());
+				}
+				ImGui::SameLine(0, 2);
+				if (ImGui::Button(ICON_LC_ROTATE_CCW "##distrst")) { distPath.clear(); SaveProject(); }
+				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Reset to the default (<project>/dist)");
+				ImGui::SameLine(0, 6); ImGui::TextUnformatted("Build path");
+			}
+			const char* methods[] = { "Store (no compression)", "Zlib", "Zstd" };
+			if (ImGui::Combo("Project pak compression", &pakMethod, methods, IM_ARRAYSIZE(methods))) SaveProject();
+			if (pakMethod != 0)
+			{
+				int maxLv = (pakMethod == 2) ? 22 : 9;
+				if (pakLevel > maxLv) pakLevel = maxLv;
+				if (ImGui::SliderInt("Project pak level", &pakLevel, 1, maxLv)) SaveProject();
+			}
+			if (ImGui::Combo("Mod pak compression", &modMethod, methods, IM_ARRAYSIZE(methods))) SaveProject();
+			if (modMethod != 0)
+			{
+				int maxLv = (modMethod == 2) ? 22 : 9;
+				if (modLevel < 1) modLevel = 1;
+				if (modLevel > maxLv) modLevel = maxLv;
+				if (ImGui::SliderInt("Mod pak level", &modLevel, 1, maxLv)) SaveProject();
+			}
+			ImGui::SameLine(); ImGui::TextDisabled("(?)");
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("Project pak: zstd max = smallest release, fast to load.\nMods default to Store so they stay editable/diffable.");
+		}
+
+		// --- Mods (mounted-pak session): what the game — and THIS session — loads. The list
+		// is config/mods.json (checkbox = enabled, row order = load order among mods that
+		// don't depend on each other; dependencies always mount below dependents). Mounts
+		// happen at boot, so changes apply on session reload.
+		if (basePakPath.size() > 6 && basePakPath.compare(basePakPath.size() - 6, 6, ".nupak") == 0)
+		{
+			ImGui::SeparatorText("Mods");
+			// No rescan while an item is active — a drag-reorder must not have the rows
+			// rebuilt under it (SaveModsUi resets the throttle when it actually writes).
+			if (!ImGui::IsAnyItemActive() && (modsUiTick < 0 || ImGui::GetFrameCount() - modsUiTick > 120))
+			{ ScanModsUi(); modsUiTick = ImGui::GetFrameCount(); }
+
+			// Which mods WILL actually load: the loader's fixpoint over the enabled set
+			// (a mod is loadable when every requirement is an enabled loadable mod).
+			auto lowerS = [](std::string s) { for (char& c : s) c = (char)tolower((unsigned char)c); return s; };
+			{
+				std::set<std::string> placed;
+				for (bool progress = true; progress; )
+				{
+					progress = false;
+					for (ModRow& r : modsUi)
+					{
+						if (!r.enabled || !r.found || placed.count(lowerS(r.name))) continue;
+						bool ok = true;
+						for (const std::string& q : r.reqs) ok &= placed.count(lowerS(q)) != 0;
+						if (ok) { placed.insert(lowerS(r.name)); progress = true; }
+					}
+				}
+				for (ModRow& r : modsUi)
+				{
+					r.reqOk = true;
+					for (const std::string& q : r.reqs) r.reqOk &= placed.count(lowerS(q)) != 0;
+				}
+			}
+
+			bool changed = false;         // checkbox / auto-sort -> save right away
+			static bool modsDragDirty = false;   // drag reorder -> save when the mouse releases
+			if (ImGui::BeginTable("modsui", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingStretchProp))
+			{
+				ImGui::TableSetupColumn("On", ImGuiTableColumnFlags_WidthFixed, 24);
+				ImGui::TableSetupColumn("Mod");
+				ImGui::TableSetupColumn("Requires");
+				ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthFixed, 120);
+				ImGui::TableHeadersRow();
+				for (int i = 0; i < (int)modsUi.size(); ++i)
+				{
+					ModRow& r = modsUi[i];
+					ImGui::TableNextRow();
+					// Unsatisfied requirements (or a dead config entry) paint the ROW red.
+					if (!r.reqOk || !r.found)
+						ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, IM_COL32(150, 40, 40, 90));
+					ImGui::PushID(r.file.c_str());   // id follows the mod through reorders
+					ImGui::TableNextColumn();
+					// Enabling is BLOCKED until every requirement is enabled (turn deps on first).
+					const bool blockOn = !r.enabled && (!r.reqOk || !r.found);
+					ImGui::BeginDisabled(blockOn);
+					if (ImGui::Checkbox("##on", &r.enabled)) changed = true;
+					ImGui::EndDisabled();
+					if (blockOn && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+						ImGui::SetTooltip(!r.found ? "File not found." : "Enable its requirements first: %s", r.req.c_str());
+					ImGui::TableNextColumn();
+					// The name cell doubles as a DRAG HANDLE: drag rows to reorder (enabled
+					// block only — disabled mods have no position in the config).
+					ImGui::Selectable((ICON_LC_GRIP_HORIZONTAL "  " + r.name).c_str(), false,
+					                  ImGuiSelectableFlags_AllowOverlap);
+					if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s%s", r.file.c_str(), r.enabled ? "\n(drag to reorder)" : "");
+					if (r.enabled && ImGui::IsItemActive() && !ImGui::IsItemHovered())
+					{
+						// One swap per ROW of mouse travel. The naive "swap when the cursor
+						// leaves the item" fires in the padding gap between rows too and the
+						// dragged mod skips a position — so wait out a row's worth of delta.
+						const float rowH = ImGui::GetItemRectSize().y + ImGui::GetStyle().CellPadding.y * 2.0f;
+						const float dy = ImGui::GetMouseDragDelta(0).y;
+						if (dy <= -rowH * 0.6f || dy >= rowH * 0.6f)
+						{
+							int next = i + (dy < 0.0f ? -1 : 1);
+							if (next >= 0 && next < (int)modsUi.size() && modsUi[next].enabled)
+							{
+								std::swap(modsUi[i], modsUi[next]);
+								modsDragDirty = true;
+								ImGui::ResetMouseDragDelta();
+							}
+						}
+					}
+					ImGui::TableNextColumn();
+					if (r.req.empty()) ImGui::TextDisabled("-");
+					else if (r.reqOk)  ImGui::TextUnformatted(r.req.c_str());
+					else               ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.4f, 1), "%s", r.req.c_str());
+					ImGui::TableNextColumn();
+					if      (!r.found)             ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.3f, 1), "file not found");
+					else if (r.enabled && !r.reqOk) ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.3f, 1), "missing deps");
+					else if (r.mounted)            ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.4f, 1), "loaded");
+					else if (r.enabled)            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1), "reload to load");
+					else                           ImGui::TextDisabled("off");
+					ImGui::PopID();
+				}
+				ImGui::EndTable();
+			}
+			if (modsUi.empty()) ImGui::TextDisabled("No mods in the game's mods/ folder.");
+			// A drag writes the config ONCE, when the mouse releases (mid-drag saves would
+			// rescan and rebuild the rows under the cursor).
+			if (modsDragDirty && !ImGui::IsMouseDown(0)) { SaveModsUi(); modsDragDirty = false; }
+			if (changed) SaveModsUi();
+			ImGui::TextDisabled("Top loads first, later mods override earlier ones; a mod always loads AFTER its requirements.");
+			// Rewrite the config in clean dependency order: the loader's fixpoint, kept
+			// stable (current order preserved among mods that don't depend on each other);
+			// mods with unsatisfied requirements sink to the end (they won't load anyway).
+			if (ImGui::Button("Auto-sort (dependencies)"))
+			{
+				std::vector<ModRow> sorted;
+				std::set<std::string> placed;
+				std::vector<bool> done(modsUi.size(), false);
+				for (bool progress = true; progress; )
+				{
+					progress = false;
+					for (size_t i = 0; i < modsUi.size(); ++i)
+					{
+						if (done[i] || !modsUi[i].enabled || !modsUi[i].found) continue;
+						bool ok = true;
+						for (const std::string& q : modsUi[i].reqs) ok &= placed.count(lowerS(q)) != 0;
+						if (!ok) continue;
+						placed.insert(lowerS(modsUi[i].name));
+						sorted.push_back(modsUi[i]);
+						done[i] = true;
+						progress = true;
+					}
+				}
+				for (size_t i = 0; i < modsUi.size(); ++i) if (!done[i] && modsUi[i].enabled) sorted.push_back(modsUi[i]);   // unsatisfiable last
+				for (size_t i = 0; i < modsUi.size(); ++i) if (!modsUi[i].enabled) sorted.push_back(modsUi[i]);
+				modsUi = std::move(sorted);
+				SaveModsUi();
+			}
+			ImGui::SameLine();
+			if (ImGui::Button("Apply (reload session)")) RequestProjectSwitch(basePakPath);
+			ImGui::SameLine(); ImGui::TextDisabled("(?)");
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("Mods mount when the session opens.\nChanges are saved to config/mods.json immediately —\nthe running game picks them up on its next start too.");
 		}
 
 		ImGui::SeparatorText("Disk sync");

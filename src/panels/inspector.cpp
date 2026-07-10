@@ -1,6 +1,8 @@
 // inspector panel — EditorUI method definitions (translation unit).
 #include <editor/editorui.h>
 #include <API/Model/Camera.h>   // restrict the PostProcess component to camera atoms
+#include <API/Model/Package.h>  // packed session: pickers list pak/mod content too (3.2)
+#include <set>
 #include <API/Model/Texture.h>  // asset inspector: .nutex usage/info
 #include <API/Model/Material.h> // asset inspector: .numat fields
 #include <API/Model/Light.h>       // asset preview world: sun
@@ -136,11 +138,15 @@ bool EditorUI::AssetPicker(const char* label, std::string& guid, const std::stri
 		if (kind == "shader" || kind == "postshader") { Shader* s = db->GetShader(g); return s ? s->name : g; }
 		std::string p = db->PathForGuid(g);
 		if (!p.empty()) return bfs::path(p).stem().string();
-		if (kind == "mesh")     { Mesh* m = db->GetMesh(g);     return m ? std::string(m->name) : g; }
-		if (kind == "material") { Material* m = db->GetMaterial(g); return m ? (m->matName.empty() ? g : m->matName) : g; }
-		if (kind == "anim")     { AnimClip* c = db->GetClip(g); return c ? c->name : g; }
-		if (kind == "bonemap")  { BoneMap* b = db->GetBoneMap(g); return b ? b->name : g; }
-		return g;   // texture
+		// No file path (built-ins, pak-loaded assets): the internal name, never an empty
+		// label (an empty Selectable renders an invisible row) — the guid as last resort.
+		std::string n;
+		if      (kind == "mesh")     { Mesh* m = db->GetMesh(g);         if (m) n = m->name; }
+		else if (kind == "material") { Material* m = db->GetMaterial(g); if (m) n = m->matName; }
+		else if (kind == "anim")     { AnimClip* c = db->GetClip(g);     if (c) n = c->name; }
+		else if (kind == "bonemap")  { BoneMap* b = db->GetBoneMap(g);   if (b) n = b->name; }
+		else if (kind == "texture")  { Texture* t = db->GetTexture(g);   if (t) n = t->name; }
+		return n.empty() ? g : n;
 	};
 
 	ImGui::PushID(label);
@@ -204,6 +210,11 @@ bool EditorUI::AssetPicker(const char* label, std::string& guid, const std::stri
 		else if (kind == "bonemap")  for (BoneMap* b : db->boneMaps) { if (b) item(b->guid, disp(b->guid)); }
 		else if (kind == "script" || kind == "audio")   // scan the project content (value = content-relative path)
 		{
+			auto matches = [&](std::string e) {
+				for (char& c : e) c = (char)tolower((unsigned char)c);
+				return kind == "script" ? (e == ".lua") : IsAudioExt(e);
+			};
+			std::set<std::string> seen;   // lowercase rel — the disk copy wins over pak layers
 			boost::system::error_code ec;
 			bfs::path croot(contentDir);
 			if (bfs::exists(croot, ec))
@@ -211,10 +222,21 @@ bool EditorUI::AssetPicker(const char* label, std::string& guid, const std::stri
 				{
 					if (ec) break;
 					if (bfs::is_directory(it->path())) continue;
-					std::string e = it->path().extension().string();
-					for (char& c : e) c = (char)tolower((unsigned char)c);
-					if (kind == "script" ? (e != ".lua") : !IsAudioExt(e)) continue;
+					if (!matches(it->path().extension().string())) continue;
 					std::string rel = bfs::relative(it->path(), croot, ec).generic_string();
+					std::string low = rel; for (char& c : low) c = (char)tolower((unsigned char)c);
+					seen.insert(low);
+					item(rel, bfs::path(rel).stem().string());
+				}
+			// Packed session (3.2): plain content files live in the mounted pak/mods, not on
+			// disk — list them through the Package layers too (dedup vs the overlay scan).
+			if (nuke::Package::MountedCount() > 0)
+				for (const std::string& pr : nuke::Package::List("content/"))
+				{
+					if (!matches(bfs::path(pr).extension().string())) continue;
+					std::string rel = pr.substr(strlen("content/"));
+					std::string low = rel; for (char& c : low) c = (char)tolower((unsigned char)c);
+					if (!seen.insert(low).second) continue;
 					item(rel, bfs::path(rel).stem().string());
 				}
 		}
