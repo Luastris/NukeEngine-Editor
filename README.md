@@ -1,18 +1,48 @@
-# NukeEngine - Editor
+# NukeEngine — Editor
 
-This is an editor for NukeEngine. We are using ImGui, opengl, boost and some other. Lua for lua integration and configs. Below you can see screeshot of it.
+The editor host of [NukeEngine](https://github.com/Luastris/NukeEngine-Eco) by
+[Luastris](https://luastris.com) (`NukeEngine-Editor.exe`, ImGui 1.92 via the shared
+[NukeImGui](https://github.com/Luastris/NukeImGui) DLL — which never ships with a game).
 
 ![NukeEditor](screenshots/nukeeditor.png)
 
-# Get it
+## What it does
 
-Just clone this repo near the NukeEngine repo, and do instructions, provided in [this](https://github.com/ExQDev/TestNUKEModule/blob/master/README.md) file to set up dependencies.
+- Dockable ImGui workspace with interface icons, persistent editor state, PIE
+  (play-in-editor, WYSIWYG), gizmos + debug drawing, clickable entity icons.
+- **Browser** (tiles/list/tree): create/rename/DnD/open, forward-back navigation (M4/M5),
+  packed sessions list pak/mod content too. **Hierarchy** with DnD; drop an atom onto the
+  browser to save a prefab; prefab ↔ instance sync both ways.
+- Reflection-driven **inspector** (typed pickers everywhere — no raw text fields for
+  enumerable values), per-file-type editors (text with syntax highlighting, material,
+  mesh/prefab 3D preview, audio player) in native OS windows.
+- Undo/redo history, cascade deletion with link clearing, external-change detection with
+  hierarchical merge resolving.
+- **Console** (severity filters, text filter, copy, double-click any `path(line)`
+  reference — compiler errors included — to jump into your IDE at the exact line),
+  status bar with a module-facing API, Preferences with external IDE detection
+  (VS / Rider / VSCode / Notepad++; files open in the RUNNING instance).
+- **Project Settings:** plugins, default world, rebindable hotkey map, packaging options,
+  the Mods panel (game list vs editor-session list).
+- **Packaging:** File → Package Project builds Release through the superbuild first, then
+  produces the complete game `dist/`; File → Package Mod authors `.numod` point-diff
+  overlays. File → Build Engine runs the whole superbuild with Console output and status
+  bar progress.
 
-# Building
+## Building
 
-Use Qt Creator to build it.
-If after start it crashes with error about assertion in font loader or configs, please copy `config` and `fonts` directory to build directory, where executable is located.
+Preferred: the superbuild at the ecosystem root
+([NukeEngine-Eco](https://github.com/Luastris/NukeEngine-Eco)) — one command builds the
+engine, this editor and every present module.
 
-# Develop
+Standalone: the editor builds from `NukeEngine/NukeEngine.sln` (VS2022, v143, x64, C++20)
+next to the [NukeEngine](https://github.com/Luastris/NukeEngine) checkout; it links
+`NukeImGui.lib`, so build [NukeImGui](https://github.com/Luastris/NukeImGui) first.
+`VCPKG_ROOT` must be set. Run dir = `NukeEngine/x64/<Config>` (the post-build deploys
+`dist/` config/fonts and the vcpkg runtime DLLs there).
 
-You can expand it functionality, contributing it, or, by developing extentions. For more information about extentions, look [HERE](https://github.com/ExQDev/TestNUKEModule).
+## Extending
+
+The editor loads the same modules the engine does — write a plugin once and it works in
+both the editor and shipped games. Start from the pristine, fully commented sample:
+[TestNUKEModule](https://github.com/Luastris/TestNUKEModule).
