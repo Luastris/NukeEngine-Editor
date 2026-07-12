@@ -1,0 +1,6 @@
+// Minimal resource script (regenerated — original was never committed to git).
+// Defines the application icon. resource.h declares MAINICON.
+#include "resource.h"
+#include <windows.h>
+
+MAINICON ICON "res\\logo.ico"

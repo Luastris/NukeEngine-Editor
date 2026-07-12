@@ -73,3 +73,8 @@ Debug/
 x64/
 Release/
 .vs/
+
+# NUKE fixes (2026-07-11): the qt-era blob above OVER-ignores real source - negate.
+# Resource.rc is the editor's icon/resource script; .filters shape the VS tree.
+!Resource.rc
+!*.vcxproj.filters
