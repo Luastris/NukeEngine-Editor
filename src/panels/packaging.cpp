@@ -404,7 +404,128 @@ bool EditorUI::DecodeIcoRGBA(const std::string& path, std::vector<unsigned char>
 	return true;
 }
 
+// ---- editor-driven builds (build unification) --------------------------------------------
+// One command, the whole tree: the root superbuild (CMakeLists.txt at the repo root)
+// drives NukeEngine.sln + every present module in dependency order, msbuild /m in
+// parallel. Runs on a Jobs WORKER; output streams into the Console; the status bar shows
+// live progress. The config this editor is RUNNING can't be rebuilt (locked binaries).
+void EditorUI::RunEngineBuild(const std::string& config, std::function<void(bool)> onDone)
+{
+#ifdef _DEBUG
+	const char* running = "Debug";
+#else
+	const char* running = "Release";
+#endif
+	if (config == running)
+	{
+		std::cout << "[build]\t\tskipped: the editor is running the " << config
+		          << " binaries — build them from another config or the command line" << std::endl;
+		nuke::Jobs::RunOnMain([onDone]() { if (onDone) onDone(true); });   // not a failure: proceed
+		return;
+	}
+	// Repo root from the running exe: <root>/NukeEngine/x64/<cfg>/NukeEngine-Editor.exe.
+	boost::system::error_code ec;
+	bfs::path root = bfs::absolute(bfs::current_path(ec)).parent_path().parent_path().parent_path();
+	if (!bfs::exists(root / "CMakeLists.txt", ec))
+	{
+		std::cout << "[build]\t\tno root superbuild found at " << root.string()
+		          << " — building nothing (see CMakeLists.txt at the repo root)" << std::endl;
+		nuke::Jobs::RunOnMain([onDone]() { if (onDone) onDone(false); });
+		return;
+	}
+	StatusBar::Set("build", "Build " + config + ": starting...", StatusBar::kIndeterminate);
+	nuke::Jobs::Schedule([this, root, config, onDone]()
+	{
+		auto runPiped = [&](const std::string& cmdLine, int& outProjects) -> bool
+		{
+			SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
+			HANDLE rd = NULL, wr = NULL;
+			CreatePipe(&rd, &wr, &sa, 0);
+			SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
+			STARTUPINFOA si = {}; si.cb = sizeof(si);
+			si.dwFlags = STARTF_USESTDHANDLES;
+			si.hStdOutput = wr; si.hStdError = wr;
+			PROCESS_INFORMATION pi = {};
+			std::string mcmd = cmdLine;
+			if (!CreateProcessA(NULL, &mcmd[0], NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi))
+			{
+				CloseHandle(rd); CloseHandle(wr);
+				std::cout << "[build]\t\tcan't start: " << cmdLine << std::endl;
+				return false;
+			}
+			CloseHandle(wr);
+			// Stream line by line: every line lands in the Console; project completions
+			// ("X.vcxproj ->" / "-> dll") tick the status bar.
+			std::string carry;
+			char buf[4096];
+			DWORD got = 0;
+			while (ReadFile(rd, buf, sizeof(buf), &got, NULL) && got > 0)
+			{
+				carry.append(buf, got);
+				size_t nl;
+				while ((nl = carry.find('\n')) != std::string::npos)
+				{
+					std::string line = carry.substr(0, nl);
+					carry.erase(0, nl + 1);
+					if (!line.empty() && line.back() == '\r') line.pop_back();
+					if (line.empty()) continue;
+					std::cout << "[build]\t" << line << std::endl;
+					if (line.find(".vcxproj ->") != std::string::npos || line.find(" -> ") != std::string::npos)
+					{
+						++outProjects;
+						StatusBar::Set("build", "Build: " + std::to_string(outProjects) + " project(s) done",
+						               StatusBar::kIndeterminate);
+					}
+				}
+			}
+			CloseHandle(rd);
+			WaitForSingleObject(pi.hProcess, INFINITE);
+			DWORD code = 1;
+			GetExitCodeProcess(pi.hProcess, &code);
+			CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+			return code == 0;
+		};
+
+		int projects = 0;
+		bool ok = true;
+		boost::system::error_code ec2;
+		if (!bfs::exists(root / "build" / "CMakeCache.txt", ec2))
+		{
+			std::cout << "[build]\t\tconfiguring the superbuild (first run)..." << std::endl;
+			StatusBar::Set("build", "Build: configuring...", StatusBar::kIndeterminate);
+			ok = runPiped("cmake -S \"" + root.string() + "\" -B \"" + (root / "build").string()
+			              + "\" -G \"Visual Studio 17 2022\" -A x64", projects);
+		}
+		if (ok)
+			ok = runPiped("cmake --build \"" + (root / "build").string() + "\" --config " + config
+			              + " -- /m /v:m /nologo", projects);
+		const bool result = ok;
+		nuke::Jobs::RunOnMain([this, result, config, onDone]()
+		{
+			StatusBar::Remove("build");
+			std::cout << "[build]\t\t" << config << (result ? " build OK" : " build FAILED — see the lines above") << std::endl;
+			if (onDone) onDone(result);
+		});
+	});
+}
+
 void EditorUI::PackageProject()
+{
+	// Stale binaries must never ship: rebuild Release FIRST (the superbuild is incremental
+	// — a fresh tree is a no-op pass), then package. This closes the classic trap where a
+	// repackaged dist silently carried yesterday's modules.
+	RunEngineBuild("Release", [this](bool ok)
+	{
+		if (!ok)
+		{
+			std::cout << "[Package]\taborted: the Release build failed — fix it and package again" << std::endl;
+			return;
+		}
+		PackageProjectNow();
+	});
+}
+
+void EditorUI::PackageProjectNow()
 {
 	// Archive-derived sessions (opened from a .nupak game or a .numod) are NOT the authoring
 	// project — packaging one would produce a full second game from someone's shipped content.

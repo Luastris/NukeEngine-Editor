@@ -272,7 +272,14 @@ public:
 	// modules + config + the project as content/game.nupak), or a mod overlay (.numod).
 	// Each mod is its OWN file: the modder picks the name in a modal (DrawPackageModPopup),
 	// the same name repacks/updates that mod, a new name creates a separate .numod.
-	void PackageProject();
+	void PackageProject();           // Release build first (stale binaries never ship), then dist
+	void PackageProjectNow();        // the packaging body itself (no build step)
+	// Editor-driven builds (the unified root superbuild): `cmake --build <repo>/build
+	// --config <cfg>` on a Jobs WORKER — output streams into the Console line by line,
+	// progress ticks the status bar, msbuild /m parallelizes independent projects.
+	// Skipped with a note when the asked config is the one this editor is RUNNING
+	// (its binaries are locked). onDone fires on the game thread.
+	void RunEngineBuild(const std::string& config, std::function<void(bool)> onDone);
 	void PackageMod(const std::string& name = "");   // "" -> last used / project name (dev hook)
 	void PackageModCmd();            // open the "Package Mod" modal (prefills the name)
 	void DrawPackageModPopup();      // the modal itself (drawn each frame)

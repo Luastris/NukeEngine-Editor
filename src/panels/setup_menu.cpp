@@ -263,6 +263,11 @@ void EditorUI::EditorMenu()
 			}
 			else if (ImGui::MenuItem(ICON_LC_PUZZLE " Package Mod (.numod)..."))   PackageModCmd();
 			ImGui::Separator();
+			// Editor-driven builds (root superbuild): output -> Console, progress -> status
+			// bar, worker thread. The config the editor RUNS is locked (skipped with a note).
+			if (ImGui::MenuItem(ICON_LC_HAMMER " Build Engine (Release)")) RunEngineBuild("Release", nullptr);
+			if (ImGui::MenuItem(ICON_LC_HAMMER " Build Engine (Debug)"))   RunEngineBuild("Debug", nullptr);
+			ImGui::Separator();
 			if (ImGui::MenuItem("Quit", "Alt+F4")) {}
 			ImGui::EndMenu();
 		}
