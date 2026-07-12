@@ -111,7 +111,9 @@ void EditorUI::PluginMGRWindow()
 			{
 				ImGui::Text("Provides: %s", selectedPlugin->provides());
 				ImGui::SameLine();
-				ImGui::TextDisabled("(one active provider per service)");
+				ImGui::TextDisabled(selectedPlugin->sharedService()
+				                    ? "(shared service — providers load side by side)"
+				                    : "(one active provider per service)");
 			}
 			if (!selectedPlugin->tags.empty())
 			{

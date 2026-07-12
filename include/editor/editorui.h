@@ -26,6 +26,8 @@
 #include "API/Model/Prefab.h"   // instantiate .nuprefab assets
 #include "reflect/Reflect.h"   // auto-inspector: draw component fields from the schema
 #include "API/Model/Time.h"    // per-frame delta/elapsed
+#include "API/Model/Log.h"     // console panel: the engine log ring
+#include "editor/exteditor.h"  // external editor detection/launch (Preferences)
 #include "input/Hotkeys.h"     // centralized hotkey pool (editor + plugins)
 #include <boost/container/list.hpp>
 #include <boost/bind/bind.hpp>
@@ -57,6 +59,7 @@ std::string EditorPickModelFile();
 std::string EditorPickIconFile();   // .ico picker (game icon, Project Settings -> Packaging)
 std::string EditorPickFolder();     // native folder picker (build path, Project Settings -> Packaging)
 std::string EditorPickProjectFile();// .nuproj / .nupak / .numod picker (File -> Open Project)
+std::string EditorPickExeFile();    // .exe picker (Preferences -> custom external editor)
 bool        EditorRelaunch(const std::string& projectPath);   // spawn a new editor on that project
 
 class TextEditor;   // vendored ImGuiColorTextEdit (src/textedit), compiled into the editor
@@ -200,12 +203,34 @@ private:
 		std::vector<std::string> reqs;             // dependency names from mod.json
 		bool enabled = false, mounted = false, found = true;
 		bool reqOk = true;                         // all requirements enabled+loadable (per frame)
+		bool edMounted = false;                    // mounted in THIS editor session (separate list)
 	};
 	std::vector<ModRow> modsUi;
 	int  modsUiTick = -1;                          // frame-count throttle for rescans
 	void ScanModsUi();                             // rebuild modsUi (config + mods/ dir + manifests)
 	void SaveModsUi();                             // write enabled rows (in order) to config/mods.json
+	// The EDITOR's own mod selection (config/mods.json is the PLAYER's list): persisted as
+	// editor_mods.json in the session overlay; saving REMOUNTS the stack live (base + the
+	// selection) — reopen the world to see the merge.
+	void SaveEditorMods();
 	std::string GameRootFromBase() const;          // the game dir the session's pak belongs to
+	// Console (viewer over the engine's Log ring — cout/cerr are captured into it).
+	uint64_t conVersion = ~0ull;                   // last seen Log::Version (cheap change check)
+	std::vector<nuke::LogEntry> conCache;          // snapshot, refreshed when the version moves
+	bool conShow[3] = { true, true, true };        // info / warn / error visibility
+	char conFilter[128] = "";                      // substring filter (tag + text)
+	bool conAutoScroll = true;
+	void OpenLogSource(const nuke::LogEntry& e);   // double-click: resolve + jump to file:line
+	// Preferences (MACHINE-wide, %APPDATA%/NukeEngine/preferences.json — not per-project).
+	bool prefsOpen = false, prefsFocus = false;
+	std::vector<ExtEditor> extEditors;             // detected external editors + "Custom"
+	std::string extEditorName;                     // the chosen one (persisted by name; "" = built-in)
+	std::string extCustomExe, extCustomArgs;       // the "Custom" entry ({file}/{line} template)
+	void LoadPreferences();
+	void SavePreferences();
+	void winPreferences();
+	// Open file:line in the user's chosen editor (falls back to the built-in text editor).
+	void OpenExternal(const std::string& file, int line);
 	std::string startupWorld = "scene.nuworld";    // from the .nuproj
 	std::string lastWorld;                         // from editor_state.json: world open when the editor last exited
 	std::vector<std::string> enabledPlugins;       // per-project plugin load list (dll names)
@@ -349,7 +374,7 @@ public:
 	bool textEditorOpen  = false;               // window visibility (opened on demand)
 	int  textCloseConfirm = -1;                 // doc index awaiting the discard-changes modal
 	bool IsTextFile(const std::string& ext);    // descriptor textEditable OR a known text extension
-	void OpenTextFile(const std::string& path); // open (or focus) a file in the text editor
+	void OpenTextFile(const std::string& path, int line = 0); // open (or focus) a file; line > 0 jumps there
 	void SaveTextDoc(TextDoc& d);
 	void winTextEditor();
 

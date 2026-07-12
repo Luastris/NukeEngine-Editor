@@ -2,6 +2,8 @@
 #include <editor/editorui.h>
 #include <API/Model/Camera.h>   // restrict the PostProcess component to camera atoms
 #include <API/Model/Package.h>  // packed session: pickers list pak/mod content too (3.2)
+#include <interface/Services.h> // csclass picker: enumerate scripting providers
+#include <service/iScript.h>    // csclass picker: the C# backend lists its Electron classes
 #include <set>
 #include <API/Model/Texture.h>  // asset inspector: .nutex usage/info
 #include <API/Model/Material.h> // asset inspector: .numat fields
@@ -208,6 +210,31 @@ bool EditorUI::AssetPicker(const char* label, std::string& guid, const std::stri
 		else if (kind == "texture")  for (Texture* t : db->textures) { if (t) item(t->guid, disp(t->guid)); }
 		else if (kind == "anim")     for (AnimClip* c : db->clips)   { if (c) item(c->guid, disp(c->guid)); }
 		else if (kind == "bonemap")  for (BoneMap* b : db->boneMaps) { if (b) item(b->guid, disp(b->guid)); }
+		else if (kind == "csclass")
+		{
+			// C# script classes: the LOADED game assembly's Electron classes, straight from
+			// the scripting seam (the C# backend enumerates them) — nobody types names.
+			bool any = false;
+			for (nuke::iScript* sv : nuke::GetServices<nuke::iScript>())
+			{
+				if (!sv || std::string(sv->Language()) != "cs") continue;
+				int need = sv->ListClasses(nullptr, 0);
+				if (need <= 0) break;
+				std::string names(need, '\0');
+				sv->ListClasses(&names[0], need);
+				size_t start = 0;
+				while (start < names.size())
+				{
+					size_t nl = names.find('\n', start);
+					if (nl == std::string::npos) nl = names.size();
+					std::string cls = names.substr(start, nl - start);
+					if (!cls.empty()) { item(cls, cls); any = true; }
+					start = nl + 1;
+				}
+				break;
+			}
+			if (!any) ImGui::TextDisabled("no C# classes loaded\n(add a .cs deriving from Electron;\nif the project HAS scripts, check the\nConsole for 'C# build FAILED')");
+		}
 		else if (kind == "script" || kind == "audio")   // scan the project content (value = content-relative path)
 		{
 			auto matches = [&](std::string e) {
@@ -802,8 +829,11 @@ void EditorUI::winInspector()
 				bool& st = OpenState(atomName + "/" + label);
 				ImGui::SetNextItemOpen(st);
 				std::string hdr = uc ? (label + "  (plugin not loaded)") : label;
+				if (!cmp->modOrigin.empty()) hdr += "  [" + cmp->modOrigin + "]";   // mod provenance badge
 				ImGui::SetNextItemAllowOverlap();   // let the X button (drawn over the header) take its own clicks
 				st = ImGui::CollapsingHeader(hdr.c_str());
+				if (!cmp->modOrigin.empty() && ImGui::IsItemHovered())
+					ImGui::SetTooltip("Added by mod: %s", cmp->modOrigin.c_str());
 				ImGui::SameLine(ImGui::GetContentRegionMax().x - 22);   // remove (undoable)
 				if (ImGui::SmallButton(ICON_LC_X "##delcomp")) { pendingCompAtom = sltd; pendingCompDel = cmp; }
 				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remove component");
@@ -912,7 +942,7 @@ void EditorUI::DrawAssetInspector(const std::string& path)
 	if (IsTextFile(ext))
 	{
 		ImGui::SameLine(ImGui::GetContentRegionAvail().x - 60.0f);
-		if (ImGui::SmallButton(ICON_LC_FILE_PEN " Edit")) OpenTextFile(path);
+		if (ImGui::SmallButton(ICON_LC_FILE_PEN " Edit")) OpenExternal(path, 0);
 	}
 	else if (ext == ".numat" || ext == ".numesh" || ext == ".nuprefab")
 	{
@@ -944,8 +974,8 @@ void EditorUI::DrawAssetInspector(const std::string& path)
 		{
 			int before = inspTex->usage;
 			auto setUsage = [this, path](int val) {
-				if (inspAssetPath == path && inspTex) { inspTex->usage = val; inspTex->SaveToFile(path); }
-				else if (nuke::Texture* t = nuke::Texture::LoadFromFile(path)) { t->usage = val; t->SaveToFile(path); delete t; }
+				if (inspAssetPath == path && inspTex) { inspTex->usage = (nuke::Texture::Usage)val; inspTex->SaveToFile(path); }
+				else if (nuke::Texture* t = nuke::Texture::LoadFromFile(path)) { t->usage = (nuke::Texture::Usage)val; t->SaveToFile(path); delete t; }
 			};
 			setUsage(u);
 			PushUndo("Texture type", [setUsage, before]{ setUsage(before); }, [setUsage, u]{ setUsage(u); }, false);   // asset edit, not the world

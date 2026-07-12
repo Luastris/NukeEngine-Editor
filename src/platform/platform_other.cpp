@@ -43,4 +43,29 @@ bool RegisterProjectFileAssociation()
 	return false;
 }
 
+std::string EditorPickExeFile()
+{
+	// TODO(linux/mac): native file picker (see EditorPickModelFile).
+	return std::string();
+}
+
+#include <editor/exteditor.h>
+std::vector<ExtEditor> EditorDetectExternalEditors()
+{
+	// TODO(linux/mac): scan PATH + standard spots (code, rider, subl, ...).
+	return {};
+}
+
+bool EditorLaunchDetached(const std::string&, const std::string&)
+{
+	// TODO(linux/mac): posix_spawn / fork+exec.
+	return false;
+}
+
+bool EditorProcessRunning(const std::string&)
+{
+	// TODO(linux/mac): scan /proc (or pgrep). No detection = always "first launch" args.
+	return false;
+}
+
 #endif // !_WIN32

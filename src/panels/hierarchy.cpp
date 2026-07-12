@@ -94,7 +94,12 @@ void EditorUI::DrawAtomNode(Atom* go)
 	if (go->children.empty())            fl |= ImGuiTreeNodeFlags_Leaf;
 	if (searching)                       ImGui::SetNextItemOpen(true);   // reveal matches
 
-	bool open = ImGui::TreeNodeEx((std::string(AtomIcon(go)) + " " + go->GetName()).c_str(), fl);
+	// Non-native atoms carry their MOD's badge (world-merge provenance).
+	std::string rowLabel = std::string(AtomIcon(go)) + " " + go->GetName();
+	if (!go->modOrigin.empty()) rowLabel += "  [" + go->modOrigin + "]";
+	bool open = ImGui::TreeNodeEx(rowLabel.c_str(), fl);
+	if (!go->modOrigin.empty() && ImGui::IsItemHovered())
+		ImGui::SetTooltip("Added by mod: %s", go->modOrigin.c_str());
 	if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) app->selectedInHieararchy = go;
 	if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) { app->selectedInHieararchy = go; FocusSelected(); }
 

@@ -3,6 +3,7 @@
 #include "API/Model/Material.h"   // regen GUIDs of copied assets
 #include "API/Model/Mesh.h"
 #include "API/Model/Texture.h"
+#include "API/Model/Package.h"    // pak sessions: the mounted stack's content is browsable
 #include <nlohmann/json.hpp>      // dependency scan + unlink (rewrite reference fields)
 #include "interface/AssetCreators.h"   // plugin-registered "New ..." commands
 #include "API/Model/Prefab.h"          // SaveAtomToString (undo snapshots for drop-on-atom)
@@ -10,6 +11,7 @@
 #include <boost/filesystem/fstream.hpp>
 #include <algorithm>
 #include <iterator>
+#include <set>
 
 // Rename/move a file or folder on disk + keep ResDB's guid<->path in sync; a renamed .numat also
 // gets its internal name re-synced. One canonical operation so undo can replay it in either direction.
@@ -48,7 +50,7 @@ const char* EditorUI::ExtIcon(const std::string& ext)
 	if (ext == ".nubonemap") return ICON_LC_BONE;
 	if (ext == ".nuworld")  return ICON_LC_GLOBE;
 	if (ext == ".ogg" || ext == ".wav" || ext == ".mp3" || ext == ".flac") return ICON_LC_MUSIC;
-	if (ext == ".lua")      return ICON_LC_FILE_CODE;
+	if (ext == ".lua" || ext == ".cs") return ICON_LC_FILE_CODE;
 	if (ext == ".hlsl" || ext == ".nushader") return ICON_LC_FILE_CODE;
 	return ICON_LC_FILE;
 }
@@ -73,9 +75,12 @@ bool EditorUI::SearchMatch(const std::string& name)
 void EditorUI::BrowserTree(const std::string& dir)
 {
 	boost::system::error_code ec;
+	std::set<std::string> shown;   // lowercase names at this level (disk wins over pak)
+	auto lowName = [](std::string s) { for (char& c : s) c = (char)tolower((unsigned char)c); return s; };
 	for (auto& de : bfs::directory_iterator(bfs::path(dir), ec))
 	{
 		std::string name = de.path().filename().string();
+		shown.insert(lowName(name));
 		if (bfs::is_directory(de.path()))
 		{
 			if (ImGui::TreeNode((std::string(ICON_LC_FOLDER) + " " + name).c_str()))
@@ -90,6 +95,37 @@ void EditorUI::BrowserTree(const std::string& dir)
 			for (char& c : ext) c = (char)tolower((unsigned char)c);
 			if (ExtVisible(ext) && SearchMatch(name))
 				ImGui::BulletText("%s %s", ExtIcon(ext), name.c_str());
+		}
+	}
+	// Mounted stack (pak/mod session): this level's PACKED children too (read-only).
+	if (nuke::Package::MountedCount() > 0)
+	{
+		std::string relDir = "content";
+		bfs::path r2 = bfs::path(dir).lexically_relative(bfs::path(contentDir));
+		std::string rs = r2.generic_string();
+		if (!rs.empty() && rs != "." && rs.compare(0, 2, "..") != 0) relDir += "/" + rs;
+		const std::string pfx = relDir + "/";
+		std::set<std::string> pakDirs;
+		for (const std::string& r : nuke::Package::List(pfx))
+		{
+			if (r.size() <= pfx.size()) continue;
+			std::string tail = r.substr(pfx.size());
+			size_t sl = tail.find('/');
+			if (sl != std::string::npos) { pakDirs.insert(tail.substr(0, sl)); continue; }
+			if (shown.count(lowName(tail))) continue;
+			std::string ext = bfs::path(tail).extension().string();
+			for (char& c : ext) c = (char)tolower((unsigned char)c);
+			if (ExtVisible(ext) && SearchMatch(tail))
+				ImGui::BulletText("%s %s (pak)", ExtIcon(ext), tail.c_str());
+		}
+		for (const std::string& d : pakDirs)
+		{
+			if (shown.count(lowName(d))) continue;
+			if (ImGui::TreeNode((std::string(ICON_LC_FOLDER) + " " + d + " (pak)").c_str()))
+			{
+				BrowserTree((bfs::path(dir) / d).string());   // virtual: no disk dir needed
+				ImGui::TreePop();
+			}
 		}
 	}
 }
@@ -111,6 +147,22 @@ Atom* EditorUI::InstantiatePrefab(const std::string& path)
 
 // Begin renaming a browser entry: edit only the NAME — the extension is locked (changing it would
 // make the engine unable to load the asset). Folders have no extension, so the whole name is edited.
+// Creator templates carry a %CLASSNAME% token that follows the FILE name (a C# class must
+// match how CSharpScript instantiates it). Sanitized to an identifier.
+static std::string sFreshTemplatePath;      // the file JUST created from a template
+static std::string sFreshTemplateContent;   // its raw template (token not substituted)
+static std::string InstantiateCreatorTemplate(const std::string& content, const std::string& stem)
+{
+	std::string cls;
+	for (char c : stem) if (isalnum((unsigned char)c) || c == '_') cls += c;
+	if (cls.empty() || isdigit((unsigned char)cls[0])) cls = "_" + cls;
+	std::string out = content;
+	const char* tok = "%CLASSNAME%";
+	for (size_t pos = 0; (pos = out.find(tok, pos)) != std::string::npos; pos += cls.size())
+		out.replace(pos, strlen(tok), cls);
+	return out;
+}
+
 void EditorUI::StartRename(const std::string& path)
 {
 	renamePath = path;
@@ -155,7 +207,7 @@ void EditorUI::EntryContextMenu(const std::string& path, bool isDir)
 			}
 			else if (IsTextFile(cext))
 			{
-				if (ImGui::MenuItem(ICON_LC_FILE_PEN " Edit")) OpenTextFile(path);
+				if (ImGui::MenuItem(ICON_LC_FILE_PEN " Edit")) OpenExternal(path, 0);
 				ImGui::Separator();
 			}
 		}
@@ -200,6 +252,54 @@ void EditorUI::DrawRenamePopup()
 				DoFileMove(src.string(), dst.string());          // rename + ResDB sync + .numat name
 				RecordFileMove(src.string(), dst.string());      // undoable
 				if (browserSel == src.string()) browserSel = dst.string();
+				// Renaming a .cs keeps its CLASS DECLARATION in sync with the file name —
+				// CSharpScript binds classes BY NAME, a silent mismatch reads as "class not
+				// found". Replaces exactly `class <oldStem>` (identifier-bounded), so the
+				// rest of the user's code is untouched. Covers both the just-created
+				// template AND later renames.
+				{
+					std::string cext = dst.extension().string();
+					for (char& c : cext) c = (char)tolower((unsigned char)c);
+					if (cext == ".cs")
+					{
+						std::string txt;
+						{
+							bfs::ifstream in(dst, std::ios::binary);
+							if (in) txt.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+						}
+						const std::string oldStem = src.stem().string();
+						std::string newStem;
+						for (char c : dst.stem().string())
+							if (isalnum((unsigned char)c) || c == '_') newStem += c;
+						if (newStem.empty() || isdigit((unsigned char)newStem[0])) newStem = "_" + newStem;
+						auto ident = [](char c) { return isalnum((unsigned char)c) || c == '_'; };
+						const std::string key = "class " + oldStem;
+						bool changed = false;
+						for (size_t pos = 0; (pos = txt.find(key, pos)) != std::string::npos; )
+						{
+							const size_t after = pos + key.size();
+							const bool boundBefore = pos == 0 || !ident(txt[pos - 1]);
+							const bool boundAfter  = after >= txt.size() || !ident(txt[after]);
+							if (boundBefore && boundAfter)
+							{
+								txt.replace(pos + 6, oldStem.size(), newStem);
+								changed = true;
+								pos += 6 + newStem.size();
+							}
+							else pos += key.size();
+						}
+						if (changed)
+						{
+							bfs::ofstream wf(dst, std::ios::binary | std::ios::trunc);
+							if (wf)
+							{
+								wf << txt;
+								std::cout << "[editor]\t.cs class '" << oldStem << "' -> '" << newStem << "'" << std::endl;
+							}
+						}
+					}
+				}
+				if (src.string() == sFreshTemplatePath) sFreshTemplatePath = dst.string();
 			}
 			ImGui::CloseCurrentPopup();
 		}
@@ -790,7 +890,13 @@ void EditorUI::winBrowser()
 			if (ImGui::MenuItem((std::string(icon) + " " + ac.label).c_str()))
 			{
 				bfs::path p = UniquePath(bfs::path(folder) / (ac.baseName + ac.ext));
-				bfs::ofstream wf(p); if (wf) wf << ac.content;
+				// BINARY write: text mode would CRLF-mangle the template and break the
+				// "still the untouched template" compare on rename.
+				bfs::ofstream wf(p, std::ios::binary);
+				if (wf) wf << InstantiateCreatorTemplate(ac.content, p.stem().string());
+				// The rename that follows re-substitutes %CLASSNAME% with the FINAL name.
+				sFreshTemplatePath    = p.string();
+				sFreshTemplateContent = ac.content;
 				browserSel = p.string();
 				StartRename(p.string());
 			}
@@ -863,7 +969,7 @@ void EditorUI::winBrowser()
 	}
 
 	// --- gather the current folder's entries (Tiles / List) ---
-	struct FEntry { std::string name, path, ext; bool isDir; const char* icon; };
+	struct FEntry { std::string name, path, ext; bool isDir; const char* icon; bool pak = false; };
 	std::vector<FEntry> entries;
 	boost::system::error_code ec;
 	const bool searching = (browserSearch[0] != 0);
@@ -890,6 +996,53 @@ void EditorUI::winBrowser()
 			for (char& c : ext) c = (char)tolower((unsigned char)c);
 			if (!dir && !ExtVisible(ext)) continue;
 			entries.push_back({ name, de.path().string(), ext, dir, dir ? ICON_LC_FOLDER : ExtIcon(ext) });
+		}
+	}
+	// Mounted stack (pak/mod session): union the packed content with the disk overlay —
+	// the base game's resources are BROWSABLE, not invisible. Disk wins name collisions
+	// (the modder's copy overrides); pak-only entries are read-only ("pak://<rel>" paths).
+	if (Package::MountedCount() > 0)
+	{
+		std::string relDir = "content";
+		{
+			bfs::path r2 = cwd.lexically_relative(root);   // lexical: pak-only folders have no disk dir
+			std::string rs = r2.generic_string();
+			if (!rs.empty() && rs != "." && rs.compare(0, 2, "..") != 0) relDir += "/" + rs;
+		}
+		auto lowName = [](std::string s) { for (char& c : s) c = (char)tolower((unsigned char)c); return s; };
+		std::set<std::string> have;
+		for (const FEntry& e : entries) have.insert(lowName(e.name));
+		const std::string pfx = relDir + "/";
+		for (const std::string& r : Package::List(pfx))
+		{
+			if (r.size() <= pfx.size()) continue;
+			std::string tail = r.substr(pfx.size());
+			if (searching)
+			{
+				std::string name = bfs::path(tail).filename().string();
+				std::string ext  = bfs::path(name).extension().string();
+				for (char& c : ext) c = (char)tolower((unsigned char)c);
+				if (!ExtVisible(ext) || !SearchMatch(name) || have.count(lowName(name))) continue;
+				have.insert(lowName(name));
+				entries.push_back({ name, "pak://" + r, ext, false, ExtIcon(ext), true });
+				continue;
+			}
+			size_t sl = tail.find('/');
+			if (sl != std::string::npos)                       // a subfolder at this level
+			{
+				std::string name = tail.substr(0, sl);
+				if (have.count(lowName(name))) continue;
+				have.insert(lowName(name));
+				entries.push_back({ name, "pak://" + pfx + name, "", true, ICON_LC_FOLDER, true });
+			}
+			else
+			{
+				std::string ext = bfs::path(tail).extension().string();
+				for (char& c : ext) c = (char)tolower((unsigned char)c);
+				if (!ExtVisible(ext) || have.count(lowName(tail))) continue;
+				have.insert(lowName(tail));
+				entries.push_back({ tail, "pak://" + r, ext, false, ExtIcon(ext), true });
+			}
 		}
 	}
 	std::sort(entries.begin(), entries.end(), [](const FEntry& a, const FEntry& b) {
@@ -945,22 +1098,28 @@ void EditorUI::winBrowser()
 			if (seld) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.42f, 0.68f, 1.0f));
 			bool clicked = ImGui::Button(e.icon, ImVec2(tile, tile));
 			if (seld) ImGui::PopStyleColor();
-			BrowserDragSource(e.path);                       // drag this entry
-			if (e.isDir) BrowserFolderDropTarget(e.path);    // drop a file onto this folder = move
+			if (!e.pak) BrowserDragSource(e.path);                     // drag this entry
+			if (e.isDir && !e.pak) BrowserFolderDropTarget(e.path);    // drop a file onto this folder = move
 			if (clicked) { browserSel = e.path; AppInstance::GetSingleton()->selectedInHieararchy = nullptr; }   // select asset -> inspector shows it
 			if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0))   // double click = activate (all items)
 			{
-				if      (e.isDir)              BrowserNavigate(e.path);
-				else if (e.ext == ".nuworld")  OpenWorldFromBrowser(e.path);
-				else if (e.ext == ".nuprefab" || e.ext == ".numat" || e.ext == ".numesh"
-				         || e.ext == ".ogg" || e.ext == ".wav" || e.ext == ".mp3" || e.ext == ".flac")
+				if      (e.isDir)              BrowserNavigate(e.pak ? (cwd / e.name).string() : e.path);
+				else if (e.ext == ".nuworld")
+				{
+					// Pak-only worlds open THROUGH the layered stack (mods merge in).
+					if (e.pak) OpenWorldCmd(e.path.substr(strlen("pak://content/")));
+					else       OpenWorldFromBrowser(e.path);
+				}
+				else if (!e.pak && (e.ext == ".nuprefab" || e.ext == ".numat" || e.ext == ".numesh"
+				         || e.ext == ".ogg" || e.ext == ".wav" || e.ext == ".mp3" || e.ext == ".flac"))
 					OpenAssetEditor(e.path);   // asset editor window (audio opens its preview player)
-				else if (IsTextFile(e.ext))    OpenTextFile(e.path);   // scripts/shaders/configs -> text editor
+				else if (!e.pak && IsTextFile(e.ext)) OpenExternal(e.path, 0);   // scripts/shaders/configs -> the chosen editor
 			}
-			EntryContextMenu(e.path, e.isDir);   // right-click: Rename / Delete
+			if (!e.pak) EntryContextMenu(e.path, e.isDir);   // right-click: Rename / Delete
 			std::string disp = isDirty(e) ? e.name + " *" : e.name;
 			ImGui::TextUnformatted(fit(disp).c_str());
-			if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", disp.c_str());   // full name on hover
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip(e.pak ? "%s  (pak/mod — read-only)" : "%s", disp.c_str());
 			ImGui::EndGroup();
 			ImGui::PopID();
 			if (++i % per != 0) ImGui::SameLine();
@@ -978,25 +1137,29 @@ void EditorUI::winBrowser()
 		for (FEntry& e : entries)
 		{
 			ImGui::PushID(i++);
-			std::string lbl = std::string(e.icon) + "  " + e.name + (isDirty(e) ? " *" : "");
+			std::string lbl = std::string(e.icon) + "  " + e.name + (isDirty(e) ? " *" : "") + (e.pak ? "  (pak)" : "");
 			bool clicked = ImGui::Selectable(lbl.c_str(), e.path == browserSel, ImGuiSelectableFlags_AllowDoubleClick);
-			BrowserDragSource(e.path);                       // drag this entry
-			if (e.isDir) BrowserFolderDropTarget(e.path);    // drop a file onto this folder = move
+			if (!e.pak) BrowserDragSource(e.path);                     // drag this entry
+			if (e.isDir && !e.pak) BrowserFolderDropTarget(e.path);    // drop a file onto this folder = move
 			if (clicked)
 			{
 				browserSel = e.path;
 				AppInstance::GetSingleton()->selectedInHieararchy = nullptr;   // select asset -> inspector shows it
 				if (ImGui::IsMouseDoubleClicked(0))
 				{
-					if (e.isDir)                   BrowserNavigate(e.path);
-					else if (e.ext == ".nuworld")  OpenWorldFromBrowser(e.path);
-					else if (e.ext == ".nuprefab" || e.ext == ".numat" || e.ext == ".numesh"
-					         || e.ext == ".ogg" || e.ext == ".wav" || e.ext == ".mp3" || e.ext == ".flac")
+					if (e.isDir)                   BrowserNavigate(e.pak ? (cwd / e.name).string() : e.path);
+					else if (e.ext == ".nuworld")
+					{
+						if (e.pak) OpenWorldCmd(e.path.substr(strlen("pak://content/")));
+						else       OpenWorldFromBrowser(e.path);
+					}
+					else if (!e.pak && (e.ext == ".nuprefab" || e.ext == ".numat" || e.ext == ".numesh"
+					         || e.ext == ".ogg" || e.ext == ".wav" || e.ext == ".mp3" || e.ext == ".flac"))
 						OpenAssetEditor(e.path);   // asset editor window (audio opens its preview player)
-					else if (IsTextFile(e.ext))    OpenTextFile(e.path);   // scripts/shaders/configs -> text editor
+					else if (!e.pak && IsTextFile(e.ext)) OpenExternal(e.path, 0);   // scripts/shaders/configs -> the chosen editor
 				}
 			}
-			EntryContextMenu(e.path, e.isDir);   // right-click: Rename / Delete
+			if (!e.pak) EntryContextMenu(e.path, e.isDir);   // right-click: Rename / Delete
 			ImGui::PopID();
 		}
 	}

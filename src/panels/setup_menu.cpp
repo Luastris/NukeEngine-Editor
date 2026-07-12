@@ -52,6 +52,7 @@ void EditorUI::SetUp()
 	RegisterHotkeys();              // editor's built-in hotkeys (plugins add their own on load)
 
 	LoadProject();   // .nuproj: content dir, startup world, plugin load list, hotkey bindings (default if missing)
+	LoadPreferences();   // engine-wide (%APPDATA%): external editor choice + detection scan
 
 	// Activate the project's chosen plugins from the shared pool (InitModules discovered
 	// them already). Types register here (OnLoad) BEFORE the world auto-loads, so a world's
@@ -104,15 +105,8 @@ void EditorUI::SetUp()
 
 	// Editor state (project-tied): camera, selection, inspector + browser + panel state.
 	LoadEditorState();
-	// Demo geometry via the spawn API so the viewport shows something.
-	{
-		Atom* cube = new Atom("Cube");
-		MeshRenderer* mr = new MeshRenderer();
-		cube->AddComponent(mr);
-		mr->meshGuid = "builtin:cube";
-		mr->mesh = ResDB::getSingleton()->GetMesh("builtin:cube");
-		editor->currentScene->Add(cube);
-	}
+	// (The old "demo cube so the viewport shows something" seeded a stray Cube into every
+	// session — an EMPTY world must open empty. Removed 2026-07-11.)
 
 	// Open the last world the editor had open (editor_state.json); fall back to the project's
 	// default world if none was recorded or its file is gone (renamed/deleted outside). Plugins
@@ -280,6 +274,9 @@ void EditorUI::EditorMenu()
 			if (ImGui::MenuItem("Cut", "CTRL+X")) {}
 			if (ImGui::MenuItem("Copy", "CTRL+C")) {}
 			if (ImGui::MenuItem("Paste", "CTRL+V")) {}
+			ImGui::Separator();
+			// ENGINE-wide preferences (per machine/user, not per project) — external editor etc.
+			if (ImGui::MenuItem(ICON_LC_SETTINGS_2 " Preferences...")) { prefsOpen = true; prefsFocus = true; }
 			ImGui::EndMenu();
 		}
 		for (auto rootElement : AppInstance::GetSingleton()->menuStrip->strip)

@@ -48,7 +48,7 @@ void EditorUI::SpawnLight(int type, const char* atomName)
 	AppInstance* app = AppInstance::GetSingleton();
 	Atom* go = new Atom(atomName);
 	Light* l = new Light();
-	l->type = type;
+	l->type = (Light::Type)type;   // menu passes the raw index
 	go->AddComponent(l);
 	app->currentScene->Add(go);
 	app->selectedInHieararchy = go;
@@ -195,6 +195,17 @@ void EditorUI::Draw()
 			if (modDelay > 0 && strcmp(e, "1") != 0) modHookName = e;
 		}
 		if (modDelay > 0 && --modDelay == 0) PackageMod(modHookName);
+		// NUKE_PLAY=1: enter PIE ~4 s after boot (headless play verification — scripts,
+		// physics, audio all run their real play paths without a click).
+		static int playDelay = -2;
+		if (playDelay == -2) { const char* e = std::getenv("NUKE_PLAY"); playDelay = (e && *e == '1') ? 250 : -1; }
+		if (playDelay > 0 && --playDelay == 0)
+		{
+			AppInstance* app = AppInstance::GetSingleton();
+			if (app->playState == 0) pieSnapshot = app->currentScene->SaveToString();
+			app->playState = 1;
+			std::cout << "[editor]\t\tNUKE_PLAY hook: entering PIE" << std::endl;
+		}
 		// NUKE_OPEN_PROJECT=<path> exercises the New/Open Project switch (relaunch + close).
 		// The child INHERITS the env var — skip when the target is already open, else the
 		// spawned editor would relaunch itself forever.
@@ -245,6 +256,7 @@ void EditorUI::Draw()
 
 	winSettings();        // Project Settings window (default world + hotkeys)
 	winWorldSettings();   // World Settings window (global shadows etc., saved in the .nuworld)
+	winPreferences();     // engine-wide Preferences (external editor etc., %APPDATA% scope)
 	winTextEditor();      // Text editor (2.2): opened from the browser / asset inspector
 	winAssetEditors();    // Asset editors: material / mesh / prefab windows
 	DrawSaveAsPopup();    // "Save World As" modal

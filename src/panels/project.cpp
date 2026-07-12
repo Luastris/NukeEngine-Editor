@@ -54,6 +54,7 @@ void EditorUI::SaveProject()
 	for (auto& m : nuke::GetModules())
 	{
 		if (!m || !m->loaded || !*m->provides()) continue;
+		if (m->sharedService()) continue;   // shared services (scripting) load via the plugin list — no single choice
 		if (m->phase() == nuke::PHASE_BOOT && serviceChoices.count(m->provides())) continue;
 		serviceChoices[m->provides()] = m->moduleFile;
 	}

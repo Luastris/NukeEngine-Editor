@@ -44,7 +44,7 @@ EditorUI::PreviewScene* EditorUI::AcquirePreview()
 
 	Atom* sun = new Atom("PreviewSun");
 	Light* l = new Light();
-	l->type = 0;                 // directional
+	l->type = Light::Directional;
 	l->castShadows = false;      // no shadow passes for previews
 	sun->AddComponent(l);
 	sun->GetTransform().SetEulerDeg(Vector3(50, -30, 0));

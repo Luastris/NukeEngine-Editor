@@ -12,6 +12,7 @@
 #include <API/Model/Package.h>
 #include <API/Model/Jobs.h>
 #include <API/Model/StatusBar.h>
+#include <API/Model/World.h>    // mod basis: merge the stack the modder authored on
 #include <nlohmann/json.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/filesystem/fstream.hpp>
@@ -49,6 +50,12 @@ static bool PackWorthy(const std::string& relLower, bool forMod, const std::stri
 	if (relLower.empty()) return false;
 	auto starts = [&](const char* p) { return relLower.compare(0, strlen(p), p) == 0; };
 	if (starts("dist/") || starts("mods/") || starts(".git")) return false;
+	// managed/ is BUILD OUTPUT (compiled game scripts + csproj/obj junk), never data. The
+	// game pak takes GameScripts.dll EXPLICITLY (shipExtras); a MOD must never sweep a
+	// stale copy in — a mounted mod's assembly would shadow the game's and "wipe" its
+	// scripts (mods layer above the base pak on reads).
+	if (starts("managed/")) return false;
+	if (starts(".modbasis.tmp")) return false;   // Package Mod scratch (cleaned, but never data)
 	if (!distPrefix.empty() && relLower.compare(0, distPrefix.size(), distPrefix) == 0) return false;
 	if (relLower == "editor_state.json" || relLower == ".nupak_base") return false;
 	if (relLower == "mods.json") return false;
@@ -448,9 +455,17 @@ void EditorUI::PackageProject()
 		for (bfs::directory_iterator it(bfs::path("modules"), ec), end; it != end; it.increment(ec))
 			if (!ec && it->path().extension() == ".dll") modules.insert(it->path().filename().string());
 	}
+	// Module SHIP EXTRAS (game-thread snapshot — modules are live state): everything a
+	// module needs shipped beyond its DLL — compiled script assemblies into the pak, its
+	// runtime companions (managed bridge, a private .NET) into the dist tree.
+	std::vector<std::string> extraPak;
+	std::vector<std::pair<std::string, std::string>> extraDist;
+	for (auto& m : nuke::GetModules())
+		if (m && m->loaded) m->shipExtras(projDir.c_str(), extraPak, extraDist);
 
 	StatusBar::Set("package", "Packaging project...", StatusBar::kIndeterminate);
-	nuke::Jobs::Schedule([projDir, projFile, content, gameName, icon, method, level, modules, distStr, guidFiles]()
+	nuke::Jobs::Schedule([projDir, projFile, content, gameName, icon, method, level, modules, distStr, guidFiles,
+	                      extraPak, extraDist]()
 	{
 		boost::system::error_code ec;
 		const bfs::path dist = distStr;
@@ -485,11 +500,40 @@ void EditorUI::PackageProject()
 		std::set<std::string> used = CookUsedFiles(projDir, content, projFile, guidFiles);
 		std::vector<std::pair<std::string, std::string>> files;
 		files.reserve(all.size());
+		int forcedShaders = 0;
 		for (auto& fp : all)
-			if (used.count(DiskKey(bfs::path(fp.second)))) files.push_back(fp);
+		{
+			if (used.count(DiskKey(bfs::path(fp.second)))) { files.push_back(fp); continue; }
+			// Project SHADERS always ship, referenced or not: scripts bind them BY NAME at
+			// runtime (Shader.Find("unlit") / nuke.Shader.Find) — invisible to the reference
+			// walk — and they are code-sized, not content-sized. Without this a shader no
+			// world material happens to use silently vanishes from the build.
+			std::string low = fp.first;
+			for (char& c : low) c = (char)tolower((unsigned char)c);
+			if (low.size() > 5 && low.compare(low.size() - 5, 5, ".hlsl") == 0)
+			{
+				files.push_back(fp);
+				++forcedShaders;
+			}
+		}
 		std::cout << "[Package]\tcooked " << files.size() << " used files ("
-		          << (all.size() - files.size()) << " of " << all.size() << " unused, not shipped)" << std::endl;
+		          << (all.size() - files.size()) << " of " << all.size() << " unused, not shipped"
+		          << (forcedShaders ? "; " + std::to_string(forcedShaders) + " shader file(s) force-shipped" : "")
+		          << ")" << std::endl;
 		files.push_back({ "game.nuproj", projFile });
+		// Module pak extras: project files the cooker can't reach by reference (compiled
+		// script assemblies — packed sessions read them straight from the pak).
+		for (const std::string& rel : extraPak)
+		{
+			bfs::path src = bfs::path(projDir) / rel;
+			if (bfs::exists(src, ec) && !bfs::is_directory(src, ec))
+			{
+				files.push_back({ rel, src.string() });
+				std::cout << "[Package]\tmodule pak extra: " << rel << std::endl;
+			}
+			else
+				std::cout << "[Package]\tmodule pak extra MISSING, skipped: " << rel << std::endl;
+		}
 		// The runtime source dir (Release preferred) is resolved BEFORE the pak builds:
 		// engine built-ins (shaders/, fonts/) ride INSIDE game.nupak — the dist root stays
 		// clean and mods can override any of them through the Package layers.
@@ -576,6 +620,23 @@ void EditorUI::PackageProject()
 				if (!CopyOne(src, dist / "modules" / m))
 					std::cout << "[Package]\tmodule missing, skipped: " << m << std::endl;
 			}
+			// Module dist extras (shipExtras): runtime companions — the managed bridge dir,
+			// a private .NET runtime, whatever a module says its DLL cannot run without.
+			// Relative sources resolve against the shipped runtime dir, absolute as-is;
+			// directories copy recursively.
+			for (const auto& ed : extraDist)
+			{
+				bfs::path src = bfs::path(ed.first).is_absolute() ? bfs::path(ed.first) : rt / ed.first;
+				bfs::path dst = dist / ed.second;
+				if (!bfs::exists(src, ec))
+				{
+					std::cout << "[Package]\tmodule dist extra MISSING, skipped: " << ed.first << std::endl;
+					continue;
+				}
+				if (bfs::is_directory(src, ec)) CopyTree(src, dst);
+				else                            CopyOne(src, dst);
+				std::cout << "[Package]\tmodule dist extra: " << ed.second << std::endl;
+			}
 		}
 
 		nuke::Jobs::RunOnMain([ok, dist]()
@@ -630,6 +691,21 @@ void EditorUI::PackageMod(const std::string& modNameIn)
 		if (fromMod)
 		{
 			files = all;                    // editable mod: repack the whole work tree
+			// Keep the mod's compiled scripts assembly across repacks (managed/ is excluded
+			// from generic collection — this one artifact is the mod's shipped code).
+			{
+				boost::system::error_code sec;
+				bfs::path bin = bfs::path(projDir) / "managed" / "bin";
+				for (bfs::directory_iterator it(bin, sec), end; it != end && !sec; it.increment(sec))
+				{
+					std::string fn = it->path().filename().string();
+					std::string low = fn;
+					for (char& c : low) c = (char)tolower((unsigned char)c);
+					if (it->path().extension() != ".dll" || low == "gamescripts.dll") continue;
+					if (low.compare(0, 8, "scripts_") != 0) continue;
+					files.push_back({ "managed/bin/" + fn, it->path().string() });
+				}
+			}
 			// Same name -> IN PLACE update of the opened mod; a new name -> save-as (a
 			// separate .numod beside it; the session retargets to it below).
 			outPath = (bfs::path(base).parent_path() / (name + ".numod")).string();
@@ -638,14 +714,64 @@ void EditorUI::PackageMod(const std::string& modNameIn)
 		{
 			// Modder flow: only what CHANGED against the SESSION STACK — the base game plus
 			// every mod mounted under it (new files + CRC diffs vs the top mounted copy).
+			// A changed WORLD also records its BASIS (the stack's copy the modder authored
+			// on) under "basis/<rel>": at load the merge diffs the mod against ITS OWN basis,
+			// so the mod applies exactly the author's point changes — per atom, per component,
+			// per PROP — no matter how the base game evolves afterwards.
+			bfs::path basisTmp = bfs::path(projDir) / ".modbasis.tmp";
+			bfs::remove_all(basisTmp, ec);
 			for (auto& fp : all)
 			{
 				std::string under;
 				if (!Package::ReadMounted(fp.first, under)) { files.push_back(fp); continue; }   // new file
 				bfs::ifstream f(bfs::path(fp.second), std::ios::binary);
 				std::string raw((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-				if (Package::Crc32(raw.data(), raw.size()) != Package::Crc32(under.data(), under.size()))
-					files.push_back(fp);
+				if (Package::Crc32(raw.data(), raw.size()) == Package::Crc32(under.data(), under.size()))
+					continue;
+				files.push_back(fp);
+				std::string lowRel = fp.first;
+				for (char& c : lowRel) c = (char)tolower((unsigned char)c);
+				if (lowRel.size() > 8 && lowRel.compare(lowRel.size() - 8, 8, ".nuworld") == 0)
+				{
+					// The basis = the world as the author SAW it: every mounted pak layer
+					// below the raw overlay, merged the same way the session merged them.
+					std::string basisData = under;
+					std::vector<std::pair<std::string, std::string>> wl;
+					if (Package::ReadAllInfo(fp.first, wl) > 0)
+					{
+						std::vector<std::string> ls;
+						for (auto& h : wl) if (!h.second.empty()) ls.push_back(h.first);
+						if (ls.size() > 1)      basisData = nuke::World::MergeWorldLayers(ls);
+						else if (ls.size() == 1) basisData = ls[0];
+					}
+					bfs::path bt = basisTmp / fp.first;
+					bfs::create_directories(bt.parent_path(), ec);
+					bfs::ofstream bo(bt, std::ios::binary | std::ios::trunc);
+					if (bo)
+					{
+						bo.write(basisData.data(), (std::streamsize)basisData.size());
+						bo.close();
+						files.push_back({ "basis/" + fp.first, bt.string() });
+					}
+				}
+			}
+			// The session's OWN scripts assembly (Scripts_<session>.dll — compiled against
+			// the game's GameScripts.dll) ships WITH the mod: unique name, loaded ADDITIVELY
+			// by the player, so mod classes work in the shipped game too. The generic
+			// managed/ exclusion (PackWorthy) stays — only this one artifact rides along.
+			{
+				boost::system::error_code sec;
+				bfs::path bin = bfs::path(projDir) / "managed" / "bin";
+				for (bfs::directory_iterator it(bin, sec), end; it != end && !sec; it.increment(sec))
+				{
+					std::string fn = it->path().filename().string();
+					std::string low = fn;
+					for (char& c : low) c = (char)tolower((unsigned char)c);
+					if (it->path().extension() != ".dll" || low == "gamescripts.dll") continue;
+					if (low.compare(0, 8, "scripts_") != 0) continue;
+					files.push_back({ "managed/bin/" + fn, it->path().string() });
+					std::cout << "[Package]\tmod scripts assembly: " << fn << std::endl;
+				}
 			}
 			// The dist layout keeps the pak in content/ but mods in the ROOT mods/ dir.
 			bfs::path gameRoot = bfs::path(base).parent_path();
@@ -691,6 +817,7 @@ void EditorUI::PackageMod(const std::string& modNameIn)
 					               total ? (float)done / total : 0.0f);
 				});
 			bfs::remove(manTmp, ec);   // the manifest is inside the pak now
+			bfs::remove_all(bfs::path(projDir) / ".modbasis.tmp", ec);   // basis copies are inside too
 		}
 
 		// A renamed repack (.numod save-as) retargets the session: the marker + the live
@@ -814,6 +941,42 @@ void EditorUI::ScanModsUi()
 		manifest(r);
 		modsUi.push_back(std::move(r));
 	}
+
+	// The EDITOR's own selection (separate from the game's config): editor_mods.json in
+	// the session overlay — these are the mods THIS session actually mounts.
+	{
+		std::set<std::string> ed;
+		bfs::ifstream ef(bfs::path(projectDir) / "editor_mods.json");
+		if (ef)
+		{
+			nlohmann::json ej = nlohmann::json::parse(ef, nullptr, false);
+			if (!ej.is_discarded() && ej.contains("mods") && ej["mods"].is_array())
+				for (auto& m : ej["mods"])
+					if (m.is_string()) ed.insert(lower(bfs::path(m.get<std::string>()).filename().string()));
+		}
+		for (ModRow& r : modsUi) r.edMounted = ed.count(lower(r.file)) != 0;
+	}
+}
+
+// Persist the editor's selection + REMOUNT the session stack to match (base pak + the
+// selection, dependency-ordered). Worlds pick the change up on their next open.
+void EditorUI::SaveEditorMods()
+{
+	std::string root = GameRootFromBase();
+	if (root.empty() || basePakPath.empty()) return;
+	nlohmann::json ej;
+	ej["mods"] = nlohmann::json::array();
+	std::vector<std::string> entries;
+	for (const ModRow& r : modsUi)
+		if (r.edMounted) { ej["mods"].push_back("mods/" + r.file); entries.push_back("mods/" + r.file); }
+	boost::system::error_code ec;
+	bfs::ofstream out(bfs::path(projectDir) / "editor_mods.json", std::ios::trunc);
+	if (out) out << ej.dump(2);
+	Package::UnmountAll();
+	Package::Mount(basePakPath, 0);
+	int n = Package::MountModList(root, entries);   // empty list still clears the mod metadata
+	std::cout << "[editor]\t\teditor mods remounted (base + " << n << ") — reopen the world to apply" << std::endl;
+	modsUiTick = -1;   // rescan (mounted flags)
 }
 
 void EditorUI::SaveModsUi()
@@ -908,19 +1071,28 @@ std::string EditorUI::PrepareMountedProject(const std::string& pakAbs)
 	}
 	boost::system::error_code ec;
 	bfs::path pak(pakAbs);
-	// Mods-on-mods: the session mirrors the GAME — every mod enabled in the game's
-	// config/mods.json mounts above the base pak (dependency-ordered), so the modder edits
-	// on top of the exact stack the player runs. Package Mod then diffs against that stack
-	// and records the loaded mods as the new mod's DEPENDENCIES (a compatibility patch for
-	// two mods requires both; enable/disable mods for the session by editing mods.json).
+	bfs::path work = pak.parent_path() / (pak.stem().string() + "_mod");
+	bfs::create_directories(work / "content", ec);
+	// Opening the game pak opens THE GAME — base only. config/mods.json is the PLAYER's
+	// list, not the editor's: the session mounts mods only when the EDITOR's own separate
+	// list says so (editor_mods.json in the overlay, managed by the Mods panel).
 	{
 		bfs::path gameRoot = pak.parent_path();
 		if (gameRoot.filename() == "content") gameRoot = gameRoot.parent_path();
-		int n = Package::MountMods(gameRoot.string());
-		if (n > 0) std::cout << "[Package]\tsession stack: base + " << n << " mod(s)" << std::endl;
+		std::vector<std::string> em;
+		bfs::ifstream ef(work / "editor_mods.json");
+		if (ef)
+		{
+			nlohmann::json ej = nlohmann::json::parse(ef, nullptr, false);
+			if (!ej.is_discarded() && ej.contains("mods") && ej["mods"].is_array())
+				for (auto& m : ej["mods"]) if (m.is_string()) em.push_back(m.get<std::string>());
+		}
+		if (!em.empty())
+		{
+			int n = Package::MountModList(gameRoot.string(), em);
+			if (n > 0) std::cout << "[Package]\tsession: base + " << n << " EDITOR-selected mod(s)" << std::endl;
+		}
 	}
-	bfs::path work = pak.parent_path() / (pak.stem().string() + "_mod");
-	bfs::create_directories(work / "content", ec);
 	if (!bfs::exists(work / "game.nuproj", ec))
 	{
 		std::string manifest;
@@ -968,7 +1140,84 @@ std::string EditorUI::PrepareArchiveProject(const std::string& pakAbs)
 			if (!raw.empty()) o.write(raw.data(), (std::streamsize)raw.size());
 		}
 	}
-	if (!bfs::exists(work / "game.nuproj", ec))   // a mod pak carries no manifest — make one
+	// A mod living in a GAME's mods/ dir edits ON TOP of that game — mount the base pak
+	// and ONLY this mod's own dependency chain (mod.json "requires", walked recursively)
+	// under the work tree. The game's config/mods.json is the PLAYER's list — editing THIS
+	// mod does not pull the whole enabled stack in. The game's manifest drives the session.
+	{
+		bfs::path gameRoot = pak.parent_path();
+		if (gameRoot.filename() == "mods")
+		{
+			gameRoot = gameRoot.parent_path();
+			bfs::path basePak = gameRoot / "content" / "game.nupak";
+			if (bfs::exists(basePak, ec) && Package::Mount(basePak.string(), 0))
+			{
+				// name -> "mods/<file>" map from the game's mods dir manifests.
+				std::map<std::string, std::string> byName;
+				std::map<std::string, std::string> fileByName;   // for reading deps' manifests
+				auto lower = [](std::string s) { for (char& c : s) c = (char)tolower((unsigned char)c); return s; };
+				boost::system::error_code mec;
+				for (bfs::directory_iterator it(gameRoot / "mods", mec), end; it != end && !mec; it.increment(mec))
+				{
+					if (bfs::is_directory(it->path()) || it->path().extension() != ".numod") continue;
+					std::string nm = it->path().stem().string();
+					Package::File mpf;
+					std::string man;
+					if (mpf.Open(it->path().string()) && mpf.Read("mod.json", man))
+					{
+						nlohmann::json j = nlohmann::json::parse(man, nullptr, false);
+						if (!j.is_discarded() && j.is_object()) nm = j.value("name", nm);
+					}
+					byName[lower(nm)]     = "mods/" + it->path().filename().string();
+					fileByName[lower(nm)] = it->path().string();
+				}
+				// The opened mod's requires closure (breadth-first; missing deps just log).
+				std::vector<std::string> chain;
+				std::set<std::string> seen;
+				std::vector<std::string> queue;
+				{
+					bfs::ifstream mf(work / "mod.json");
+					nlohmann::json j = mf ? nlohmann::json::parse(mf, nullptr, false) : nlohmann::json();
+					if (!j.is_discarded() && j.is_object() && j.contains("requires") && j["requires"].is_array())
+						for (auto& r : j["requires"]) if (r.is_string()) queue.push_back(r.get<std::string>());
+				}
+				while (!queue.empty())
+				{
+					std::string name = lower(queue.back());
+					queue.pop_back();
+					if (seen.count(name)) continue;
+					seen.insert(name);
+					auto bit = byName.find(name);
+					if (bit == byName.end())
+					{
+						std::cout << "[Package]\tmod dependency '" << name << "' not found in mods/ — skipped" << std::endl;
+						continue;
+					}
+					chain.push_back(bit->second);
+					Package::File dpf;
+					std::string man;
+					if (dpf.Open(fileByName[name]) && dpf.Read("mod.json", man))
+					{
+						nlohmann::json j = nlohmann::json::parse(man, nullptr, false);
+						if (!j.is_discarded() && j.is_object() && j.contains("requires") && j["requires"].is_array())
+							for (auto& r : j["requires"]) if (r.is_string()) queue.push_back(r.get<std::string>());
+					}
+				}
+				int n = chain.empty() ? 0 : Package::MountModList(gameRoot.string(), chain);
+				std::cout << "[Package]\tmod session: base game + " << n << " required dep(s) mounted under the work tree" << std::endl;
+				if (!bfs::exists(work / "game.nuproj", ec))
+				{
+					std::string manifest;
+					if (Package::Read("game.nuproj", manifest) && !manifest.empty())
+					{
+						bfs::ofstream mj(work / "game.nuproj");
+						if (mj) mj << manifest;
+					}
+				}
+			}
+		}
+	}
+	if (!bfs::exists(work / "game.nuproj", ec))   // a standalone mod carries no manifest — make one
 	{
 		bfs::ofstream mj(work / "game.nuproj");
 		if (mj) mj << "{\n  \"name\": \"" << pak.stem().string() << "\",\n  \"content\": \"content\"\n}\n";

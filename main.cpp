@@ -20,9 +20,137 @@
 #include <boost/dll/runtime_symbol_info.hpp>   // program_location() -> exe dir
 #include <boost/thread.hpp>
 #include <boost/chrono.hpp>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#include <dbghelp.h>
+#include <crtdbg.h>
+#pragma comment(lib, "dbghelp.lib")
+#endif
+
 namespace bfs = boost::filesystem;
 using namespace std;
 using namespace nuke;   // engine API now lives in namespace nuke
+
+#ifdef _WIN32
+// Crash telemetry: on any unhandled SEH exception (access violation, ...) print the
+// faulting address + a SYMBOLIZED stack of the crashing thread to stdout/stderr (raw C
+// stdio — works even while cout/cerr are rerouted into the log ring), then fall through
+// to the system dialog. PDBs sit next to the binaries, so Debug builds resolve fully.
+static LONG WINAPI NukeCrashTrace(EXCEPTION_POINTERS* ep)
+{
+	static LONG once = 0;
+	if (InterlockedExchange(&once, 1)) return EXCEPTION_CONTINUE_SEARCH;   // one report
+
+	EXCEPTION_RECORD* er = ep->ExceptionRecord;
+	fprintf(stderr, "\n[CRASH] exception 0x%08lX at %p (thread %lu)\n",
+	        (unsigned long)er->ExceptionCode, er->ExceptionAddress, GetCurrentThreadId());
+	if (er->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && er->NumberParameters >= 2)
+		fprintf(stderr, "[CRASH] %s address %p\n",
+		        er->ExceptionInformation[0] ? "WRITING" : "READING",
+		        (void*)er->ExceptionInformation[1]);
+
+	HANDLE proc = GetCurrentProcess();
+	SymSetOptions(SYMOPT_LOAD_LINES | SYMOPT_DEFERRED_LOADS | SYMOPT_UNDNAME);
+	SymInitialize(proc, nullptr, TRUE);
+
+	CONTEXT ctx = *ep->ContextRecord;
+	STACKFRAME64 sf = {};
+	sf.AddrPC.Offset    = ctx.Rip; sf.AddrPC.Mode    = AddrModeFlat;
+	sf.AddrFrame.Offset = ctx.Rbp; sf.AddrFrame.Mode = AddrModeFlat;
+	sf.AddrStack.Offset = ctx.Rsp; sf.AddrStack.Mode = AddrModeFlat;
+	for (int i = 0; i < 64; ++i)
+	{
+		if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64, proc, GetCurrentThread(), &sf, &ctx,
+		                 nullptr, SymFunctionTableAccess64, SymGetModuleBase64, nullptr))
+			break;
+		DWORD64 pc = sf.AddrPC.Offset;
+		if (!pc) break;
+
+		char mod[MAX_PATH] = "?";
+		HMODULE hm = nullptr;
+		if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+		                       GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)pc, &hm) && hm)
+		{
+			GetModuleFileNameA(hm, mod, MAX_PATH);
+			const char* slash = strrchr(mod, '\\');
+			if (slash) memmove(mod, slash + 1, strlen(slash + 1) + 1);
+		}
+
+		char symBuf[sizeof(SYMBOL_INFO) + 256] = {};
+		SYMBOL_INFO* si = (SYMBOL_INFO*)symBuf;
+		si->SizeOfStruct = sizeof(SYMBOL_INFO);
+		si->MaxNameLen = 255;
+		DWORD64 disp64 = 0;
+		DWORD dispLine = 0;
+		IMAGEHLP_LINE64 line = { sizeof(IMAGEHLP_LINE64) };
+		if (SymFromAddr(proc, pc, &disp64, si))
+		{
+			if (SymGetLineFromAddr64(proc, pc, &dispLine, &line))
+				fprintf(stderr, "[CRASH] #%02d %s!%s+0x%llx  (%s:%lu)\n",
+				        i, mod, si->Name, (unsigned long long)disp64, line.FileName, (unsigned long)line.LineNumber);
+			else
+				fprintf(stderr, "[CRASH] #%02d %s!%s+0x%llx\n",
+				        i, mod, si->Name, (unsigned long long)disp64);
+		}
+		else
+			fprintf(stderr, "[CRASH] #%02d %s+0x%llx\n", i, mod, (unsigned long long)pc);
+	}
+	fflush(stderr);
+	fflush(stdout);
+	return EXCEPTION_CONTINUE_SEARCH;   // let the system dialog / debugger take over
+}
+
+// CRT asserts (IM_ASSERT, _ASSERTE) abort without raising SEH — hook the report path and
+// print the SAME symbolized stack so an assert names its caller in the captured log.
+static int __cdecl NukeCrtReportHook(int reportType, char* message, int* /*returnValue*/)
+{
+	if (reportType != _CRT_ASSERT && reportType != _CRT_ERROR) return FALSE;
+	fprintf(stderr, "\n[CRASH] CRT %s: %s\n",
+	        reportType == _CRT_ASSERT ? "assert" : "error", message ? message : "");
+	HANDLE proc = GetCurrentProcess();
+	SymSetOptions(SYMOPT_LOAD_LINES | SYMOPT_DEFERRED_LOADS | SYMOPT_UNDNAME);
+	SymInitialize(proc, nullptr, TRUE);
+	void* frames[64];
+	int n = (int)CaptureStackBackTrace(0, 64, frames, nullptr);
+	for (int i = 0; i < n; ++i)
+	{
+		DWORD64 pc = (DWORD64)frames[i];
+		char mod[MAX_PATH] = "?";
+		HMODULE hm = nullptr;
+		if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+		                       GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)pc, &hm) && hm)
+		{
+			GetModuleFileNameA(hm, mod, MAX_PATH);
+			const char* slash = strrchr(mod, '\\');
+			if (slash) memmove(mod, slash + 1, strlen(slash + 1) + 1);
+		}
+		char symBuf[sizeof(SYMBOL_INFO) + 256] = {};
+		SYMBOL_INFO* si = (SYMBOL_INFO*)symBuf;
+		si->SizeOfStruct = sizeof(SYMBOL_INFO);
+		si->MaxNameLen = 255;
+		DWORD64 disp64 = 0;
+		DWORD dispLine = 0;
+		IMAGEHLP_LINE64 line = { sizeof(IMAGEHLP_LINE64) };
+		if (SymFromAddr(proc, pc, &disp64, si))
+		{
+			if (SymGetLineFromAddr64(proc, pc, &dispLine, &line))
+				fprintf(stderr, "[CRASH] #%02d %s!%s+0x%llx  (%s:%lu)\n",
+				        i, mod, si->Name, (unsigned long long)disp64, line.FileName, (unsigned long)line.LineNumber);
+			else
+				fprintf(stderr, "[CRASH] #%02d %s!%s+0x%llx\n",
+				        i, mod, si->Name, (unsigned long long)disp64);
+		}
+		else
+			fprintf(stderr, "[CRASH] #%02d %s+0x%llx\n", i, mod, (unsigned long long)pc);
+	}
+	fflush(stderr);
+	fflush(stdout);
+	return FALSE;   // continue to the normal assert dialog
+}
+#endif  // _WIN32
 
 // OS integration (file dialog, .nuproj association) is declared neutrally in editor/editorui.h and
 // implemented per-platform in src/platform/platform_win32.cpp / platform_other.cpp — no platform API
@@ -250,6 +378,16 @@ void InitInput(KeyBoard *keyboard){
 
 int main(int argc, char** argv)
 {
+#ifdef _WIN32
+	SetUnhandledExceptionFilter(NukeCrashTrace);   // symbolized stack on any crash
+#ifdef _DEBUG
+	_CrtSetReportHook(NukeCrtReportHook);          // ...and on CRT asserts (IM_ASSERT)
+#endif
+#endif
+	// FIRST: route cout/cerr through the engine log ring — every boot line (module loads,
+	// service registrations, pak mounts) must land in the Console panel, not just stdout.
+	nuke::Log::CaptureStd();
+
 	// Capture + absolutize a .nuproj / .nupak / .numod argument against the ORIGINAL cwd,
 	// BEFORE we change cwd below. Archives extract into an editable work tree (3.2).
 	std::string projectArg, archiveArg;

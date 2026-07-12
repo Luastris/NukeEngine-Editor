@@ -21,7 +21,7 @@ static TextEditor::LanguageDefinitionId LangForFile(const std::string& ext)
 		else if (ext == ".hlsl" || ext == ".fx")                  lang = "hlsl";
 		else if (ext == ".glsl" || ext == ".vert" || ext == ".frag") lang = "glsl";
 		else if (ext == ".json" || ext == ".nuproj" || ext == ".numat" || ext == ".nuworld" || ext == ".nuprefab") lang = "json";
-		else if (ext == ".c" || ext == ".h" || ext == ".cpp" || ext == ".hpp") lang = "cpp";
+		else if (ext == ".c" || ext == ".h" || ext == ".cpp" || ext == ".hpp" || ext == ".cs") lang = "cpp";
 	}
 	for (char& c : lang) c = (char)std::tolower((unsigned char)c);
 	if (lang == "lua")  return TextEditor::LanguageDefinitionId::Lua;
@@ -47,11 +47,15 @@ bool EditorUI::IsTextFile(const std::string& ext)
 	return false;
 }
 
-void EditorUI::OpenTextFile(const std::string& path)
+void EditorUI::OpenTextFile(const std::string& path, int line)
 {
-	// Already open: focus its tab.
+	// Already open: focus its tab (and jump if a line was asked for).
 	for (TextDoc& d : textDocs)
-		if (d.path == path) { d.wantFocus = true; textEditorOpen = true; return; }
+		if (d.path == path)
+		{
+			if (line > 0) d.ed->SetCursorPosition(line - 1, 0);
+			d.wantFocus = true; textEditorOpen = true; return;
+		}
 
 	bfs::ifstream in(bfs::path(path), std::ios::binary);
 	if (!in) { cout << "[TextEditor]\tcannot open '" << path << "'" << endl; return; }
@@ -64,6 +68,7 @@ void EditorUI::OpenTextFile(const std::string& path)
 	std::string ext = bfs::path(path).extension().string();
 	for (char& c : ext) c = (char)std::tolower((unsigned char)c);
 	d.ed->SetLanguageDefinition(LangForFile(ext));
+	if (line > 0) d.ed->SetCursorPosition(line - 1, 0);
 	d.savedUndoIndex = d.ed->GetUndoIndex();
 	d.wantFocus = true;
 	textDocs.push_back(std::move(d));

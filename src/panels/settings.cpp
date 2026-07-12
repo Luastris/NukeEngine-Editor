@@ -583,9 +583,10 @@ void EditorUI::winSettings()
 
 			bool changed = false;         // checkbox / auto-sort -> save right away
 			static bool modsDragDirty = false;   // drag reorder -> save when the mouse releases
-			if (ImGui::BeginTable("modsui", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingStretchProp))
+			if (ImGui::BeginTable("modsui", 5, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingStretchProp))
 			{
-				ImGui::TableSetupColumn("On", ImGuiTableColumnFlags_WidthFixed, 24);
+				ImGui::TableSetupColumn("Game", ImGuiTableColumnFlags_WidthFixed, 38);     // the PLAYER's list (config/mods.json)
+				ImGui::TableSetupColumn("Editor", ImGuiTableColumnFlags_WidthFixed, 44);   // THIS session's mounts (separate)
 				ImGui::TableSetupColumn("Mod");
 				ImGui::TableSetupColumn("Requires");
 				ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthFixed, 120);
@@ -606,6 +607,14 @@ void EditorUI::winSettings()
 					ImGui::EndDisabled();
 					if (blockOn && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
 						ImGui::SetTooltip(!r.found ? "File not found." : "Enable its requirements first: %s", r.req.c_str());
+					ImGui::TableNextColumn();
+					// The EDITOR's own mount toggle — separate from the game's config: the
+					// session remounts immediately (reopen the world to see the merge).
+					ImGui::BeginDisabled(!r.found);
+					if (ImGui::Checkbox("##ed", &r.edMounted)) SaveEditorMods();
+					ImGui::EndDisabled();
+					if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+						ImGui::SetTooltip("Mount in THIS editor session (the game's own list is the 'Game' column)");
 					ImGui::TableNextColumn();
 					// The name cell doubles as a DRAG HANDLE: drag rows to reorder (enabled
 					// block only — disabled mods have no position in the config).
@@ -637,8 +646,8 @@ void EditorUI::winSettings()
 					ImGui::TableNextColumn();
 					if      (!r.found)             ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.3f, 1), "file not found");
 					else if (r.enabled && !r.reqOk) ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.3f, 1), "missing deps");
-					else if (r.mounted)            ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.4f, 1), "loaded");
-					else if (r.enabled)            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1), "reload to load");
+					else if (r.mounted)            ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.4f, 1), "mounted (editor)");
+					else if (r.enabled)            ImGui::TextColored(ImVec4(0.6f, 0.75f, 1.0f, 1), "on (game)");
 					else                           ImGui::TextDisabled("off");
 					ImGui::PopID();
 				}
@@ -649,7 +658,7 @@ void EditorUI::winSettings()
 			// rescan and rebuild the rows under the cursor).
 			if (modsDragDirty && !ImGui::IsMouseDown(0)) { SaveModsUi(); modsDragDirty = false; }
 			if (changed) SaveModsUi();
-			ImGui::TextDisabled("Top loads first, later mods override earlier ones; a mod always loads AFTER its requirements.");
+			ImGui::TextDisabled("'Game' = the PLAYER's list (config/mods.json). 'Editor' = mounted in THIS session only\n(applies immediately; reopen the world to see the merge). A mod always loads AFTER its requirements.");
 			// Rewrite the config in clean dependency order: the loader's fixpoint, kept
 			// stable (current order preserved among mods that don't depend on each other);
 			// mods with unsatisfied requirements sink to the end (they won't load anyway).

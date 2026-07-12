@@ -6,6 +6,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <tlhelp32.h>   // process snapshot: reuse a RUNNING IDE instead of spawning one per file
 #include <commdlg.h>
 #include <shobjidl.h>   // IFileOpenDialog (folder picker)
 #include <string>
@@ -63,6 +64,118 @@ std::string EditorPickProjectFile()
 	ofn.lpstrFile   = file;
 	ofn.nMaxFile    = sizeof(file);
 	ofn.lpstrTitle  = "Open project";
+	ofn.Flags       = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+	if (GetOpenFileNameA(&ofn)) return std::string(file);
+	return std::string();
+}
+
+// External editor integration (Preferences). Detection scans the STANDARD install spots —
+// no registry crawling: VS2022 editions, JetBrains Rider (per-user + Program Files, any
+// version dir), VS Code (per-user + system), Notepad++. Each entry carries the argument
+// template that makes the editor open file:line ({file}/{line} expand at launch).
+#include <editor/exteditor.h>
+#include <boost/filesystem.hpp>   // Boost over std, same as everywhere else in the project
+
+std::vector<ExtEditor> EditorDetectExternalEditors()
+{
+	namespace fs = boost::filesystem;
+	std::vector<ExtEditor> out;
+	boost::system::error_code ec;
+	auto add = [&](const char* name, const fs::path& exe, const char* args, const char* argsProj) {
+		if (fs::exists(exe, ec)) out.push_back({ name, exe.string(), args, argsProj });
+	};
+	auto env = [](const char* v) { const char* e = getenv(v); return std::string(e ? e : ""); };
+	const std::string pf    = env("ProgramFiles").empty()      ? "C:\\Program Files"       : env("ProgramFiles");
+	const std::string pf86  = env("ProgramFiles(x86)").empty() ? "C:\\Program Files (x86)" : env("ProgramFiles(x86)");
+	const std::string local = env("LOCALAPPDATA");
+
+	// Visual Studio 2022 (any edition; first found wins).
+	for (const char* ed : { "Community", "Professional", "Enterprise" })
+	{
+		fs::path devenv = fs::path(pf) / "Microsoft Visual Studio" / "2022" / ed / "Common7" / "IDE" / "devenv.exe";
+		if (fs::exists(devenv, ec))
+		{
+			// Project context: devenv <csproj> <file> loads the project (IntelliSense) AND
+			// opens the file; /Command jumps to the line once the IDE is up.
+			add((std::string("Visual Studio 2022 ") + ed).c_str(), devenv,
+			    "/Edit \"{file}\" /Command \"Edit.GoTo {line}\"",
+			    "\"{project}\" \"{file}\" /Command \"Edit.GoTo {line}\"");
+			break;
+		}
+	}
+	// JetBrains Rider: the per-user Toolbox spot + any versioned dir under Program Files.
+	if (!local.empty())
+		add("Rider", fs::path(local) / "Programs" / "Rider" / "bin" / "rider64.exe",
+		    "--line {line} \"{file}\"", "\"{project}\" --line {line} \"{file}\"");
+	{
+		fs::path jb = fs::path(pf) / "JetBrains";
+		if (fs::exists(jb, ec))
+			for (fs::directory_iterator it(jb, ec), end; it != end && !ec; it.increment(ec))
+				if (it->path().filename().string().find("Rider") != std::string::npos)
+				{
+					add("Rider", it->path() / "bin" / "rider64.exe",
+					    "--line {line} \"{file}\"", "\"{project}\" --line {line} \"{file}\"");
+					break;
+				}
+	}
+	// VS Code: per-user install first, then system-wide (-r = reuse the current window).
+	if (!local.empty())
+		add("VS Code", fs::path(local) / "Programs" / "Microsoft VS Code" / "Code.exe",
+		    "-r -g \"{file}:{line}\"", "\"{projectDir}\" -g \"{file}:{line}\"");
+	add("VS Code", fs::path(pf) / "Microsoft VS Code" / "Code.exe",
+	    "-r -g \"{file}:{line}\"", "\"{projectDir}\" -g \"{file}:{line}\"");
+	// Notepad++ (64- and 32-bit spots).
+	add("Notepad++", fs::path(pf)   / "Notepad++" / "notepad++.exe", "-n{line} \"{file}\"", "");
+	add("Notepad++", fs::path(pf86) / "Notepad++" / "notepad++.exe", "-n{line} \"{file}\"", "");
+
+	// Same editor found twice (per-user + system): keep the first spot only.
+	std::vector<ExtEditor> dedup;
+	for (ExtEditor& e : out)
+	{
+		bool seen = false;
+		for (ExtEditor& d : dedup) seen |= d.name == e.name;
+		if (!seen) dedup.push_back(std::move(e));
+	}
+	return dedup;
+}
+
+bool EditorLaunchDetached(const std::string& exe, const std::string& args)
+{
+	std::string cmd = "\"" + exe + "\" " + args;
+	STARTUPINFOA si = {}; si.cb = sizeof(si);
+	PROCESS_INFORMATION pi = {};
+	if (!CreateProcessA(NULL, &cmd[0], NULL, NULL, FALSE, DETACHED_PROCESS, NULL, NULL, &si, &pi)) return false;
+	CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+	return true;
+}
+
+bool EditorProcessRunning(const std::string& exePath)
+{
+	std::string want = boost::filesystem::path(exePath).filename().string();
+	for (char& c : want) c = (char)tolower((unsigned char)c);
+	HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+	if (snap == INVALID_HANDLE_VALUE) return false;
+	PROCESSENTRY32 pe = { sizeof(pe) };
+	bool found = false;
+	for (BOOL ok = Process32First(snap, &pe); ok && !found; ok = Process32Next(snap, &pe))
+	{
+		std::string name = pe.szExeFile;
+		for (char& c : name) c = (char)tolower((unsigned char)c);
+		found = name == want;
+	}
+	CloseHandle(snap);
+	return found;
+}
+
+std::string EditorPickExeFile()
+{
+	char file[1024] = "";
+	OPENFILENAMEA ofn = {};
+	ofn.lStructSize = sizeof(ofn);
+	ofn.lpstrFilter = "Programs (*.exe)\0*.exe\0All files (*.*)\0*.*\0";
+	ofn.lpstrFile   = file;
+	ofn.nMaxFile    = sizeof(file);
+	ofn.lpstrTitle  = "Pick the editor executable";
 	ofn.Flags       = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
 	if (GetOpenFileNameA(&ofn)) return std::string(file);
 	return std::string();
