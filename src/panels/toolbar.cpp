@@ -138,7 +138,11 @@ void EditorUI::Toolbar()
 		ImGui::SetCursorPosX((winW - centerW) * 0.5f);
 		if (ToolBtn(ICON_LC_PLAY, "Play", app->playState == 1, bw))
 		{
-			if (app->playState == 0) pieSnapshot = app->currentScene->SaveToString();   // snapshot on entering play
+			if (app->playState == 0)   // snapshot scene + edit target on entering play
+			{
+				pieSnapshot  = app->currentScene->SaveToString();
+				pieWorldPath = app->currentWorldPath;
+			}
 			app->playState = 1;
 		}
 		ImGui::SameLine();
@@ -156,6 +160,8 @@ void EditorUI::Toolbar()
 				long selId = app->selectedInHieararchy ? app->selectedInHieararchy->id.id : 0;
 				app->selectedInHieararchy = nullptr;
 				app->currentScene->LoadFromString(pieSnapshot);   // restore scene on stop
+				app->currentWorldPath = pieWorldPath;             // ...and the edit target (a script's
+				                                                  // Game.LoadWorld must not leak past Stop)
 				if (selId) app->selectedInHieararchy = app->currentScene->GetById(selId);
 			}
 			app->playState = 0;
@@ -202,7 +208,11 @@ void EditorUI::Draw()
 		if (playDelay > 0 && --playDelay == 0)
 		{
 			AppInstance* app = AppInstance::GetSingleton();
-			if (app->playState == 0) pieSnapshot = app->currentScene->SaveToString();
+			if (app->playState == 0)
+			{
+				pieSnapshot  = app->currentScene->SaveToString();
+				pieWorldPath = app->currentWorldPath;
+			}
 			app->playState = 1;
 			std::cout << "[editor]\t\tNUKE_PLAY hook: entering PIE" << std::endl;
 		}

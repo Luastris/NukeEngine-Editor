@@ -465,7 +465,13 @@ int main(int argc, char** argv)
 	PreInitRender();
 	cout << "[main]\t\t\t" << "Preinited render is: " << render << endl;
     Config* config = Config::getSingleton();
-	
+	// Optional: hide the OS console (window.showConsole=false). The in-app Console panel still
+	// captures stdout; a console shared with a launching terminal is left alone (guard inside).
+	Config::SetConsoleWindowVisible(config->window.showConsole);
+	// Perf: logToConsole=false stops the slow conhost echo. CaptureStd (above) tee's cout into
+	// the ring, so the in-app Console panel keeps showing everything — only the OS write drops.
+	nuke::Log::SetConsoleEcho(config->logToConsole);
+
 	instance->config = config;
 	instance->keyboard = KeyBoard::getSingleton();
 	instance->mouse = Mouse::getSingleton();

@@ -244,6 +244,11 @@ private:
 	float camYaw = 0.0f, camPitch = 0.0f;   // editor camera look angles (radians)
 	float gizmoMatrix[16] = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };   // persistent during a gizmo drag
 	std::string pieSnapshot;   // scene serialized on Play, restored on Stop (PIE)
+	// The editor's edit TARGET captured on Play, restored on Stop: a script's Game.LoadWorld
+	// during PIE retargets AppInstance::currentWorldPath at the loaded world — without this,
+	// Stop would leave the restored (previous) world pointing at the played world's file, so
+	// the next Save would overwrite THAT file with the previous world's content.
+	std::string pieWorldPath;
 
 public:
 	static EditorUI* getSingleton()
