@@ -59,7 +59,7 @@ void EditorUI::DrawAssetPreview3D(const std::string& path, const std::string& ex
 void EditorUI::RenderAssetPreview(iRender* r)
 {
 	if (!r) return;
-	for (PreviewScene* s : pvPool)
+	for (PreviewWorld* s : pvPool)
 	{
 		if (s->inUse && s->visible && s->world)
 			s->world->Render(r);
@@ -484,7 +484,7 @@ void EditorUI::DrawPostProcessInspector(nuke::PostProcess* pp)
 	// Structural edits (add / remove / reorder) are undoable as one atom-subtree delta (the param drags are
 	// already covered by the active-widget edit detector; these are button/DnD clicks it can't see).
 	nuke::Atom* owner = pp->atom;
-	World* w = AppInstance::GetSingleton()->currentScene;
+	World* w = AppInstance::GetSingleton()->currentWorld;
 	auto recordStructural = [&](const char* label, const std::function<void()>& mutate)
 	{
 		if (!owner || !w) { mutate(); return; }
@@ -734,7 +734,7 @@ void EditorUI::ResetToPrefab(Atom* a)
 {
 	if (!a || a->prefabGuid.empty()) return;
 	AppInstance* app = AppInstance::GetSingleton();
-	World* w = app->currentScene;
+	World* w = app->currentWorld;
 	std::string path = ResDB::getSingleton()->PathForGuid(a->prefabGuid);
 	if (path.empty()) return;
 	Atom* fresh = nuke::LoadPrefab(path);   // prefab defaults (fresh ids; prefabGuid from the file)
@@ -756,7 +756,7 @@ void EditorUI::ResetToPrefab(Atom* a)
 void EditorUI::RemoveComponent(Atom* a, Component* c)
 {
 	if (!a || !c) return;
-	World* w = AppInstance::GetSingleton()->currentScene;
+	World* w = AppInstance::GetSingleton()->currentWorld;
 	long id = a->id.id, parent = a->parent ? a->parent->id.id : 0;
 	int index = 0; { auto& lst = a->parent ? a->parent->children : w->GetHierarchy(); int i = 0; for (Atom* s : lst) { if (s == a) { index = i; break; } ++i; } }
 	std::string before = nuke::SaveAtomToString(a);
@@ -1165,7 +1165,7 @@ void EditorUI::DrawAssetInspector(const std::string& path)
 		else if (ext == ".nuprefab")
 		{
 			ImGui::TextDisabled("Prefab — drag into the world to instantiate.");
-			if (ImGui::Button(ICON_LC_PACKAGE_PLUS " Instantiate")) InstantiatePrefab(path);
+			if (ImGui::Button(ICON_LC_PACKAGE_PLUS " Instantiate")) SpawnPrefab(path);
 		}
 		else if (ext == ".nuproj")
 		{

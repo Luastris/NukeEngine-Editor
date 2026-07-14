@@ -368,7 +368,7 @@ void EditorUI::DrawMergeWindow()
 				if (f) f << out.dump(2);
 			}
 			app->selectedInHieararchy = nullptr;
-			app->currentScene->LoadFromString(merged);
+			app->currentWorld->LoadFromString(merged);
 			ResetUndo();
 			SyncWorldBaseline();
 			mergeOpen = false;

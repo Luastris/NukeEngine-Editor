@@ -164,19 +164,19 @@ static int __cdecl NukeCrtReportHook(int reportType, char* message, int* /*retur
 //    deepObject->SetParent(subroot);
 //    subroot->SetParent(root);
 //    secsubroot->SetParent(root);
-//    AppInstance::GetSingleton()->currentScene->GetHierarchy().push_back(root);
+//    AppInstance::GetSingleton()->currentWorld->GetHierarchy().push_back(root);
 //}
 
 //int main() {
 //	AppInstance* app = AppInstance::GetSingleton();
 //	app->setEditor(true);
 //	World* nScene = new World();
-//	app->currentScene = nScene;
+//	app->currentWorld = nScene;
 //    iRender* render = NukeBGFX::getSingleton();
 //	Config* conf = Config::getSingleton();
 //    
 //	
-//	if (app->currentScene->GetHierarchy().empty())
+//	if (app->currentWorld->GetHierarchy().empty())
 //    {
 //        Atom* edcam = new Atom("Editor Camera");
 //        cout << "[main]\t\t\t" << "Camera render is: " << render << endl;
@@ -184,10 +184,10 @@ static int __cdecl NukeCrtReportHook(int reportType, char* message, int* /*retur
 //        edcamc->transform->position = { 0, 10, -10};
 //        edcamc->freeMode = true;
 //        edcam->layer = Layer::L_EDITOR;
-//        app->currentScene->GetHierarchy().push_back(edcam);
+//        app->currentWorld->GetHierarchy().push_back(edcam);
 //    }
-//	cout << "[main]\t\t\t" << "New hierarchy size: " << app->currentScene->GetHierarchy().size() << endl;
-//	Atom* editorCam = app->currentScene->Get("Editor Camera");
+//	cout << "[main]\t\t\t" << "New hierarchy size: " << app->currentWorld->GetHierarchy().size() << endl;
+//	Atom* editorCam = app->currentWorld->Get("Editor Camera");
 //	cout << "[main]\t\t\t" << "Editor camera: " << editorCam << endl;
 //	
 //	render->_UIinit = editorinit;
@@ -213,11 +213,11 @@ static int __cdecl NukeCrtReportHook(int reportType, char* message, int* /*retur
 
 void keyboard1(unsigned char c, int x, int y)
 {
-    auto scene = AppInstance::GetSingleton()->currentScene;
-    for(auto go : scene->GetHierarchy()){
-        if(auto mr = (go->GetComponent<MeshRenderer>())){
+    auto scene = AppInstance::GetSingleton()->currentWorld;
+    for(auto atom : scene->GetHierarchy()){
+        if(auto mr = (atom->GetComponent<MeshRenderer>())){
             mr->enabled = !mr->enabled;
-            cout << "[main]\t\t\t" << go->name << "." << mr->name << ".enabled = " << mr->enabled << endl;
+            cout << "[main]\t\t\t" << atom->name << "." << mr->name << ".enabled = " << mr->enabled << endl;
         }
     }
     cout << "[main]\t\t\t" << "[1] key pressed! " << c << endl;
@@ -258,7 +258,7 @@ void CreateDemoObjects(){
     deepObject->SetParent(subroot);
     subroot->SetParent(root);
     secsubroot->SetParent(root);
-    AppInstance::GetSingleton()->currentScene->GetHierarchy().push_back(root);
+    AppInstance::GetSingleton()->currentWorld->GetHierarchy().push_back(root);
 }
 
 std::string MultiString(std::string str, int times) {
@@ -269,27 +269,27 @@ std::string MultiString(std::string str, int times) {
 	return out;
 }
 
-void PrintHierarchy(Atom* go, int level) {
-	if (!go)
+void PrintHierarchy(Atom* atom, int level) {
+	if (!atom)
 		return;
-	//Atom* goo = go;
+	//Atom* goo = atom;
 	cout << "[AppInstance]\t"
 		<< MultiString("\t", level)
-		<< go->GetName()
+		<< atom->GetName()
 		<< "\t(parentgpos: "
-		<< (go->GetParent() ? go->GetParent()->GetTransform().globalPosition().toStringA() : "null")
+		<< (atom->GetParent() ? atom->GetParent()->GetTransform().globalPosition().toStringA() : "null")
 		<< ")"
 		<< ";; POS: "
-		<< go->GetTransform().globalPosition().toStringA()
+		<< atom->GetTransform().globalPosition().toStringA()
 		<< endl;
 
-	if (go->children.size() > 0)
-		for (auto child : go->children)
+	if (atom->children.size() > 0)
+		for (auto child : atom->children)
 			PrintHierarchy(child, level + 1);
 	else
 		cout << "[AppInstance]\t" << MultiString("\t", level + 1) << "No children" << endl;
-	if (go->components.size() > 0)
-		for (auto cmp : go->components)
+	if (atom->components.size() > 0)
+		for (auto cmp : atom->components)
 			cout << "[AppInstance]\t" << MultiString("\t", level + 1) << "+" << cmp->name << endl;
 }
 
@@ -297,10 +297,10 @@ void InitEngine()
 {
 	cout << "[main]\t\t\t" << "Engine initialization..." << endl;
 	cout << "[main]\t\t\t" << "Editor is: " << AppInstance::GetSingleton() << endl;
-	cout << "[main]\t\t\t" << "Current scene is: " << AppInstance::GetSingleton()->currentScene << endl;
-	cout << "[main]\t\t\t" << "Hierarchy: " << &AppInstance::GetSingleton()->currentScene->GetHierarchy() << endl;
+	cout << "[main]\t\t\t" << "Current scene is: " << AppInstance::GetSingleton()->currentWorld << endl;
+	cout << "[main]\t\t\t" << "Hierarchy: " << &AppInstance::GetSingleton()->currentWorld->GetHierarchy() << endl;
 	AppInstance* instance = AppInstance::GetSingleton();
-    if (instance->currentScene->GetHierarchy().empty())
+    if (instance->currentWorld->GetHierarchy().empty())
     {
         Atom* edcam = new Atom("Editor Camera");
         iRender* rnd = AppInstance::GetSingleton()->render;
@@ -310,11 +310,11 @@ void InitEngine()
         edcamc->freeMode = true;
         //edcamc->Init(edcam);
         edcam->layer = NUKEE_LAYER_EDITOR;
-        AppInstance::GetSingleton()->currentScene->GetHierarchy().push_back(edcam);
-        //edcamc->renderer->currentScene = AppInstance::GetSingleton()->currentScene;
+        AppInstance::GetSingleton()->currentWorld->GetHierarchy().push_back(edcam);
+        //edcamc->renderer->currentWorld = AppInstance::GetSingleton()->currentWorld;
     }
-	cout << "[main]\t\t\t" << "New hierarchy size: " << instance->currentScene->GetHierarchy().size() << endl;
-	cout << "[main]\t\t\t" << "Editor camera: " << instance->currentScene->Get("Editor Camera") << endl;
+	cout << "[main]\t\t\t" << "New hierarchy size: " << instance->currentWorld->GetHierarchy().size() << endl;
+	cout << "[main]\t\t\t" << "Editor camera: " << instance->currentWorld->Get("Editor Camera") << endl;
 }
 
 void Unload()
@@ -323,18 +323,18 @@ void Unload()
     UnloadModules();
 }
 
-void RenderObject(Atom* go){
-    for(auto goc : go->children)
+void RenderObject(Atom* atom){
+    for(auto goc : atom->children)
     {
         goc->Update<MeshRenderer>();
     }
 }
 
 void RenderScene(){
-    auto scene = AppInstance::GetSingleton()->currentScene;
-    for(auto go : scene->GetHierarchy()){
-        RenderObject(go);
-        if(auto mr = (go->GetComponent<Camera>())){
+    auto scene = AppInstance::GetSingleton()->currentWorld;
+    for(auto atom : scene->GetHierarchy()){
+        RenderObject(atom);
+        if(auto mr = (atom->GetComponent<Camera>())){
             mr->Update();
         }
     }
@@ -356,7 +356,7 @@ iRender* PreInitRender(){
         // down mid-command-list (from a click handler) breaks D3D12 (render safety).
         EditorUI::getSingleton()->ApplyPendingWorldOpen();
         EditorUI::getSingleton()->RenderAssetPreview(r);
-        AppInstance::GetSingleton()->currentScene->Render(r);
+        AppInstance::GetSingleton()->currentWorld->Render(r);
     });
     // UI is driven by the UI module (NukeUI); it is wired in main() after the
     // renderer is initialized (NukeUI hooks the renderer's onGUI itself).
@@ -514,24 +514,24 @@ int main(int argc, char** argv)
     if(ResDB::getSingleton()->prefabs.size() > 0)
     {
         for(auto pref : ResDB::getSingleton()->prefabs){
-            AppInstance::GetSingleton()->currentScene->Add(pref);
+            AppInstance::GetSingleton()->currentWorld->Add(pref);
         }
 //        for(auto m : ResDB::getSingleton()->meshes){
-//            Atom* go = new Atom(m->name);
+//            Atom* atom = new Atom(m->name);
 //            MeshRenderer* mr = new MeshRenderer();
 //            mr->mesh = m;
-//            go->AddComponent(mr);//dynamic_cast<Component*>(mr));
-//            cout << "[main]\t\t\t" << go->name << " : " << go->transform.position.toStringA() << endl;
-//            AppInstance::GetSingleton()->currentScene->Add(go);
+//            atom->AddComponent(mr);//dynamic_cast<Component*>(mr));
+//            cout << "[main]\t\t\t" << atom->name << " : " << atom->transform.position.toStringA() << endl;
+//            AppInstance::GetSingleton()->currentWorld->Add(atom);
 //        }
     }
 
     // The project's default world is opened from content by editorinit() (SetUp) — after the
     // project's plugins are active, so components deserialize correctly. Nothing to restore here.
 
-	cout << "[main]\t\t\t" << "Hierarchy: " << &AppInstance::GetSingleton()->currentScene->GetHierarchy() << endl;
-	/*if(AppInstance::GetSingleton()->currentScene->GetHierarchy().size() > 0)
-		for(auto g : AppInstance::GetSingleton()->currentScene->GetHierarchy())
+	cout << "[main]\t\t\t" << "Hierarchy: " << &AppInstance::GetSingleton()->currentWorld->GetHierarchy() << endl;
+	/*if(AppInstance::GetSingleton()->currentWorld->GetHierarchy().size() > 0)
+		for(auto g : AppInstance::GetSingleton()->currentWorld->GetHierarchy())
 			if(g)
 				PrintHierarchy(g, 0);*/
 

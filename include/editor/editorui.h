@@ -327,11 +327,11 @@ public:
 	void winSettings();              // Project Settings window (default world + hotkeys)
 	// hierarchy
 	void winHierarchy();
-	void DrawAtomNode(Atom* go);                 // one tree row + DnD (recurses children)
+	void DrawAtomNode(Atom* atom);                 // one tree row + DnD (recurses children)
 	void HierGap(Atom* before);  // thin insertion zone overlaid on a row's top edge (only while dragging an atom)
-	bool HierMatch(Atom* go);                    // search: atom name OR a component type matches
-	bool HierMatchDeep(Atom* go);                // this atom or any descendant matches
-	const char* AtomIcon(Atom* go);              // icon by the atom's components
+	bool HierMatch(Atom* atom);                    // search: atom name OR a component type matches
+	bool HierMatchDeep(Atom* atom);                // this atom or any descendant matches
+	const char* AtomIcon(Atom* atom);              // icon by the atom's components
 	void FocusSelected();                        // frame the selected atom with the editor camera
 	// inspector
 	void CamComponent(Camera* cam);
@@ -397,7 +397,7 @@ public:
 	// one mesh atom + camera into an own RT). Pooled because the render seam has no
 	// destroyRenderTarget — closed editors return their scene for reuse. Each World
 	// pushes its own globals per Render() call, so extra worlds never taint the scene.
-	struct PreviewScene
+	struct PreviewWorld
 	{
 		World*        world = nullptr;
 		uint64_t      rt = 0;
@@ -419,17 +419,17 @@ public:
 		// suppressed while true.
 		bool    gizmoBusy = false;
 	};
-	std::vector<PreviewScene*> pvPool;      // every created scene (in use or free)
-	PreviewScene* AcquirePreview();
-	void ReleasePreview(PreviewScene* s);
+	std::vector<PreviewWorld*> pvPool;      // every created scene (in use or free)
+	PreviewWorld* AcquirePreview();
+	void ReleasePreview(PreviewWorld* s);
 	// The interactive 3D view: fills exactly `size` (any aspect — the RT follows it),
 	// LMB drag orbits (captured — never drags the window), wheel dollies.
-	void DrawPreviewImage(PreviewScene& s, ImVec2 size);
-	void FramePreview(PreviewScene& s, Atom* subtree);       // bounds of a subtree (or the mesh atom) -> center/radius
+	void DrawPreviewImage(PreviewWorld& s, ImVec2 size);
+	void FramePreview(PreviewWorld& s, Atom* subtree);       // bounds of a subtree (or the mesh atom) -> center/radius
 
 	// Inspector's asset preview (one pooled scene, staged by browser selection).
 	uint64_t inspTexPreviewId = 0;          // GPU texture of the decoded .nutex (destroyTexture2D on change)
-	PreviewScene* inspPv = nullptr;
+	PreviewWorld* inspPv = nullptr;
 	std::string   pvStaged;                 // asset path currently staged ("" = none)
 	void StageAssetPreview(const std::string& path, const std::string& ext);
 	void DrawAssetPreview3D(const std::string& path, const std::string& ext);   // inspector widget
@@ -444,7 +444,7 @@ public:
 	struct AssetEditorWin
 	{
 		std::string path, ext;              // full path + lowercase extension
-		PreviewScene* pv = nullptr;
+		PreviewWorld* pv = nullptr;
 		Material* mat = nullptr;            // .numat: owned editing copy (saved to the file)
 		// .nutex Sprite Slicer: owned editing copy + GPU preview (downsampled) + 2D view state.
 		nuke::Texture* tex = nullptr;
@@ -524,7 +524,7 @@ public:
 	bool ExtVisible(const std::string& ext);
 	bool SearchMatch(const std::string& name);
 	void BrowserTree(const std::string& dir);
-	Atom* InstantiatePrefab(const std::string& path);
+	Atom* SpawnPrefab(const std::string& path);
 	void StartRename(const std::string& path);
 	void EntryContextMenu(const std::string& path, bool isDir);
 	void DrawRenamePopup();
@@ -582,7 +582,7 @@ public:
 	// Spawn placement: in front of the editor camera — on the surface it's looking at (ray hit) if any,
 	// else a fixed distance ahead. FinishSpawn positions + adds + selects + records a freshly-created atom.
 	Vector3 SpawnPos();
-	Atom*   FinishSpawn(Atom* go);
+	Atom*   FinishSpawn(Atom* atom);
 	void SpawnCube();
 	void SpawnCamera();
 	void SpawnLight(int type, const char* atomName);   // type 0=dir 1=point 2=spot

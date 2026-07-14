@@ -789,11 +789,11 @@ void EditorUI::winWorldSettings()
 	// focuses it via SetNextWindowFocus above).
 	if (ImGui::Begin("World Settings", &worldSettingsOpen, ImGuiWindowFlags_NoFocusOnAppearing))
 	{
-		World* w = AppInstance::GetSingleton()->currentScene;
+		World* w = AppInstance::GetSingleton()->currentWorld;
 		if (!w) { ImGui::TextDisabled("No world loaded."); ImGui::End(); return; }
 		World::Settings& s = w->settings;
 		auto apply = [this](const World::Settings& st) {
-			World* ww = AppInstance::GetSingleton()->currentScene; if (!ww) return;
+			World* ww = AppInstance::GetSingleton()->currentWorld; if (!ww) return;
 			ww->settings = st;
 			if (iRender* r = AppInstance::GetSingleton()->render)
 				r->setShadowSettings(st.shadowRes, st.shadowDistance, st.shadowDepthBias, st.shadowNormalBias, st.shadowSoftness);

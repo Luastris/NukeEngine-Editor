@@ -15,11 +15,11 @@
 static int CountAtoms(bc::list<Atom*>& gos)
 {
 	int n = 0;
-	for (Atom* go : gos)
+	for (Atom* atom : gos)
 	{
-		if (!go) continue;
+		if (!atom) continue;
 		++n;
-		if (!go->children.empty()) n += CountAtoms(go->children);
+		if (!atom->children.empty()) n += CountAtoms(atom->children);
 	}
 	return n;
 }
@@ -55,7 +55,7 @@ void EditorUI::StatusBarPanel()
 
 		// World: atom count (+ play state marker).
 		sep();
-		ImGui::Text("%d atoms", app->currentScene ? CountAtoms(app->currentScene->GetHierarchy()) : 0);
+		ImGui::Text("%d atoms", app->currentWorld ? CountAtoms(app->currentWorld->GetHierarchy()) : 0);
 		if (app->playState != 0)
 		{
 			ImGui::SameLine();

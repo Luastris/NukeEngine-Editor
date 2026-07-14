@@ -330,7 +330,7 @@ static bool IsEditorOnlyModule(const bfs::path& dll)
 }
 
 // Decode the BEST image of an .ico into RGBA8 for the settings preview. Picks the largest
-// entry; PNG-compressed entries go through stb_image, classic DIB entries are decoded
+// entry; PNG-compressed entries atom through stb_image, classic DIB entries are decoded
 // manually (32-bpp BGRA bottom-up; fully-zero alpha falls back to the AND mask).
 bool EditorUI::DecodeIcoRGBA(const std::string& path, std::vector<unsigned char>& rgba, int& w, int& h)
 {

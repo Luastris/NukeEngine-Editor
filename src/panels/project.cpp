@@ -146,7 +146,7 @@ static std::string Canon(const std::string& s)
 void EditorUI::SyncWorldBaseline()
 {
 	AppInstance* app = AppInstance::GetSingleton();
-	worldOnDisk = app->currentScene->SaveToString();   // kept for the merge/conflict flows (once per open/save)
+	worldOnDisk = app->currentWorld->SaveToString();   // kept for the merge/conflict flows (once per open/save)
 	worldDirty  = false;
 	savedWorldSerial = WorldEditSerial();              // dirty tracking = undo cursor vs this
 	worldMtime  = 0;
@@ -174,7 +174,7 @@ void EditorUI::ReloadWorld(const std::string& diskJson)
 {
 	AppInstance* app = AppInstance::GetSingleton();
 	app->selectedInHieararchy = nullptr;
-	app->currentScene->LoadFromString(diskJson);
+	app->currentWorld->LoadFromString(diskJson);
 	worldOnDisk = Canon(diskJson);
 	worldDirty  = false;
 	ResetUndo();
@@ -213,7 +213,7 @@ void EditorUI::TrackExternalChange()
 	std::string disk = pj.dump();
 	worldMtime = mt;                                    // record so we don't re-trigger
 	if (disk == worldOnDisk) return;                   // same content (e.g. our own save)
-	bool dirty = app->currentScene->SaveToString() != worldOnDisk;
+	bool dirty = app->currentWorld->SaveToString() != worldOnDisk;
 	if (!dirty)
 	{
 		if (reloadCleanMode == 1) ReloadWorld(disk);
@@ -225,7 +225,7 @@ void EditorUI::TrackExternalChange()
 		{
 			case 1: ReloadWorld(disk); break;                                  // ignore editor, reload from disk
 			case 2: OverwriteWorld();  break;                                  // ignore disk, overwrite from editor
-			case 3: OpenMerge(app->currentScene->SaveToString(), disk); break; // merge/resolve window
+			case 3: OpenMerge(app->currentWorld->SaveToString(), disk); break; // merge/resolve window
 			default: pendingDisk = disk; openConflictPopup = true; break;      // 0 = ask
 		}
 	}
@@ -261,7 +261,7 @@ void EditorUI::DrawConflictPopup()
 		ImGui::SameLine();
 		if (ImGui::Button("Merge…"))   // open the resolve window
 		{
-			OpenMerge(AppInstance::GetSingleton()->currentScene->SaveToString(), pendingDisk);
+			OpenMerge(AppInstance::GetSingleton()->currentWorld->SaveToString(), pendingDisk);
 			pendingDisk.clear(); ImGui::CloseCurrentPopup();
 		}
 		ImGui::SameLine();
@@ -436,7 +436,7 @@ void EditorUI::SaveEditorState()
 		jc["free"] = editorCam->freeMode; jc["invMouse"] = editorCam->invertMouse;
 		jc["yaw"] = camYaw; jc["pitch"] = camPitch;   // editor look angles (not on the Camera component)
 		// Post-effect chain (RTX/rtreflect/...) lives on a PostProcess sibling component — persist it too.
-		if (Atom* a = AppInstance::GetSingleton()->currentScene->Get("Editor Camera"))
+		if (Atom* a = AppInstance::GetSingleton()->currentWorld->Get("Editor Camera"))
 			if (nuke::PostProcess* pp = a->GetComponent<nuke::PostProcess>()) { pp->Commit(); jc["post"] = pp->effectsData; }
 	}
 	if (auto sel = AppInstance::GetSingleton()->selectedInHieararchy)
@@ -489,7 +489,7 @@ void EditorUI::LoadEditorState()
 		camYaw = jc.value("yaw", camYaw); camPitch = jc.value("pitch", camPitch);
 		if (jc.contains("post"))   // restore the post-effect chain (RTX/rtreflect/...); recreate the component if needed
 		{
-			if (Atom* a = AppInstance::GetSingleton()->currentScene->Get("Editor Camera"))
+			if (Atom* a = AppInstance::GetSingleton()->currentWorld->Get("Editor Camera"))
 			{
 				nuke::PostProcess* pp = a->GetComponent<nuke::PostProcess>();
 				if (!pp) { pp = new nuke::PostProcess(); a->AddComponent(pp); }

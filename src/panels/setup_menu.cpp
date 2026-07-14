@@ -37,7 +37,7 @@ void EditorUI::SetUp()
 	editor->PushWindow("nukeeditor-render", boost::bind(&EditorUI::winRender, this));
 	editor->PushWindow("nukeeditor-plugins", boost::bind(&EditorUI::PluginMGRWindow, this));
 
-	Atom* camObj = editor->currentScene->Get("Editor Camera");
+	Atom* camObj = editor->currentWorld->Get("Editor Camera");
 	if (camObj)
 		editorCam = camObj->GetComponent<Camera>();
 	if (editorCam)

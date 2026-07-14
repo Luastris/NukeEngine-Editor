@@ -30,13 +30,13 @@ static nuke::Atom* PickAtScreen(nuke::Camera* cam, ImVec2 rmin, ImVec2 sz, ImVec
 		nuke::Vector3 ori(o.x + ndcx * halfW * rr.x + ndcy * halfH * uu.x,
 		                  o.y + ndcx * halfW * rr.y + ndcy * halfH * uu.y,
 		                  o.z + ndcx * halfW * rr.z + ndcy * halfH * uu.z);
-		return nuke::AppInstance::GetSingleton()->currentScene->Pick(ori, f);
+		return nuke::AppInstance::GetSingleton()->currentWorld->Pick(ori, f);
 	}
 	float thf = tanf((float)cam->fov * 0.5f * 0.01745329252f);
 	nuke::Vector3 dir(f.x + ndcx * thf * aspect * rr.x + ndcy * thf * uu.x,
 	                  f.y + ndcx * thf * aspect * rr.y + ndcy * thf * uu.y,
 	                  f.z + ndcx * thf * aspect * rr.z + ndcy * thf * uu.z);
-	return nuke::AppInstance::GetSingleton()->currentScene->Pick(o, dir);
+	return nuke::AppInstance::GetSingleton()->currentWorld->Pick(o, dir);
 }
 
 // The editor camera's projection matrix (glm, LH depth 0..1), matching the renderer's
@@ -63,7 +63,7 @@ void EditorUI::DrawEntityIcons(ImVec2 rmin, ImVec2 sz)
 {
 	iconHits.clear();
 	AppInstance* app = AppInstance::GetSingleton();
-	if (!editorCam || !editorCam->transform || !app->currentScene) return;
+	if (!editorCam || !editorCam->transform || !app->currentWorld) return;
 	if (app->playState != 0) return;                       // edit mode only
 	if (sz.x <= 1.0f || sz.y <= 1.0f) return;
 
@@ -88,16 +88,16 @@ void EditorUI::DrawEntityIcons(ImVec2 rmin, ImVec2 sz)
 	std::vector<Icon> icons;
 	std::function<void(bc::list<Atom*>&)> walk = [&](bc::list<Atom*>& gos)
 	{
-		for (Atom* go : gos)
+		for (Atom* atom : gos)
 		{
-			if (!go) continue;
+			if (!atom) continue;
 			const char* glyph = nullptr;
 			ImU32 col = IM_COL32(230, 230, 230, 235);
-			if (Camera* cam = go->GetComponent<Camera>())
+			if (Camera* cam = atom->GetComponent<Camera>())
 			{
 				if (cam != editorCam) glyph = ICON_LC_VIDEO;   // the editor camera has no icon
 			}
-			else if (Light* l = go->GetComponent<Light>())
+			else if (Light* l = atom->GetComponent<Light>())
 			{
 				glyph = l->type == 0 ? ICON_LC_SUN : (l->type == 2 ? ICON_LC_SPOTLIGHT : ICON_LC_LIGHTBULB);
 				// tint with the light color, floored so a dark light stays readable
@@ -106,11 +106,11 @@ void EditorUI::DrawEntityIcons(ImVec2 rmin, ImVec2 sz)
 				               (int)(255.0 * std::max(l->color.g, fl)),
 				               (int)(255.0 * std::max(l->color.b, fl)), 235);
 			}
-			else if (go->GetComponent<ReflectionProbe>()) { glyph = ICON_LC_APERTURE;  col = IM_COL32(200, 140, 255, 235); }
-			else if (go->GetComponent<Environment>())     { glyph = ICON_LC_CLOUD_SUN; col = IM_COL32(150, 200, 255, 235); }
+			else if (atom->GetComponent<ReflectionProbe>()) { glyph = ICON_LC_APERTURE;  col = IM_COL32(200, 140, 255, 235); }
+			else if (atom->GetComponent<Environment>())     { glyph = ICON_LC_CLOUD_SUN; col = IM_COL32(150, 200, 255, 235); }
 			if (glyph)
 			{
-				Vector3 p = go->GetTransform().globalPosition();
+				Vector3 p = atom->GetTransform().globalPosition();
 				glm::vec4 clip = vp * glm::vec4((float)p.x, (float)p.y, (float)p.z, 1.0f);
 				if (clip.w > 0.01f)   // in front of the camera
 				{
@@ -119,13 +119,13 @@ void EditorUI::DrawEntityIcons(ImVec2 rmin, ImVec2 sz)
 						icons.push_back({ clip.w,
 							ImVec2(rmin.x + (nx * 0.5f + 0.5f) * sz.x,
 							       rmin.y + (0.5f - ny * 0.5f) * sz.y),
-							glyph, col, go });
+							glyph, col, atom });
 				}
 			}
-			if (!go->children.empty()) walk(go->children);
+			if (!atom->children.empty()) walk(atom->children);
 		}
 	};
-	walk(app->currentScene->GetHierarchy());
+	walk(app->currentWorld->GetHierarchy());
 	if (icons.empty()) return;
 
 	// Far first, so nearer icons draw ON TOP (and win the click, tested back-to-front).
@@ -400,7 +400,7 @@ void EditorUI::winRender()
 					            f.y + ndcx * thf * aspect * rr.y + ndcy * thf * uu.y,
 					            f.z + ndcx * thf * aspect * rr.z + ndcy * thf * uu.z);
 					AppInstance::GetSingleton()->selectedInHieararchy =
-						AppInstance::GetSingleton()->currentScene->Pick(o, dir);
+						AppInstance::GetSingleton()->currentWorld->Pick(o, dir);
 				}
 			}
 

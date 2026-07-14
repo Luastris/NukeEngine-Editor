@@ -30,25 +30,25 @@ bool EditorUI::ToolBtn(const char* icon, const char* tip, bool active, float w)
 Vector3 EditorUI::SpawnPos()
 {
 	AppInstance* app = AppInstance::GetSingleton();
-	if (editorCam && editorCam->transform && app->currentScene)
+	if (editorCam && editorCam->transform && app->currentWorld)
 	{
 		Transform* t = editorCam->transform;
 		Vector3 o = t->globalPosition(), f = t->direction();
 		float dist = 0.0f;
-		Atom* hit = app->currentScene->PickDist(o, f, dist);
+		Atom* hit = app->currentWorld->PickDist(o, f, dist);
 		double d = (hit && dist > 0.02f && dist < 1e29f) ? (double)dist : 8.0;
 		return Vector3(o.x + f.x * d, o.y + f.y * d, o.z + f.z * d);
 	}
 	return Vector3(0, 0, 0);
 }
-Atom* EditorUI::FinishSpawn(Atom* go)
+Atom* EditorUI::FinishSpawn(Atom* atom)
 {
 	AppInstance* app = AppInstance::GetSingleton();
-	go->GetTransform().position = SpawnPos();   // in front of the camera / on the looked-at surface
-	app->currentScene->Add(go);
-	app->selectedInHieararchy = go;
-	RecordAdd(go);
-	return go;
+	atom->GetTransform().position = SpawnPos();   // in front of the camera / on the looked-at surface
+	app->currentWorld->Add(atom);
+	app->selectedInHieararchy = atom;
+	RecordAdd(atom);
+	return atom;
 }
 
 void EditorUI::SpawnEmpty()
@@ -57,41 +57,41 @@ void EditorUI::SpawnEmpty()
 }
 void EditorUI::SpawnPrimitive(const char* atomName, const char* guid)
 {
-	Atom* go = new Atom(atomName);
+	Atom* atom = new Atom(atomName);
 	MeshRenderer* mr = new MeshRenderer();
-	go->AddComponent(mr);
+	atom->AddComponent(mr);
 	mr->meshGuid = guid;
 	mr->mesh = ResDB::getSingleton()->GetMesh(guid);
-	FinishSpawn(go);
+	FinishSpawn(atom);
 }
 void EditorUI::SpawnCube() { SpawnPrimitive("Cube", "builtin:cube"); }
 void EditorUI::SpawnLight(int type, const char* atomName)
 {
-	Atom* go = new Atom(atomName);
+	Atom* atom = new Atom(atomName);
 	Light* l = new Light();
 	l->type = (Light::Type)type;   // menu passes the raw index
-	go->AddComponent(l);
-	FinishSpawn(go);
+	atom->AddComponent(l);
+	FinishSpawn(atom);
 }
 void EditorUI::SpawnEnvironment()
 {
-	Atom* go = new Atom("Environment");
-	go->AddComponent(new Environment());
-	FinishSpawn(go);
+	Atom* atom = new Atom("Environment");
+	atom->AddComponent(new Environment());
+	FinishSpawn(atom);
 }
 void EditorUI::SpawnReflectionProbe()
 {
-	Atom* go = new Atom("Reflection Probe");
-	go->AddComponent(new ReflectionProbe());
-	FinishSpawn(go);
+	Atom* atom = new Atom("Reflection Probe");
+	atom->AddComponent(new ReflectionProbe());
+	FinishSpawn(atom);
 }
 void EditorUI::SpawnCamera()
 {
-	Atom* go = new Atom("Camera");
+	Atom* atom = new Atom("Camera");
 	Camera* c = new Camera();
 	c->renderer = AppInstance::GetSingleton()->render;   // share the active renderer (avoids re-init / null deref)
-	go->AddComponent(c);
-	FinishSpawn(go);
+	atom->AddComponent(c);
+	FinishSpawn(atom);
 }
 
 // Second row under the main menu: tools (left) | PIE (center) | viewport mode (right).
@@ -126,21 +126,21 @@ void EditorUI::Toolbar()
 			if (ImGui::MenuItem(ICON_LC_PILL     " Capsule"))  SpawnPrimitive("Capsule",  "builtin:capsule");
 			if (ImGui::MenuItem(ICON_LC_IMAGE    " Sprite"))
 			{
-				Atom* go = new Atom("Sprite");
-				go->AddComponent(new Sprite());
-				FinishSpawn(go);
+				Atom* atom = new Atom("Sprite");
+				atom->AddComponent(new Sprite());
+				FinishSpawn(atom);
 			}
 			if (ImGui::MenuItem(ICON_LC_FRAME    " Canvas"))
 			{
-				Atom* go = new Atom("Canvas");
-				go->AddComponent(new Canvas());
-				FinishSpawn(go);
+				Atom* atom = new Atom("Canvas");
+				atom->AddComponent(new Canvas());
+				FinishSpawn(atom);
 			}
 			if (ImGui::MenuItem(ICON_LC_STICKER  " Decal"))
 			{
-				Atom* go = new Atom("Decal");
-				go->AddComponent(new Decal());
-				FinishSpawn(go);
+				Atom* atom = new Atom("Decal");
+				atom->AddComponent(new Decal());
+				FinishSpawn(atom);
 			}
 			if (ImGui::MenuItem(ICON_LC_VIDEO  " Camera")) SpawnCamera();
 			if (ImGui::BeginMenu(ICON_LC_LIGHTBULB " Light"))
@@ -170,7 +170,7 @@ void EditorUI::Toolbar()
 		{
 			if (app->playState == 0)   // snapshot scene + edit target on entering play
 			{
-				pieSnapshot  = app->currentScene->SaveToString();
+				pieSnapshot  = app->currentWorld->SaveToString();
 				pieWorldPath = app->currentWorldPath;
 			}
 			app->playState = 1;
@@ -189,10 +189,10 @@ void EditorUI::Toolbar()
 				// pointer dies), so re-resolve it by its stable id on the restored scene.
 				long selId = app->selectedInHieararchy ? app->selectedInHieararchy->id.id : 0;
 				app->selectedInHieararchy = nullptr;
-				app->currentScene->LoadFromString(pieSnapshot);   // restore scene on stop
+				app->currentWorld->LoadFromString(pieSnapshot);   // restore scene on stop
 				app->currentWorldPath = pieWorldPath;             // ...and the edit target (a script's
 				                                                  // Game.LoadWorld must not leak past Stop)
-				if (selId) app->selectedInHieararchy = app->currentScene->GetById(selId);
+				if (selId) app->selectedInHieararchy = app->currentWorld->GetById(selId);
 			}
 			app->playState = 0;
 		}
@@ -245,7 +245,7 @@ void EditorUI::Draw()
 			AppInstance* app = AppInstance::GetSingleton();
 			if (app->playState == 0)
 			{
-				pieSnapshot  = app->currentScene->SaveToString();
+				pieSnapshot  = app->currentWorld->SaveToString();
 				pieWorldPath = app->currentWorldPath;
 			}
 			app->playState = 1;
@@ -278,12 +278,12 @@ void EditorUI::Draw()
 	// update (physics + Component::FixedUpdate) runs on AppInstance's fixed-frequency
 	// thread — gated on playState internally, independent of the frame rate.
 	if (AppInstance::GetSingleton()->playState == 1)
-		AppInstance::GetSingleton()->currentScene->Update();
+		AppInstance::GetSingleton()->currentWorld->Update();
 
 	// Restore the selection saved in editor_state.json, once the scene is loaded (by stable id, recursive).
 	if (pendingSelectId)
 	{
-		if (Atom* a = AppInstance::GetSingleton()->currentScene->GetById(pendingSelectId))
+		if (Atom* a = AppInstance::GetSingleton()->currentWorld->GetById(pendingSelectId))
 			AppInstance::GetSingleton()->selectedInHieararchy = a;
 		pendingSelectId = 0;
 	}
@@ -399,7 +399,7 @@ void EditorUI::Redo()
 // placement (parentId 0 = root). Empty json = remove the atom.
 void EditorUI::ApplyAtomState(long id, long parentId, int index, const std::string& json)
 {
-	World* w = AppInstance::GetSingleton()->currentScene;
+	World* w = AppInstance::GetSingleton()->currentWorld;
 	w->RemoveAtomById(id);
 	if (!json.empty()) { if (Atom* a = LoadAtomFromString(json)) w->InsertAtom(a, parentId, index); }
 	AppInstance::GetSingleton()->selectedInHieararchy = w->GetById(id);   // null if it was removed
@@ -425,14 +425,14 @@ void EditorUI::TrackUndo()
 	if (editing && (!active || focusChanged))
 	{
 		editing = false;
-		Atom* a = editAtomId ? app->currentScene->GetById(editAtomId) : nullptr;
+		Atom* a = editAtomId ? app->currentWorld->GetById(editAtomId) : nullptr;
 		if (a)
 		{
 			std::string after = SaveAtomToString(a);
 			flushedAfter = after;
 			if (after != editBefore)                            // something actually changed on this atom
 			{
-				long id = editAtomId, parent = AtomParentId(a); int index = AtomIndex(app->currentScene, a);
+				long id = editAtomId, parent = AtomParentId(a); int index = AtomIndex(app->currentWorld, a);
 				std::string before = editBefore;
 				PushUndo("Edit " + a->GetName(),
 					[this, id, parent, index, before]{ ApplyAtomState(id, parent, index, before); },
@@ -476,7 +476,7 @@ void EditorUI::TrackUndo()
 void EditorUI::RecordAdd(Atom* a)
 {
 	if (!a) return;
-	World* w = AppInstance::GetSingleton()->currentScene;
+	World* w = AppInstance::GetSingleton()->currentWorld;
 	long id = a->id.id, parent = AtomParentId(a); int index = AtomIndex(w, a);
 	std::string json = SaveAtomToString(a);
 	PushUndo("Add " + a->GetName(),
@@ -487,7 +487,7 @@ void EditorUI::RecordAdd(Atom* a)
 void EditorUI::RecordReparent(Atom* a, long oldParent, int oldIndex)
 {
 	if (!a) return;
-	World* w = AppInstance::GetSingleton()->currentScene;
+	World* w = AppInstance::GetSingleton()->currentWorld;
 	long id = a->id.id, newParent = AtomParentId(a); int newIndex = AtomIndex(w, a);
 	if (oldParent == newParent && oldIndex == newIndex) return;
 	std::string json = SaveAtomToString(a);
@@ -499,7 +499,7 @@ void EditorUI::RecordReparent(Atom* a, long oldParent, int oldIndex)
 void EditorUI::RecordDelete(Atom* a)
 {
 	if (!a) return;
-	World* w = AppInstance::GetSingleton()->currentScene;
+	World* w = AppInstance::GetSingleton()->currentWorld;
 	long id = a->id.id, parent = AtomParentId(a); int index = AtomIndex(w, a);
 	std::string json = SaveAtomToString(a);   // capture BEFORE the atom is removed
 	PushUndo("Delete " + a->GetName(),
@@ -515,5 +515,5 @@ void EditorUI::DeleteSelectedAtom()
 	RecordDelete(a);                                     // serialize for undo first
 	long id = a->id.id;
 	app->selectedInHieararchy = nullptr;
-	app->currentScene->RemoveAtomById(id);               // deletes the atom + its subtree
+	app->currentWorld->RemoveAtomById(id);               // deletes the atom + its subtree
 }

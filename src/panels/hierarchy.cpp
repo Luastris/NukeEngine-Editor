@@ -10,21 +10,21 @@ static bool hierCI(const std::string& hay, const std::string& needle)
 	return low(hay).find(low(needle)) != std::string::npos;
 }
 
-const char* EditorUI::AtomIcon(Atom* go)
+const char* EditorUI::AtomIcon(Atom* atom)
 {
-	if (go->GetComponent<Camera>())       return ICON_LC_VIDEO;
-	if (Light* l = go->GetComponent<Light>())   // light by type: sun / bulb / spotlight
+	if (atom->GetComponent<Camera>())       return ICON_LC_VIDEO;
+	if (Light* l = atom->GetComponent<Light>())   // light by type: sun / bulb / spotlight
 		return l->type == 0 ? ICON_LC_SUN : (l->type == 2 ? ICON_LC_SPOTLIGHT : ICON_LC_LIGHTBULB);
-	if (go->GetComponent<MeshRenderer>()) return ICON_LC_BOX;
+	if (atom->GetComponent<MeshRenderer>()) return ICON_LC_BOX;
 	return ICON_LC_ATOM;
 }
 
-bool EditorUI::HierMatch(Atom* go)
+bool EditorUI::HierMatch(Atom* atom)
 {
 	std::string q = hierSearch;
 	if (q.empty()) return true;
-	if (hierCI(go->GetName(), q)) return true;
-	for (Component* c : go->components)
+	if (hierCI(atom->GetName(), q)) return true;
+	for (Component* c : atom->components)
 	{
 		if (!c) continue;
 		if (nuke::UnknownComponent* uc = dynamic_cast<nuke::UnknownComponent*>(c)) { if (hierCI(uc->typeName, q)) return true; }
@@ -34,10 +34,10 @@ bool EditorUI::HierMatch(Atom* go)
 	return false;
 }
 
-bool EditorUI::HierMatchDeep(Atom* go)
+bool EditorUI::HierMatchDeep(Atom* atom)
 {
-	if (HierMatch(go)) return true;
-	for (Atom* ch : go->children) if (ch && HierMatchDeep(ch)) return true;
+	if (HierMatch(atom)) return true;
+	for (Atom* ch : atom->children) if (ch && HierMatchDeep(ch)) return true;
 	return false;
 }
 
@@ -81,32 +81,32 @@ void EditorUI::HierGap(Atom* before)
 	ImGui::SetCursorScreenPos(saved);   // no extra height
 }
 
-void EditorUI::DrawAtomNode(Atom* go)
+void EditorUI::DrawAtomNode(Atom* atom)
 {
-	if (!go) return;
+	if (!atom) return;
 	AppInstance* app = AppInstance::GetSingleton();
 	bool searching = (hierSearch[0] != 0);
-	if (searching && !HierMatchDeep(go)) return;   // hide non-matching subtrees while searching
+	if (searching && !HierMatchDeep(atom)) return;   // hide non-matching subtrees while searching
 
-	ImGui::PushID(go);
+	ImGui::PushID(atom);
 	ImGuiTreeNodeFlags fl = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth;
-	if (app->selectedInHieararchy == go) fl |= ImGuiTreeNodeFlags_Selected;
-	if (go->children.empty())            fl |= ImGuiTreeNodeFlags_Leaf;
+	if (app->selectedInHieararchy == atom) fl |= ImGuiTreeNodeFlags_Selected;
+	if (atom->children.empty())            fl |= ImGuiTreeNodeFlags_Leaf;
 	if (searching)                       ImGui::SetNextItemOpen(true);   // reveal matches
 
 	// Non-native atoms carry their MOD's badge (world-merge provenance).
-	std::string rowLabel = std::string(AtomIcon(go)) + " " + go->GetName();
-	if (!go->modOrigin.empty()) rowLabel += "  [" + go->modOrigin + "]";
+	std::string rowLabel = std::string(AtomIcon(atom)) + " " + atom->GetName();
+	if (!atom->modOrigin.empty()) rowLabel += "  [" + atom->modOrigin + "]";
 	bool open = ImGui::TreeNodeEx(rowLabel.c_str(), fl);
-	if (!go->modOrigin.empty() && ImGui::IsItemHovered())
-		ImGui::SetTooltip("Added by mod: %s", go->modOrigin.c_str());
-	if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) app->selectedInHieararchy = go;
-	if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) { app->selectedInHieararchy = go; FocusSelected(); }
+	if (!atom->modOrigin.empty() && ImGui::IsItemHovered())
+		ImGui::SetTooltip("Added by mod: %s", atom->modOrigin.c_str());
+	if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) app->selectedInHieararchy = atom;
+	if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) { app->selectedInHieararchy = atom; FocusSelected(); }
 
 	if (ImGui::BeginDragDropSource())
 	{
-		ImGui::SetDragDropPayload("NUKE_ATOM", &go, sizeof(Atom*));
-		ImGui::TextUnformatted(go->GetName().c_str());
+		ImGui::SetDragDropPayload("NUKE_ATOM", &atom, sizeof(Atom*));
+		ImGui::TextUnformatted(atom->GetName().c_str());
 		ImGui::EndDragDropSource();
 	}
 	// Drop ON the row body = make a child; the gaps above/below handle reorder / level changes.
@@ -114,20 +114,20 @@ void EditorUI::DrawAtomNode(Atom* go)
 	{
 		if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("NUKE_ATOM"))
 		{
-			dndAtom = *(Atom**)p->Data; dndBefore = nullptr; dndParent = go; dndPending = true;   // deferred
+			dndAtom = *(Atom**)p->Data; dndBefore = nullptr; dndParent = atom; dndPending = true;   // deferred
 		}
 		if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("NUKE_ASSET"))
 		{
-			dndAsset = std::string((const char*)p->Data); dndAssetParent = go;   // deferred
+			dndAsset = std::string((const char*)p->Data); dndAssetParent = atom;   // deferred
 		}
 		ImGui::EndDragDropTarget();
 	}
 
-	HierGap(go);   // thin "insert before `go`" zone overlaid on this row's top edge (drag only)
+	HierGap(atom);   // thin "insert before `atom`" zone overlaid on this row's top edge (drag only)
 
 	if (open)
 	{
-		for (Atom* ch : go->children) DrawAtomNode(ch);
+		for (Atom* ch : atom->children) DrawAtomNode(ch);
 		ImGui::TreePop();
 	}
 	ImGui::PopID();
@@ -144,7 +144,7 @@ void EditorUI::winHierarchy()
 	ImGui::Separator();
 
 	// Editor camera pinned at the top, separate from the scene tree (not draggable/reparentable).
-	if (Atom* cam = app->currentScene->Get("Editor Camera"))
+	if (Atom* cam = app->currentWorld->Get("Editor Camera"))
 	{
 		bool sel = (app->selectedInHieararchy == cam);
 		if (ImGui::Selectable((std::string(ICON_LC_VIDEO) + " " + cam->GetName() + "##editorcam").c_str(), sel))
@@ -153,9 +153,9 @@ void EditorUI::winHierarchy()
 	}
 
 	// The scene tree (excludes the editor camera).
-	for (Atom* go : app->currentScene->GetHierarchy())
-		if (go && go->GetName() != "Editor Camera")
-			DrawAtomNode(go);
+	for (Atom* atom : app->currentWorld->GetHierarchy())
+		if (atom && atom->GetName() != "Editor Camera")
+			DrawAtomNode(atom);
 
 	// Empty area below: drop target for re-parenting to root / instantiating an asset at root.
 	ImVec2 rest = ImGui::GetContentRegionAvail();
@@ -196,17 +196,17 @@ void EditorUI::winHierarchy()
 		// Capture the old placement first so the move is undoable.
 		long oldParent = dndAtom->parent ? dndAtom->parent->id.id : 0;
 		int  oldIndex  = 0;
-		{ auto& lst = dndAtom->parent ? dndAtom->parent->children : app->currentScene->GetHierarchy();
+		{ auto& lst = dndAtom->parent ? dndAtom->parent->children : app->currentWorld->GetHierarchy();
 		  int i = 0; for (Atom* s : lst) { if (s == dndAtom) { oldIndex = i; break; } ++i; } }
 		Atom* moved = dndAtom;
-		if (dndBefore) app->currentScene->ReparentBefore(dndAtom, dndBefore);   // reorder: same parent, world unchanged
+		if (dndBefore) app->currentWorld->ReparentBefore(dndAtom, dndBefore);   // reorder: same parent, world unchanged
 		else
 		{
 			// Reparent under a new parent: keep the atom's WORLD pose (standard editor behaviour — the
 			// object stays put on screen instead of jumping into the parent's local space).
 			Transform& mt = moved->GetTransform();
 			Vector3 wp = mt.globalPosition(); Quaternion wr = mt.globalRotation(); Vector3 ws = mt.globalScale();
-			app->currentScene->Reparent(dndAtom, dndParent);
+			app->currentWorld->Reparent(dndAtom, dndParent);
 			mt.SetGlobal(wp, wr, ws);
 		}
 		RecordReparent(moved, oldParent, oldIndex);
@@ -214,7 +214,7 @@ void EditorUI::winHierarchy()
 	dndPending = false; dndAtom = dndBefore = dndParent = nullptr;
 	if (!dndAsset.empty())
 	{
-		if (Atom* a = DropAsset(dndAsset)) { if (dndAssetParent) app->currentScene->Reparent(a, dndAssetParent); }
+		if (Atom* a = DropAsset(dndAsset)) { if (dndAssetParent) app->currentWorld->Reparent(a, dndAssetParent); }
 		dndAsset.clear(); dndAssetParent = nullptr;
 	}
 

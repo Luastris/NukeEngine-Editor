@@ -27,9 +27,9 @@ static void SlicerApplyLive(nuke::Texture* t);
 // Preview-scene pool
 // ---------------------------------------------------------------------------
 
-EditorUI::PreviewScene* EditorUI::AcquirePreview()
+EditorUI::PreviewWorld* EditorUI::AcquirePreview()
 {
-	for (PreviewScene* s : pvPool)
+	for (PreviewWorld* s : pvPool)
 		if (!s->inUse)
 		{
 			s->inUse = true;
@@ -39,7 +39,7 @@ EditorUI::PreviewScene* EditorUI::AcquirePreview()
 	iRender* r = AppInstance::GetSingleton()->render;
 	if (!r) return nullptr;
 
-	PreviewScene* s = new PreviewScene();
+	PreviewWorld* s = new PreviewWorld();
 	s->rt = r->createRenderTarget(384, 384);
 	s->world = new World();
 	s->world->name = "Asset Preview";
@@ -73,7 +73,7 @@ EditorUI::PreviewScene* EditorUI::AcquirePreview()
 	return s;
 }
 
-void EditorUI::ReleasePreview(PreviewScene* s)
+void EditorUI::ReleasePreview(PreviewWorld* s)
 {
 	if (!s) return;
 	// Strip what the user staged; the scene skeleton (env/sun/mesh atom/camera) is reused.
@@ -116,7 +116,7 @@ static void SubtreeBounds(nuke::Atom* a, nuke::Vector3& c, float& r, bool& any)
 	for (nuke::Atom* ch : a->children) SubtreeBounds(ch, c, r, any);
 }
 
-void EditorUI::FramePreview(PreviewScene& s, Atom* subtree)
+void EditorUI::FramePreview(PreviewWorld& s, Atom* subtree)
 {
 	bool any = false;
 	Vector3 c(0, 0, 0); float r = 1.0f;
@@ -127,7 +127,7 @@ void EditorUI::FramePreview(PreviewScene& s, Atom* subtree)
 	s.dist = 0.0f;   // re-derive from radius on next draw
 }
 
-void EditorUI::DrawPreviewImage(PreviewScene& s, ImVec2 size)
+void EditorUI::DrawPreviewImage(PreviewWorld& s, ImVec2 size)
 {
 	iRender* r = AppInstance::GetSingleton()->render;
 	// NOTE: Camera::Init fills `transform`, NOT `atom` — check/use the transform.

@@ -131,12 +131,12 @@ void EditorUI::BrowserTree(const std::string& dir)
 }
 
 // Reconstruct a .nuprefab into the current world and select it.
-Atom* EditorUI::InstantiatePrefab(const std::string& path)
+Atom* EditorUI::SpawnPrefab(const std::string& path)
 {
 	if (Atom* a = nuke::LoadPrefab(path))
 	{
 		AppInstance* app = AppInstance::GetSingleton();
-		app->currentScene->Add(a);
+		app->currentWorld->Add(a);
 		app->selectedInHieararchy = a;
 		RecordAdd(a);
 		cout << "[editor]\tinstantiated prefab " << path << endl;
@@ -202,7 +202,7 @@ void EditorUI::EntryContextMenu(const std::string& path, bool isDir)
 			    || cext == ".ogg" || cext == ".wav" || cext == ".mp3" || cext == ".flac")
 			{
 				if (ImGui::MenuItem(ICON_LC_PENCIL_RULER " Open in Editor")) OpenAssetEditor(path);
-				if (cext == ".nuprefab" && ImGui::MenuItem(ICON_LC_PACKAGE_PLUS " Instantiate")) InstantiatePrefab(path);
+				if (cext == ".nuprefab" && ImGui::MenuItem(ICON_LC_PACKAGE_PLUS " Instantiate")) SpawnPrefab(path);
 				ImGui::Separator();
 			}
 			else if (IsTextFile(cext))
@@ -449,7 +449,7 @@ std::vector<std::string> EditorUI::FindDependents(const std::string& guid)
 			if (text.find(guid) != std::string::npos)
 				deps.push_back(bfs::relative(it->path(), root, ec).generic_string());
 		}
-	if (AppInstance::GetSingleton()->currentScene->SaveToString().find(guid) != std::string::npos)
+	if (AppInstance::GetSingleton()->currentWorld->SaveToString().find(guid) != std::string::npos)
 		deps.push_back("(current world)");
 	return deps;
 }
@@ -484,11 +484,11 @@ void EditorUI::UnlinkResource(const std::string& guid)
 	ResDB::getSingleton()->UnlinkGuid(guid);   // fix LOADED material templates first (shader/texture refs + Resolve)
 	// 1) live world (may be unsaved) — re-clones instances from the now-fixed templates
 	{
-		nlohmann::json j = nlohmann::json::parse(app->currentScene->SaveToString(), nullptr, false);
+		nlohmann::json j = nlohmann::json::parse(app->currentWorld->SaveToString(), nullptr, false);
 		if (!j.is_discarded() && UnlinkInJson(j, guid))
 		{
 			app->selectedInHieararchy = nullptr;
-			app->currentScene->LoadFromString(j.dump());
+			app->currentWorld->LoadFromString(j.dump());
 			if (!app->currentWorldPath.empty()) app->SaveWorld(app->currentWorldPath);
 		}
 	}
@@ -629,7 +629,7 @@ void EditorUI::AcceptAssetDropTarget()
 Atom* EditorUI::DropAsset(const std::string& path)
 {
 	std::string ext = bfs::path(path).extension().string();
-	if      (ext == ".nuprefab") return InstantiatePrefab(path);
+	if      (ext == ".nuprefab") return SpawnPrefab(path);
 	else if (ext == ".numesh")   return SpawnMeshAsset(path);
 	else if (ext == ".nuworld")  { OpenWorldFromBrowser(path); return nullptr; }
 	return nullptr;
@@ -693,7 +693,7 @@ void EditorUI::DropAssetOnAtom(Atom* a, const std::string& path)
 	if (!changed) return;
 	AppInstance::GetSingleton()->selectedInHieararchy = a;
 	std::string after = nuke::SaveAtomToString(a);
-	World* w = AppInstance::GetSingleton()->currentScene;
+	World* w = AppInstance::GetSingleton()->currentWorld;
 	long id = a->id.id, parent = a->parent ? a->parent->id.id : 0;
 	int index = 0; { auto& lst = a->parent ? a->parent->children : w->GetHierarchy(); int i = 0; for (Atom* s : lst) { if (s == a) { index = i; break; } ++i; } }
 	PushUndo(ext == ".numat" ? "Assign material" : "Assign texture",
@@ -708,14 +708,14 @@ Atom* EditorUI::SpawnMeshAsset(const std::string& path)
 	ResDB* db = ResDB::getSingleton();
 	if (Mesh* ex = db->GetMesh(m->guid)) { delete m; m = ex; }   // reuse the already-loaded asset
 	else                                  db->RegisterMesh(m);
-	Atom* go = new Atom(bfs::path(path).stem().string().c_str());
+	Atom* atom = new Atom(bfs::path(path).stem().string().c_str());
 	MeshRenderer* mr = new MeshRenderer();
-	go->AddComponent(mr);
+	atom->AddComponent(mr);
 	mr->meshGuid = m->guid; mr->mesh = m;
-	AppInstance::GetSingleton()->currentScene->Add(go);
-	AppInstance::GetSingleton()->selectedInHieararchy = go;
-	RecordAdd(go);
-	return go;
+	AppInstance::GetSingleton()->currentWorld->Add(atom);
+	AppInstance::GetSingleton()->selectedInHieararchy = atom;
+	RecordAdd(atom);
+	return atom;
 }
 
 void EditorUI::CreateFolderAsset(const std::string& folder)
@@ -1078,7 +1078,7 @@ void EditorUI::winBrowser()
 			return o + "..";
 		};
 		int i = 0;
-		if (!atRoot)   // ".." cell: DOUBLE-click = go up, drop a file here = move it up one level
+		if (!atRoot)   // ".." cell: DOUBLE-click = atom up, drop a file here = move it up one level
 		{
 			ImGui::PushID("up");
 			ImGui::BeginGroup();
@@ -1128,7 +1128,7 @@ void EditorUI::winBrowser()
 	else                             // List
 	{
 		int i = 0;
-		if (!atRoot)   // ".." row: DOUBLE-click = go up (same as every other row), drop a file here = move it up
+		if (!atRoot)   // ".." row: DOUBLE-click = atom up (same as every other row), drop a file here = move it up
 		{
 			bool upc = ImGui::Selectable(ICON_LC_CORNER_LEFT_UP "  ..", false, ImGuiSelectableFlags_AllowDoubleClick);
 			BrowserFolderDropTarget(cwd.parent_path().string());
