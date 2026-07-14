@@ -3,6 +3,7 @@
 #include <API/Model/Light.h>
 #include <API/Model/Environment.h>
 #include <API/Model/ReflectionProbe.h>
+#include <API/Model/Sprite.h>
 #include <API/Model/Jobs.h>   // PumpMain each editor frame (2.4)
 #include <cstring>            // strcmp (NUKE_PACKAGE_MOD=<name> dev hook)
 
@@ -114,6 +115,14 @@ void EditorUI::Toolbar()
 			if (ImGui::MenuItem(ICON_LC_SQUARE " Plane"))  SpawnPrimitive("Plane",  "builtin:plane");
 			if (ImGui::MenuItem(ICON_LC_CYLINDER " Cylinder")) SpawnPrimitive("Cylinder", "builtin:cylinder");
 			if (ImGui::MenuItem(ICON_LC_PILL     " Capsule"))  SpawnPrimitive("Capsule",  "builtin:capsule");
+			if (ImGui::MenuItem(ICON_LC_IMAGE    " Sprite"))
+			{
+				Atom* go = new Atom("Sprite");
+				go->AddComponent(new Sprite());
+				app->currentScene->Add(go);
+				app->selectedInHieararchy = go;
+				RecordAdd(go);
+			}
 			if (ImGui::MenuItem(ICON_LC_VIDEO  " Camera")) SpawnCamera();
 			if (ImGui::BeginMenu(ICON_LC_LIGHTBULB " Light"))
 			{
