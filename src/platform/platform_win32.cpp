@@ -11,6 +11,7 @@
 #include <shobjidl.h>   // IFileOpenDialog (folder picker)
 #include <string>
 #include <cstring>
+#include <interface/Importers.h>   // plugin importer extensions -> import dialog filter
 #pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "ole32.lib")
 
@@ -21,11 +22,30 @@ std::string EditorPickModelFile()
 	char file[1024] = "";
 	OPENFILENAMEA ofn = {};
 	ofn.lStructSize = sizeof(ofn);
-	ofn.lpstrFilter =
-		"All supported (models + images)\0*.obj;*.fbx;*.dae;*.gltf;*.glb;*.3ds;*.ply;*.stl;*.png;*.jpg;*.jpeg;*.tga;*.bmp;*.hdr;*.psd;*.gif\0"
-		"Models (*.obj;*.fbx;*.dae;*.gltf;*.glb;*.3ds;*.ply;*.stl)\0*.obj;*.fbx;*.dae;*.gltf;*.glb;*.3ds;*.ply;*.stl\0"
-		"Images (*.png;*.jpg;*.jpeg;*.tga;*.bmp;*.hdr;*.psd;*.gif)\0*.png;*.jpg;*.jpeg;*.tga;*.bmp;*.hdr;*.psd;*.gif\0"
-		"All files (*.*)\0*.*\0";
+
+	// Filter is built at RUNTIME so registered plugin importers (EPS/PSD/custom formats) show up
+	// alongside the built-in models + images. OPENFILENAME wants a double-null-terminated
+	// "label\0pattern\0..." block — build it in a std::string (embedded NULs are fine via c_str()).
+	const char* kModels = "*.obj;*.fbx;*.dae;*.gltf;*.glb;*.3ds;*.ply;*.stl";
+	const char* kImages = "*.png;*.jpg;*.jpeg;*.tga;*.bmp;*.hdr;*.psd;*.gif";
+	std::string pluginPats;
+	for (const nuke::AssetImporter& imp : nuke::AssetImporters())
+		for (const std::string& e : imp.exts) { pluginPats += "*"; pluginPats += e; pluginPats += ";"; }
+	if (!pluginPats.empty()) pluginPats.pop_back();   // trailing ';'
+
+	std::string allPats = std::string(kModels) + ";" + kImages;
+	if (!pluginPats.empty()) allPats += ";" + pluginPats;
+
+	std::string filt;
+	auto add = [&](const std::string& label, const std::string& pat) { filt += label; filt.push_back('\0'); filt += pat; filt.push_back('\0'); };
+	add("All supported", allPats);
+	add(std::string("Models (") + kModels + ")", kModels);
+	add(std::string("Images (") + kImages + ")", kImages);
+	if (!pluginPats.empty()) add(std::string("Plugin formats (") + pluginPats + ")", pluginPats);
+	add("All files (*.*)", "*.*");
+	filt.push_back('\0');   // block terminator
+
+	ofn.lpstrFilter = filt.c_str();
 	ofn.lpstrFile   = file;
 	ofn.nMaxFile    = sizeof(file);
 	ofn.lpstrTitle  = "Import asset";
