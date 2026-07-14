@@ -579,6 +579,10 @@ public:
 	bool ToolBtn(const char* icon, const char* tip, bool active, float w);
 	void SpawnEmpty();
 	void SpawnPrimitive(const char* atomName, const char* guid);
+	// Spawn placement: in front of the editor camera — on the surface it's looking at (ray hit) if any,
+	// else a fixed distance ahead. FinishSpawn positions + adds + selects + records a freshly-created atom.
+	Vector3 SpawnPos();
+	Atom*   FinishSpawn(Atom* go);
 	void SpawnCube();
 	void SpawnCamera();
 	void SpawnLight(int type, const char* atomName);   // type 0=dir 1=point 2=spot

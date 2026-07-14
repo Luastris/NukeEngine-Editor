@@ -25,66 +25,73 @@ bool EditorUI::ToolBtn(const char* icon, const char* tip, bool active, float w)
 	return clicked;
 }
 
-void EditorUI::SpawnEmpty()
+// Where a freshly-created object lands: on the surface the editor camera looks at (ray hit), else a
+// fixed distance straight ahead — so new atoms appear in view instead of at the world origin.
+Vector3 EditorUI::SpawnPos()
 {
 	AppInstance* app = AppInstance::GetSingleton();
-	Atom* go = new Atom("Empty");
+	if (editorCam && editorCam->transform && app->currentScene)
+	{
+		Transform* t = editorCam->transform;
+		Vector3 o = t->globalPosition(), f = t->direction();
+		float dist = 0.0f;
+		Atom* hit = app->currentScene->PickDist(o, f, dist);
+		double d = (hit && dist > 0.02f && dist < 1e29f) ? (double)dist : 8.0;
+		return Vector3(o.x + f.x * d, o.y + f.y * d, o.z + f.z * d);
+	}
+	return Vector3(0, 0, 0);
+}
+Atom* EditorUI::FinishSpawn(Atom* go)
+{
+	AppInstance* app = AppInstance::GetSingleton();
+	go->GetTransform().position = SpawnPos();   // in front of the camera / on the looked-at surface
 	app->currentScene->Add(go);
 	app->selectedInHieararchy = go;
 	RecordAdd(go);
+	return go;
+}
+
+void EditorUI::SpawnEmpty()
+{
+	FinishSpawn(new Atom("Empty"));
 }
 void EditorUI::SpawnPrimitive(const char* atomName, const char* guid)
 {
-	AppInstance* app = AppInstance::GetSingleton();
 	Atom* go = new Atom(atomName);
 	MeshRenderer* mr = new MeshRenderer();
 	go->AddComponent(mr);
 	mr->meshGuid = guid;
 	mr->mesh = ResDB::getSingleton()->GetMesh(guid);
-	app->currentScene->Add(go);
-	app->selectedInHieararchy = go;
-	RecordAdd(go);
+	FinishSpawn(go);
 }
 void EditorUI::SpawnCube() { SpawnPrimitive("Cube", "builtin:cube"); }
 void EditorUI::SpawnLight(int type, const char* atomName)
 {
-	AppInstance* app = AppInstance::GetSingleton();
 	Atom* go = new Atom(atomName);
 	Light* l = new Light();
 	l->type = (Light::Type)type;   // menu passes the raw index
 	go->AddComponent(l);
-	app->currentScene->Add(go);
-	app->selectedInHieararchy = go;
-	RecordAdd(go);
+	FinishSpawn(go);
 }
 void EditorUI::SpawnEnvironment()
 {
-	AppInstance* app = AppInstance::GetSingleton();
 	Atom* go = new Atom("Environment");
 	go->AddComponent(new Environment());
-	app->currentScene->Add(go);
-	app->selectedInHieararchy = go;
-	RecordAdd(go);
+	FinishSpawn(go);
 }
 void EditorUI::SpawnReflectionProbe()
 {
-	AppInstance* app = AppInstance::GetSingleton();
 	Atom* go = new Atom("Reflection Probe");
 	go->AddComponent(new ReflectionProbe());
-	app->currentScene->Add(go);
-	app->selectedInHieararchy = go;
-	RecordAdd(go);
+	FinishSpawn(go);
 }
 void EditorUI::SpawnCamera()
 {
-	AppInstance* app = AppInstance::GetSingleton();
 	Atom* go = new Atom("Camera");
 	Camera* c = new Camera();
-	c->renderer = app->render;          // share the active renderer (avoids re-init / null deref)
+	c->renderer = AppInstance::GetSingleton()->render;   // share the active renderer (avoids re-init / null deref)
 	go->AddComponent(c);
-	app->currentScene->Add(go);
-	app->selectedInHieararchy = go;
-	RecordAdd(go);
+	FinishSpawn(go);
 }
 
 // Second row under the main menu: tools (left) | PIE (center) | viewport mode (right).
@@ -121,25 +128,19 @@ void EditorUI::Toolbar()
 			{
 				Atom* go = new Atom("Sprite");
 				go->AddComponent(new Sprite());
-				app->currentScene->Add(go);
-				app->selectedInHieararchy = go;
-				RecordAdd(go);
+				FinishSpawn(go);
 			}
 			if (ImGui::MenuItem(ICON_LC_FRAME    " Canvas"))
 			{
 				Atom* go = new Atom("Canvas");
 				go->AddComponent(new Canvas());
-				app->currentScene->Add(go);
-				app->selectedInHieararchy = go;
-				RecordAdd(go);
+				FinishSpawn(go);
 			}
 			if (ImGui::MenuItem(ICON_LC_STICKER  " Decal"))
 			{
 				Atom* go = new Atom("Decal");
 				go->AddComponent(new Decal());
-				app->currentScene->Add(go);
-				app->selectedInHieararchy = go;
-				RecordAdd(go);
+				FinishSpawn(go);
 			}
 			if (ImGui::MenuItem(ICON_LC_VIDEO  " Camera")) SpawnCamera();
 			if (ImGui::BeginMenu(ICON_LC_LIGHTBULB " Light"))
