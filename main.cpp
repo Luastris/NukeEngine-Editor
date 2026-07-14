@@ -492,6 +492,7 @@ int main(int argc, char** argv)
     wd.backend     = config->window.backend;   // D3D11 / D3D12 (from config.json window.backend)
     LoadBuiltinShaders(render, "shaders");   // engine loads built-in shaders + feeds the renderer
     render->init(wd);
+    render->setVSync(config->window.vsync);   // honour config vsync (Game.SetVSync toggles it live)
     cout << "[main]\t\t\t" << "> Render: " << render << endl;
 
 	// Bring up the UI module (ImGui) — it renders through the renderer's neutral

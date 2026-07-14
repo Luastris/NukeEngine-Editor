@@ -41,6 +41,17 @@ next to the [NukeEngine](https://github.com/Luastris/NukeEngine) checkout; it li
 `VCPKG_ROOT` must be set. Run dir = `NukeEngine/x64/<Config>` (the post-build deploys
 `dist/` config/fonts and the vcpkg runtime DLLs there).
 
+## Diagnostics
+
+- **`NUKE_GPU_VALIDATION`** (environment variable, Debug builds): off by default. Set it to
+  `1` and relaunch to enable the D3D12 validation layer + DRED breadcrumbs — the real cause of
+  a device-removed / GPU fault then lands in the Console instead of a bare fence assert. It
+  costs frame rate, so leave it off unless the renderer is actually crashing (no rebuild needed
+  to flip it). Release builds never compile it in.
+- Benchmark FPS in **Release** — a Debug build runs an unoptimised Diligent core. Vertical sync
+  (config `window.vsync`, or `Game.SetVSync(false)` at runtime) caps the frame rate to the
+  display refresh.
+
 ## Extending
 
 The editor loads the same modules the engine does — write a plugin once and it works in
