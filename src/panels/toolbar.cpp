@@ -5,6 +5,7 @@
 #include <API/Model/ReflectionProbe.h>
 #include <API/Model/Sprite.h>
 #include <API/Model/Canvas.h>
+#include <API/Model/Decal.h>
 #include <API/Model/Jobs.h>   // PumpMain each editor frame (2.4)
 #include <cstring>            // strcmp (NUKE_PACKAGE_MOD=<name> dev hook)
 
@@ -128,6 +129,14 @@ void EditorUI::Toolbar()
 			{
 				Atom* go = new Atom("Canvas");
 				go->AddComponent(new Canvas());
+				app->currentScene->Add(go);
+				app->selectedInHieararchy = go;
+				RecordAdd(go);
+			}
+			if (ImGui::MenuItem(ICON_LC_STICKER  " Decal"))
+			{
+				Atom* go = new Atom("Decal");
+				go->AddComponent(new Decal());
 				app->currentScene->Add(go);
 				app->selectedInHieararchy = go;
 				RecordAdd(go);

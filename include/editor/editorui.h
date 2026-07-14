@@ -371,6 +371,9 @@ public:
 	std::string     inspAssetPath;                 // cache key: asset currently loaded into the inspector
 	long long       inspAssetMtime = 0;            // + its last-write time, so a reimport (same path) reloads
 	nuke::Texture*  inspTex = nullptr;             // cached loaded .nutex (usage editing)
+	float inspChroma[3] = { 1.0f, 0.0f, 1.0f };    // chroma-key colour (magenta default)
+	int   inspChromaTol = 24;                       // per-channel tolerance
+	bool  inspChromaPick = false;                   // eyedropper armed (click the preview to sample)
 	nuke::Material* inspMat = nullptr;             // cached loaded .numat (field editing)
 	// text editor (2.2): tabs of open text files; syntax from the file-type descriptor (0.6);
 	// Ctrl+S saves; saved shaders/materials hot-reload through the existing mtime watcher.
@@ -434,11 +437,27 @@ public:
 
 	// --- ASSET EDITORS: each .numat / .numesh / .nuprefab opens its OWN window with a
 	// live 3D view (own preview scene) and type-specific editing; saves back to the file.
+	// Snapshot of a texture's sprite-slice metadata (Sprite Slicer undo/redo — small enough to copy).
+	// margins ml/mr/mt/mb (per side), spacing sx/sy, 9-slice sl/sr/st/sb.
+	struct SpriteMeta { int cols=1,rows=1, ml=0,mr=0,mt=0,mb=0, sx=0,sy=0, sl=0,sr=0,st=0,sb=0; };
+
 	struct AssetEditorWin
 	{
 		std::string path, ext;              // full path + lowercase extension
 		PreviewScene* pv = nullptr;
 		Material* mat = nullptr;            // .numat: owned editing copy (saved to the file)
+		// .nutex Sprite Slicer: owned editing copy + GPU preview (downsampled) + 2D view state.
+		nuke::Texture* tex = nullptr;
+		uint64_t  texPreview = 0;
+		int       texPrevW = 0, texPrevH = 0;
+		int       slMode = 0;               // left dropdown: 0 = Sprite Slicer (room for more modes)
+		float     slZoomMul = 1.0f, slPanX = 0, slPanY = 0;   // view: zoom = fitScale*slZoomMul; pan in screen px
+		bool      slUserView = false;       // false = auto-fit+center each frame (adapts to resize); true once panned/zoomed
+		int       slDrag = 0;               // active ruler/grid-line drag handle (see DrawSpriteSlicer)
+		int       slFirst = 0, slCount = 0; float slFps = 12.0f;   // anim preview range
+		bool      slPlay = false; float slAcc = 0; int slCur = 0;
+		bool      slShowMirror = false; int slPadL = 0, slPadR = 0, slPadT = 0, slPadB = 0;   // cell-0 markup mirrored dimly
+		std::vector<SpriteMeta> undoS, redoS; SpriteMeta idleS; bool haveIdleS = false;
 		Atom*     prefabRoot = nullptr;     // .nuprefab: loaded subtree (lives in pv->world)
 		long      prefabSelId = 0;          // selected atom in the prefab tree (stable id)
 		int       previewMesh = 0;          // .numat: 0 sphere / 1 cube / 2 plane
@@ -467,11 +486,20 @@ public:
 		bool dirty = false, open = true, wantFocus = false;
 	};
 	std::vector<AssetEditorWin> assetEds;
+	// GPU preview handles pending destroy. A closing window's ImGui draw data (esp. its native viewport)
+	// can still reference the texture the frame it closes, so freeing it inline binds a dead ITextureView
+	// (crash in the D3D12 SRB). Defer a few frames until all in-flight draw data has been rendered.
+	std::vector<std::pair<uint64_t, int>> aeTexTrash;
 	int  aeCloseConfirm = -1;               // editor index awaiting the discard-changes modal
 	int  aeFocused   = -1;                  // asset-editor window focused THIS frame (undo routing)
 	int  textFocused = -1;                  // text-editor window focused THIS frame (undo routing)
 	void OpenAssetEditor(const std::string& path);   // open (or focus) the editor for an asset
 	void winAssetEditors();
+	void DrawSpriteSlicer(AssetEditorWin& w);        // .nutex Sprite Slicer body
+	void SlicerPushUndo(AssetEditorWin& w);          // snapshot sprite metadata for undo (coalesced)
+	// Decode + upload a texture's mip0 as a GPU preview, box-downsampled so the longest side <= cap
+	// (huge sheets would otherwise be a multi-MB VRAM spike). Returns the handle; fills the uploaded size.
+	uint64_t UploadTexPreview(nuke::Texture* t, int cap, int& outW, int& outH);
 	void AssetEditorUndo(AssetEditorWin& w);
 	void AssetEditorRedo(AssetEditorWin& w);
 	void ToggleAnimPreview(AssetEditorWin& w);   // prefab editor ▶/■ (mini-PIE, snapshot-restored)

@@ -5,6 +5,7 @@
 #include <interface/Services.h> // csclass picker: enumerate scripting providers
 #include <service/iScript.h>    // csclass picker: the C# backend lists its Electron classes
 #include <set>
+#include <memory>                // chroma-key undo snapshots (shared_ptr pixel blobs)
 #include <API/Model/Texture.h>  // asset inspector: .nutex usage/info
 #include <API/Model/Material.h> // asset inspector: .numat fields
 #include <API/Model/Light.h>       // asset preview world: sun
@@ -586,58 +587,65 @@ bool EditorUI::DrawFields(void* obj, nuke::TypeInfo* ti)
 		if (f.hidden) continue;   // serialized but not shown (e.g. script props JSON)
 		void* a = f.addr(obj);
 		const char* n = f.label.empty() ? f.name.c_str() : f.label.c_str();   // metadata display name
+		// Label BEFORE the field: draw the name, then the widget with a hidden id fills the rest of the
+		// row (ImGui's default puts the label AFTER the widget, which reads backwards).
+		std::string hid = "##" + f.name; const char* w = hid.c_str();
+		ImGui::AlignTextToFramePadding();
+		ImGui::TextUnformatted(n);
+		ImGui::SameLine(ImGui::GetContentRegionAvail().x * 0.42f);
+		ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
 		switch (f.type)
 		{
-		case nuke::FT::Bool:   changed |= ImGui::Checkbox(n, (bool*)a); break;
+		case nuke::FT::Bool:   changed |= ImGui::Checkbox(w, (bool*)a); break;
 		case nuke::FT::Int:
 			if (!f.enumLabels.empty())   // [[prop(enum=...)]] -> dropdown; the int is the selected index
 			{
 				int* iv = (int*)a; int cur = (*iv < 0 || *iv >= (int)f.enumLabels.size()) ? 0 : *iv;
-				if (ImGui::BeginCombo(n, f.enumLabels[cur].c_str()))
+				if (ImGui::BeginCombo(w, f.enumLabels[cur].c_str()))
 				{
 					for (int e = 0; e < (int)f.enumLabels.size(); ++e)
 						if (ImGui::Selectable(f.enumLabels[e].c_str(), e == cur)) { *iv = e; changed = true; }
 					ImGui::EndCombo();
 				}
 			}
-			else changed |= ImGui::InputInt(n, (int*)a);
+			else changed |= ImGui::InputInt(w, (int*)a);
 			break;
 		case nuke::FT::Float:
-			if (f.fmax > f.fmin) changed |= ImGui::SliderFloat(n, (float*)a, f.fmin, f.fmax);   // [[prop(min,max)]]
-			else                 changed |= ImGui::DragFloat(n, (float*)a, 0.05f);
+			if (f.fmax > f.fmin) changed |= ImGui::SliderFloat(w, (float*)a, f.fmin, f.fmax);   // [[prop(min,max)]]
+			else                 changed |= ImGui::DragFloat(w, (float*)a, 0.05f);
 			break;
-		case nuke::FT::Double: changed |= ImGui::InputDouble(n, (double*)a); break;
+		case nuke::FT::Double: changed |= ImGui::InputDouble(w, (double*)a); break;
 		case nuke::FT::String:
 		{
 			std::string* s = (std::string*)a;
-			if (!f.asset.empty()) { changed |= AssetPicker(n, *s, f.asset); break; }   // metadata-driven picker
+			if (!f.asset.empty()) { changed |= AssetPicker(w, *s, f.asset); break; }   // metadata-driven picker
 			char buf[256]; strncpy(buf, s->c_str(), 255); buf[255] = 0;
-			if (ImGui::InputText(n, buf, sizeof(buf))) { *s = buf; changed = true; }
+			if (ImGui::InputText(w, buf, sizeof(buf))) { *s = buf; changed = true; }
 			break;
 		}
 		case nuke::FT::Vec2:
 		{
 			Vector2* v = (Vector2*)a; float t[2] = { (float)v->x, (float)v->y };
-			if (ImGui::DragFloat2(n, t, 0.05f)) { v->x = t[0]; v->y = t[1]; changed = true; }
+			if (ImGui::DragFloat2(w, t, 0.05f)) { v->x = t[0]; v->y = t[1]; changed = true; }
 			break;
 		}
 		case nuke::FT::Vec3:
 		{
 			Vector3* v = (Vector3*)a; float t[3] = { (float)v->x, (float)v->y, (float)v->z };
-			if (ImGui::DragFloat3(n, t, 0.05f)) { v->x = t[0]; v->y = t[1]; v->z = t[2]; changed = true; }
+			if (ImGui::DragFloat3(w, t, 0.05f)) { v->x = t[0]; v->y = t[1]; v->z = t[2]; changed = true; }
 			break;
 		}
 		case nuke::FT::Vec4:
 		case nuke::FT::Quat:
 		{
 			Vector4* v = (Vector4*)a; float t[4] = { (float)v->x, (float)v->y, (float)v->z, (float)v->w };
-			if (ImGui::DragFloat4(n, t, 0.05f)) { v->x = t[0]; v->y = t[1]; v->z = t[2]; v->w = t[3]; changed = true; }
+			if (ImGui::DragFloat4(w, t, 0.05f)) { v->x = t[0]; v->y = t[1]; v->z = t[2]; v->w = t[3]; changed = true; }
 			break;
 		}
 		case nuke::FT::Color:
 		{
 			Color* c = (Color*)a; float t[4] = { (float)c->r, (float)c->g, (float)c->b, (float)c->a };
-			if (ImGui::ColorEdit4(n, t)) { c->r = t[0]; c->g = t[1]; c->b = t[2]; c->a = t[3]; changed = true; }
+			if (ImGui::ColorEdit4(w, t)) { c->r = t[0]; c->g = t[1]; c->b = t[2]; c->a = t[3]; changed = true; }
 			break;
 		}
 		default: break;
@@ -926,13 +934,37 @@ void EditorUI::DrawAssetInspector(const std::string& path)
 		inspAssetPath = path; inspAssetMtime = mtime;
 		if      (ext == ".nutex") inspTex = nuke::Texture::LoadFromFile(path);
 		else if (ext == ".numat") inspMat = nuke::Material::LoadFromFile(path);
-		// Texture preview: decode mip0 to RGBA8 and upload once per selection/change.
+		// Texture preview: decode mip0 to RGBA8 and upload once per selection/change. Huge source
+		// textures (multi-thousand-px sprite sheets) are box-downsampled to a 2048 cap first: a full
+		// 7000x2628 preview is a 73 MB GPU upload that spikes VRAM on every edit — pointless for a
+		// panel-width thumbnail, and the spike could starve real scene texture uploads.
 		if (inspTex && !inspTex->renderTexture)
 			if (iRender* r = AppInstance::GetSingleton()->render)
 			{
 				std::vector<unsigned char> rgba = inspTex->DecodeRGBA();
-				if (!rgba.empty())
-					inspTexPreviewId = r->createTexture2D(rgba.data(), inspTex->width, inspTex->height);
+				int pw = inspTex->width, ph = inspTex->height;
+				if (!rgba.empty() && pw > 0 && ph > 0)
+				{
+					const int cap = 2048;
+					if (pw > cap || ph > cap)
+					{
+						float s = (float)cap / (float)(pw > ph ? pw : ph);
+						int dw = (int)(pw * s); if (dw < 1) dw = 1;
+						int dh = (int)(ph * s); if (dh < 1) dh = 1;
+						std::vector<unsigned char> ds((size_t)dw * dh * 4);
+						for (int y = 0; y < dh; ++y)
+							for (int x = 0; x < dw; ++x)
+							{
+								int sx = (int)(x / s); if (sx >= pw) sx = pw - 1;
+								int sy = (int)(y / s); if (sy >= ph) sy = ph - 1;
+								const unsigned char* src = &rgba[((size_t)sy * pw + sx) * 4];
+								unsigned char* dst = &ds[((size_t)y * dw + x) * 4];
+								dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2]; dst[3] = src[3];
+							}
+						rgba.swap(ds); pw = dw; ph = dh;
+					}
+					inspTexPreviewId = r->createTexture2D(rgba.data(), pw, ph);
+				}
 			}
 	}
 
@@ -960,7 +992,24 @@ void EditorUI::DrawAssetInspector(const std::string& path)
 			float w = ImGui::GetContentRegionAvail().x;
 			if (w > 384.0f) w = 384.0f;
 			float h = (inspTex->width > 0) ? w * (float)inspTex->height / (float)inspTex->width : w;
+			ImVec2 imgTL = ImGui::GetCursorScreenPos();
 			ImGui::Image((ImTextureID)inspTexPreviewId, ImVec2(w, h));
+			// Eyedropper: while armed, clicking the preview samples that texel's colour into the chroma key.
+			if (inspChromaPick && ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && w > 0 && h > 0)
+			{
+				float u = (ImGui::GetIO().MousePos.x - imgTL.x) / w, v = (ImGui::GetIO().MousePos.y - imgTL.y) / h;
+				std::vector<unsigned char> full = inspTex->DecodeRGBA();
+				int tw = inspTex->width, th = inspTex->height;
+				if (!full.empty() && tw > 0 && th > 0)
+				{
+					int px = (int)(u * tw); if (px < 0) px = 0; if (px >= tw) px = tw - 1;
+					int py = (int)(v * th); if (py < 0) py = 0; if (py >= th) py = th - 1;
+					const unsigned char* s = &full[((size_t)py * tw + px) * 4];
+					inspChroma[0] = s[0] / 255.0f; inspChroma[1] = s[1] / 255.0f; inspChroma[2] = s[2] / 255.0f;
+				}
+				inspChromaPick = false;
+			}
+			if (inspChromaPick) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
 			ImGui::Spacing();
 		}
 		const char* fmt = inspTex->format == nuke::Texture::FMT_BC1 ? "BC1" : inspTex->format == nuke::Texture::FMT_BC3 ? "BC3"
@@ -968,7 +1017,7 @@ void EditorUI::DrawAssetInspector(const std::string& path)
 		ImGui::Text("%d x %d   %s   %d mip(s)", inspTex->width, inspTex->height, fmt, inspTex->mipCount);
 		if (inspTex->frameCount > 1) ImGui::Text("Animated: %d frames", inspTex->frameCount);
 		ImGui::Spacing();
-		const char* usages[] = { "Color (sRGB)", "Normal Map", "Data (linear)", "Emissive (sRGB)" };
+		const char* usages[] = { "Color (sRGB)", "Normal Map", "Data (linear)", "Emissive (sRGB)", "Sprite (sheet)" };
 		int u = inspTex->usage;
 		if (ImGui::Combo("Texture Type", &u, usages, IM_ARRAYSIZE(usages)) && u != inspTex->usage)
 		{
@@ -1003,6 +1052,15 @@ void EditorUI::DrawAssetInspector(const std::string& path)
 
 		// Compression override — re-compresses the .nutex in place (quality vs size). Normals default to BC5 (8bpp);
 		// BC1 halves the size but is blocky. Applied immediately (decode -> re-encode) + live in the renderer.
+		if (inspTex->usage == nuke::Texture::UsageSprite)   // grid/margin/spacing/9-slice live in the dedicated slicer
+		{
+			if (ImGui::Button(ICON_LC_GRID_2X2 " Open Sprite Slicer")) OpenAssetEditor(path);
+			ImGui::TextDisabled("Grid %dx%d  ·  margin %d/%d/%d/%d  ·  spacing %d,%d", inspTex->spriteColumns, inspTex->spriteRows,
+				inspTex->spriteMarginLeft, inspTex->spriteMarginRight, inspTex->spriteMarginTop, inspTex->spriteMarginBottom,
+				inspTex->spriteSpacingX, inspTex->spriteSpacingY);
+			ImGui::TextDisabled("Slice the sheet visually (rulers, animation preview, 9-slice) in the slicer.");
+		}
+
 		if (inspTex->format != nuke::Texture::FMT_RGBA8)
 		{
 			bool isNormal = (inspTex->usage == nuke::Texture::UsageNormal);
@@ -1030,6 +1088,48 @@ void EditorUI::DrawAssetInspector(const std::string& path)
 				PushUndo("Texture compression", [applyFmt, before]{ applyFmt(before); }, [applyFmt, after]{ applyFmt(after); }, false);   // asset edit, not the world
 			}
 			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Re-compress now. BC5 = 8 bpp (normals, quality); BC1 = 4 bpp (half the size, blocky). BC1<->BC5 is lossy.");
+		}
+
+		// Chroma key: knock out a flat background colour (sprites shot on green/magenta) -> transparent alpha.
+		if (ImGui::CollapsingHeader("Chroma Key"))
+		{
+			ImGui::SetNextItemWidth(120);
+			ImGui::ColorEdit3("##chroma", inspChroma, ImGuiColorEditFlags_NoInputs);
+			ImGui::SameLine();
+			if (ImGui::Button(inspChromaPick ? "Picking\xE2\x80\xA6 (click image)" : "Pick")) inspChromaPick = !inspChromaPick;
+			ImGui::SetNextItemWidth(160); ImGui::SliderInt("Tolerance", &inspChromaTol, 0, 128);
+			if (ImGui::Button("Apply Chroma Key") && inspTex)
+			{
+				// Writes pixels/format/mip to the file + the live ResDB copy, then re-uploads. Used by undo/redo too.
+				auto setBlob = [this, path](std::shared_ptr<std::vector<unsigned char>> px, int fmt, int mip) {
+					bool owned = false;
+					nuke::Texture* t = (inspAssetPath == path && inspTex) ? inspTex : nullptr;
+					if (!t) { t = nuke::Texture::LoadFromFile(path); owned = true; }
+					if (!t) return;
+					t->pixels = *px; t->format = fmt; t->mipCount = mip; t->SaveToFile(path);
+					if (nuke::Texture* live = nuke::ResDB::getSingleton()->GetTexture(t->guid)) {
+						if (live != t) { live->pixels = *px; live->format = fmt; live->mipCount = mip; }
+						if (iRender* r = AppInstance::GetSingleton()->render) r->invalidateTexture(live);
+					}
+					if (owned) delete t;
+				};
+				auto before = std::make_shared<std::vector<unsigned char>>(inspTex->pixels);
+				int bfmt = inspTex->format, bmip = inspTex->mipCount;
+				int kr = (int)(inspChroma[0] * 255 + 0.5f), kg = (int)(inspChroma[1] * 255 + 0.5f), kb = (int)(inspChroma[2] * 255 + 0.5f);
+				if (inspTex->ApplyChromaKey(kr, kg, kb, inspChromaTol))
+				{
+					inspTex->SaveToFile(path);
+					auto after = std::make_shared<std::vector<unsigned char>>(inspTex->pixels);
+					int afmt = inspTex->format, amip = inspTex->mipCount;
+					if (nuke::Texture* live = nuke::ResDB::getSingleton()->GetTexture(inspTex->guid)) {
+						if (live != inspTex) { live->pixels = inspTex->pixels; live->format = afmt; live->mipCount = amip; }
+						if (iRender* r = AppInstance::GetSingleton()->render) r->invalidateTexture(live);
+					}
+					PushUndo("Chroma key", [setBlob, before, bfmt, bmip]{ setBlob(before, bfmt, bmip); },
+					                       [setBlob, after, afmt, amip]{ setBlob(after, afmt, amip); }, false);
+				}
+			}
+			ImGui::TextDisabled("Pick the background colour (or eyedrop the preview), then Apply.\nBC textures re-encode to BC3 to carry alpha.");
 		}
 	}
 	else if (ext == ".numat" && inspMat)

@@ -6,6 +6,7 @@
 // destroyRenderTarget: closing an editor returns its scene for reuse.
 #include <editor/editorui.h>
 #include <API/Model/Material.h>
+#include <API/Model/Texture.h>   // Sprite Slicer (.nutex): grid/margin/spacing + SpriteCellRect
 #include <API/Model/Light.h>
 #include <API/Model/Environment.h>
 #include <API/Model/Prefab.h>
@@ -15,6 +16,12 @@
 #include <glm/gtx/matrix_decompose.hpp>   // prefab gizmo: decompose the manipulated matrix
 #include <glm/gtc/type_ptr.hpp>
 namespace bfs = boost::filesystem;
+
+// Sprite-slice metadata helpers (defined lower, near the slicer) — forward-declared so the undo/redo
+// handlers above the definitions can use them.
+static EditorUI::SpriteMeta SnapMeta(const nuke::Texture* t);
+static void ApplyMeta(nuke::Texture* t, const EditorUI::SpriteMeta& m);
+static void SlicerApplyLive(nuke::Texture* t);
 
 // ---------------------------------------------------------------------------
 // Preview-scene pool
@@ -341,6 +348,12 @@ void EditorUI::AssetEditorUndo(AssetEditorWin& w)
 		delete w.idleM; w.idleM = w.mat->Clone();
 		w.editing = false;
 	}
+	else if (w.ext == ".nutex" && w.tex && !w.undoS.empty())
+	{
+		w.redoS.push_back(SnapMeta(w.tex));
+		ApplyMeta(w.tex, w.undoS.back()); w.undoS.pop_back();
+		w.idleS = SnapMeta(w.tex); SlicerApplyLive(w.tex); w.dirty = true;
+	}
 }
 
 void EditorUI::AssetEditorRedo(AssetEditorWin& w)
@@ -361,6 +374,75 @@ void EditorUI::AssetEditorRedo(AssetEditorWin& w)
 		delete w.idleM; w.idleM = w.mat->Clone();
 		w.editing = false;
 	}
+	else if (w.ext == ".nutex" && w.tex && !w.redoS.empty())
+	{
+		w.undoS.push_back(SnapMeta(w.tex));
+		ApplyMeta(w.tex, w.redoS.back()); w.redoS.pop_back();
+		w.idleS = SnapMeta(w.tex); SlicerApplyLive(w.tex); w.dirty = true;
+	}
+}
+
+uint64_t EditorUI::UploadTexPreview(nuke::Texture* t, int cap, int& outW, int& outH)
+{
+	outW = outH = 0;
+	if (!t || t->renderTexture) return 0;
+	iRender* r = AppInstance::GetSingleton()->render; if (!r) return 0;
+	std::vector<unsigned char> rgba = t->DecodeRGBA();
+	int pw = t->width, ph = t->height;
+	if (rgba.empty() || pw <= 0 || ph <= 0) return 0;
+	if (pw > cap || ph > cap)   // box-downsample so the longest side <= cap
+	{
+		float s = (float)cap / (float)(pw > ph ? pw : ph);
+		int dw = (int)(pw * s); if (dw < 1) dw = 1;
+		int dh = (int)(ph * s); if (dh < 1) dh = 1;
+		std::vector<unsigned char> ds((size_t)dw * dh * 4);
+		for (int y = 0; y < dh; ++y)
+			for (int x = 0; x < dw; ++x)
+			{
+				int sx = (int)(x / s); if (sx >= pw) sx = pw - 1;
+				int sy = (int)(y / s); if (sy >= ph) sy = ph - 1;
+				const unsigned char* src = &rgba[((size_t)sy * pw + sx) * 4];
+				unsigned char* dst = &ds[((size_t)y * dw + x) * 4];
+				dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2]; dst[3] = src[3];
+			}
+		rgba.swap(ds); pw = dw; ph = dh;
+	}
+	outW = pw; outH = ph;
+	return r->createTexture2D(rgba.data(), pw, ph);
+}
+
+// Sprite-slice metadata <-> its snapshot struct (single place that lists the fields).
+static EditorUI::SpriteMeta SnapMeta(const nuke::Texture* t)
+{
+	return { t->spriteColumns, t->spriteRows,
+	         t->spriteMarginLeft, t->spriteMarginRight, t->spriteMarginTop, t->spriteMarginBottom,
+	         t->spriteSpacingX, t->spriteSpacingY, t->sliceLeft, t->sliceRight, t->sliceTop, t->sliceBottom };
+}
+static void ApplyMeta(nuke::Texture* t, const EditorUI::SpriteMeta& m)
+{
+	t->spriteColumns = m.cols; t->spriteRows = m.rows;
+	t->spriteMarginLeft = m.ml; t->spriteMarginRight = m.mr; t->spriteMarginTop = m.mt; t->spriteMarginBottom = m.mb;
+	t->spriteSpacingX = m.sx; t->spriteSpacingY = m.sy;
+	t->sliceLeft = m.sl; t->sliceRight = m.sr; t->sliceTop = m.st; t->sliceBottom = m.sb;
+}
+// Mirror the edited slice metadata onto the live ResDB texture so scene sprites re-slice immediately
+// (int fields only — no pixel re-upload, no cache invalidation).
+static void SlicerApplyLive(nuke::Texture* t)
+{
+	if (!t || t->guid.empty()) return;
+	if (nuke::Texture* live = nuke::ResDB::getSingleton()->GetTexture(t->guid))
+		if (live != t) ApplyMeta(live, SnapMeta(t));
+}
+
+// Call AFTER committing a slice change: records the pre-change baseline (w.idleS) then re-baselines.
+void EditorUI::SlicerPushUndo(AssetEditorWin& w)
+{
+	if (!w.tex) return;
+	w.undoS.push_back(w.idleS);
+	w.redoS.clear();
+	w.idleS = SnapMeta(w.tex);
+	w.dirty = true;
+	SlicerApplyLive(w.tex);
 }
 
 void EditorUI::OpenAssetEditor(const std::string& path)
@@ -371,12 +453,26 @@ void EditorUI::OpenAssetEditor(const std::string& path)
 	std::string ext = bfs::path(path).extension().string();
 	for (char& c : ext) c = (char)std::tolower((unsigned char)c);
 	const bool isAudio = (ext == ".ogg" || ext == ".wav" || ext == ".mp3" || ext == ".flac");
-	if (ext != ".numat" && ext != ".numesh" && ext != ".nuprefab" && !isAudio) return;
+	if (ext != ".numat" && ext != ".numesh" && ext != ".nuprefab" && ext != ".nutex" && !isAudio) return;
 
 	if (isAudio)   // audio preview: no 3D scene — just the file path + a Preview-bus voice
 	{
 		AssetEditorWin w;
 		w.path = path; w.ext = ext; w.wantFocus = true;
+		assetEds.push_back(std::move(w));
+		return;
+	}
+
+	if (ext == ".nutex")   // Sprite Slicer: 2D — no preview scene, just an owned texture + a GPU preview
+	{
+		AssetEditorWin w;
+		w.path = path; w.ext = ext; w.wantFocus = true;
+		w.tex = nuke::Texture::LoadFromFile(path);
+		if (!w.tex) return;
+		if (w.tex->usage != nuke::Texture::UsageSprite) w.tex->usage = nuke::Texture::UsageSprite;  // opening it in the slicer implies it IS a sprite
+		w.texPreview = UploadTexPreview(w.tex, 2048, w.texPrevW, w.texPrevH);
+		w.slFirst = 0; w.slCount = w.tex->SpriteCount();
+		w.idleS = SnapMeta(w.tex);
 		assetEds.push_back(std::move(w));
 		return;
 	}
@@ -418,6 +514,265 @@ void EditorUI::OpenAssetEditor(const std::string& path)
 		FramePreview(*w.pv, w.prefabRoot);
 	}
 	assetEds.push_back(std::move(w));
+}
+
+// --- dashed helpers for the slicer grid overlay ---
+static void DashLine(ImDrawList* dl, ImVec2 a, ImVec2 b, ImU32 col, float th, float dash, float gap)
+{
+	float dx = b.x - a.x, dy = b.y - a.y, len = sqrtf(dx * dx + dy * dy);
+	if (len < 0.001f) return;
+	float ux = dx / len, uy = dy / len, step = dash + gap;
+	for (float d = 0; d < len; d += step)
+	{
+		float e = d + dash; if (e > len) e = len;
+		dl->AddLine(ImVec2(a.x + ux * d, a.y + uy * d), ImVec2(a.x + ux * e, a.y + uy * e), col, th);
+	}
+}
+static void DashRect(ImDrawList* dl, ImVec2 p0, ImVec2 p1, ImU32 col, float th)
+{
+	DashLine(dl, ImVec2(p0.x, p0.y), ImVec2(p1.x, p0.y), col, th, 6, 4);
+	DashLine(dl, ImVec2(p1.x, p0.y), ImVec2(p1.x, p1.y), col, th, 6, 4);
+	DashLine(dl, ImVec2(p1.x, p1.y), ImVec2(p0.x, p1.y), col, th, 6, 4);
+	DashLine(dl, ImVec2(p0.x, p1.y), ImVec2(p0.x, p0.y), col, th, 6, 4);
+}
+
+// Sprite Slicer body (mode 0): a GIMP-style 2D editor for the sheet. Left = properties (drag OR type),
+// centre = the sheet under a real ruler with draggable margin edges + grid lines, right = live cell preview.
+// All cell geometry comes from Texture::SpriteCellRect (shared with the runtime SpriteAnimator), so what you
+// mark here is exactly what plays. View auto-fits (adapts to window resize) until you zoom/pan.
+void EditorUI::DrawSpriteSlicer(AssetEditorWin& w)
+{
+	nuke::Texture* t = w.tex;
+	if (!t) { ImGui::TextDisabled("No texture."); return; }
+	ImGuiIO& io = ImGui::GetIO();
+
+	auto clampGrid = [&]{
+		if (t->spriteColumns < 1) t->spriteColumns = 1; if (t->spriteColumns > 256) t->spriteColumns = 256;
+		if (t->spriteRows    < 1) t->spriteRows    = 1; if (t->spriteRows    > 256) t->spriteRows    = 256;
+		int* m[] = { &t->spriteMarginLeft,&t->spriteMarginRight,&t->spriteMarginTop,&t->spriteMarginBottom,
+		             &t->spriteSpacingX,&t->spriteSpacingY,&t->sliceLeft,&t->sliceRight,&t->sliceTop,&t->sliceBottom };
+		for (int* p : m) { if (*p < 0) *p = 0; }
+	};
+
+	// ---- header ----
+	ImGui::SetNextItemWidth(150);
+	const char* modes[] = { "Sprite Slicer" };
+	ImGui::Combo("##mode", &w.slMode, modes, IM_ARRAYSIZE(modes));
+	ImGui::SameLine(); ImGui::TextDisabled("%d x %d px", t->width, t->height);
+	ImGui::SameLine(); if (ImGui::SmallButton("Fit")) w.slUserView = false;
+	ImGui::Separator();
+
+	// advance the preview clock (used by both the canvas highlight and the right preview)
+	int nCells = t->SpriteCount();
+	if (w.slFirst < 0) w.slFirst = 0; if (w.slFirst >= nCells) w.slFirst = nCells - 1;
+	if (w.slCount < 1) w.slCount = 1; if (w.slCount > nCells - w.slFirst) w.slCount = nCells - w.slFirst;
+	if (w.slPlay && w.slFps > 0 && w.slCount > 1) {
+		w.slAcc += io.DeltaTime; float dur = 1.0f / w.slFps;
+		while (w.slAcc >= dur) { w.slAcc -= dur; w.slCur = (w.slCur + 1) % w.slCount; }
+	} else if (!w.slPlay) { w.slCur = 0; w.slAcc = 0; }
+	int activeCell = w.slFirst + (w.slCount > 0 ? (w.slCur % w.slCount) : 0);
+	int ax0 = 0, ay0 = 0, acw = 0, ach = 0; bool haveActive = t->SpriteCellRect(activeCell, ax0, ay0, acw, ach);
+
+	// ===== LEFT: properties (labels left, drag-to-scrub or double-click to type) =====
+	ImGui::BeginChild("sl_props", ImVec2(232, 0), ImGuiChildFlags_ResizeX | ImGuiChildFlags_Borders);
+	auto Row = [&](const char* label, int* v, int lo, int hi){
+		ImGui::TableNextRow();
+		ImGui::TableSetColumnIndex(0); ImGui::AlignTextToFramePadding(); ImGui::TextUnformatted(label);
+		ImGui::TableSetColumnIndex(1); ImGui::SetNextItemWidth(-1);
+		ImGui::PushID(label);
+		if (ImGui::DragInt("##d", v, 1.0f, lo, hi)) { if (*v < lo) *v = lo; if (*v > hi) *v = hi; w.dirty = true; SlicerApplyLive(t); }
+		if (ImGui::IsItemDeactivatedAfterEdit()) SlicerPushUndo(w);
+		ImGui::PopID();
+	};
+	auto Table = [&](const char* id){
+		if (!ImGui::BeginTable(id, 2, ImGuiTableFlags_SizingStretchProp)) return false;
+		ImGui::TableSetupColumn("l", ImGuiTableColumnFlags_WidthFixed, 88);
+		ImGui::TableSetupColumn("v", ImGuiTableColumnFlags_WidthStretch);
+		return true;
+	};
+	ImGui::SeparatorText("Grid");
+	if (Table("sl_grid")) {
+		Row("Columns", &t->spriteColumns, 1, 256);
+		Row("Rows",    &t->spriteRows,    1, 256);
+		Row("Margin L", &t->spriteMarginLeft,   0, t->width);
+		Row("Margin R", &t->spriteMarginRight,  0, t->width);
+		Row("Margin T", &t->spriteMarginTop,    0, t->height);
+		Row("Margin B", &t->spriteMarginBottom, 0, t->height);
+		Row("Spacing X", &t->spriteSpacingX, 0, t->width);
+		Row("Spacing Y", &t->spriteSpacingY, 0, t->height);
+		ImGui::EndTable();
+	}
+	ImGui::SeparatorText("9-Slice");
+	if (Table("sl_9s")) {
+		Row("Left",   &t->sliceLeft,   0, t->width);
+		Row("Right",  &t->sliceRight,  0, t->width);
+		Row("Top",    &t->sliceTop,    0, t->height);
+		Row("Bottom", &t->sliceBottom, 0, t->height);
+		ImGui::EndTable();
+	}
+	ImGui::SeparatorText("Animation");
+	if (Table("sl_anim")) {
+		ImGui::TableNextRow(); ImGui::TableSetColumnIndex(0); ImGui::AlignTextToFramePadding(); ImGui::TextUnformatted("First");
+		ImGui::TableSetColumnIndex(1); ImGui::SetNextItemWidth(-1); ImGui::DragInt("##first", &w.slFirst, 1.0f, 0, nCells - 1);
+		ImGui::TableNextRow(); ImGui::TableSetColumnIndex(0); ImGui::AlignTextToFramePadding(); ImGui::TextUnformatted("Count");
+		ImGui::TableSetColumnIndex(1); ImGui::SetNextItemWidth(-1); ImGui::DragInt("##count", &w.slCount, 1.0f, 1, nCells);
+		ImGui::TableNextRow(); ImGui::TableSetColumnIndex(0); ImGui::AlignTextToFramePadding(); ImGui::TextUnformatted("FPS");
+		ImGui::TableSetColumnIndex(1); ImGui::SetNextItemWidth(-1); ImGui::DragFloat("##fps", &w.slFps, 0.5f, 0, 120, "%.0f");
+		ImGui::EndTable();
+	}
+	if (ImGui::Button(w.slPlay ? "Pause" : "Play", ImVec2(70, 0))) w.slPlay = !w.slPlay;
+	ImGui::SameLine(); ImGui::Checkbox("Mirror cell-0", &w.slShowMirror);
+	if (w.slShowMirror && Table("sl_pad")) {
+		auto PadRow = [&](const char* label, int* v){
+			ImGui::TableNextRow(); ImGui::TableSetColumnIndex(0); ImGui::AlignTextToFramePadding(); ImGui::TextUnformatted(label);
+			ImGui::TableSetColumnIndex(1); ImGui::SetNextItemWidth(-1); ImGui::PushID(label); ImGui::DragInt("##p", v, 1.0f, 0, t->width); if (*v < 0) *v = 0; ImGui::PopID();
+		};
+		PadRow("Pad L", &w.slPadL); PadRow("Pad R", &w.slPadR); PadRow("Pad T", &w.slPadT); PadRow("Pad B", &w.slPadB);
+		ImGui::EndTable();
+	}
+	clampGrid();
+	ImGui::EndChild();
+
+	// ===== CENTRE: ruler + sheet =====
+	ImGui::SameLine();
+	ImGui::BeginChild("sl_canvas", ImVec2(-190, 0), ImGuiChildFlags_Borders,
+	                  ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+	{
+		const float RT = 18.0f, RL = 34.0f;   // ruler strip sizes
+		ImVec2 c0  = ImGui::GetCursorScreenPos();
+		ImVec2 csz = ImGui::GetContentRegionAvail();
+		ImDrawList* dl = ImGui::GetWindowDrawList();
+		ImVec2 ia0 = ImVec2(c0.x + RL, c0.y + RT);
+		float iaW = csz.x - RL, iaH = csz.y - RT; if (iaW < 16) iaW = 16; if (iaH < 16) iaH = 16;
+
+		float fit = 1.0f;
+		if (t->width > 0 && t->height > 0) {
+			fit = (iaW - 12) / t->width; float fy = (iaH - 12) / t->height; if (fy < fit) fit = fy;
+			if (fit <= 0) fit = 0.01f;
+		}
+		float z = fit * (w.slUserView ? w.slZoomMul : 1.0f);
+		ImVec2 ip0;
+		if (!w.slUserView) {
+			ip0 = ImVec2(ia0.x + (iaW - t->width * z) * 0.5f, ia0.y + (iaH - t->height * z) * 0.5f);
+			w.slPanX = ip0.x - ia0.x; w.slPanY = ip0.y - ia0.y; w.slZoomMul = 1.0f;
+		} else ip0 = ImVec2(ia0.x + w.slPanX, ia0.y + w.slPanY);
+
+		ImGui::InvisibleButton("sl_surf", csz, ImGuiButtonFlags_MouseButtonMiddle | ImGuiButtonFlags_MouseButtonRight);
+		bool overArea = ImGui::IsItemHovered();
+		if (overArea && io.MouseWheel != 0) {
+			w.slUserView = true;
+			float oldz = z, nzm = (oldz / fit) * (io.MouseWheel > 0 ? 1.1f : 1.0f / 1.1f);
+			if (nzm < 0.05f) nzm = 0.05f; if (nzm > 40) nzm = 40; float nz = fit * nzm;
+			float tx = (io.MousePos.x - ip0.x) / oldz, ty = (io.MousePos.y - ip0.y) / oldz;
+			w.slPanX = (io.MousePos.x - tx * nz) - ia0.x; w.slPanY = (io.MousePos.y - ty * nz) - ia0.y;
+			w.slZoomMul = nzm; z = nz; ip0 = ImVec2(ia0.x + w.slPanX, ia0.y + w.slPanY);
+		}
+		if (ImGui::IsItemActive() && (ImGui::IsMouseDragging(ImGuiMouseButton_Middle) || ImGui::IsMouseDragging(ImGuiMouseButton_Right))) {
+			w.slUserView = true; w.slPanX += io.MouseDelta.x; w.slPanY += io.MouseDelta.y; ip0 = ImVec2(ia0.x + w.slPanX, ia0.y + w.slPanY);
+		}
+
+		auto sX = [&](float tx){ return ip0.x + tx * z; };
+		auto sY = [&](float ty){ return ip0.y + ty * z; };
+		float exL = (float)t->spriteMarginLeft, exR = (float)(t->width  - t->spriteMarginRight);
+		float eyT = (float)t->spriteMarginTop,  eyB = (float)(t->height - t->spriteMarginBottom);
+
+		// ---- draggable handles: outer margin edges + inner grid lines (spacing) ----
+		bool inArea = overArea || (w.slDrag != 0);
+		auto nearX = [&](float sx){ return fabsf(io.MousePos.x - sx) < 5.0f && io.MousePos.y > c0.y && io.MousePos.y < c0.y + csz.y; };
+		auto nearY = [&](float sy){ return fabsf(io.MousePos.y - sy) < 5.0f && io.MousePos.x > c0.x && io.MousePos.x < c0.x + csz.x; };
+		int hover = 0;   // 1..4 outer L/R/T/B, 5 spacingX, 6 spacingY
+		if (w.slDrag == 0 && inArea) {
+			if      (nearX(sX(exL))) hover = 1;
+			else if (nearX(sX(exR))) hover = 2;
+			else if (nearY(sY(eyT))) hover = 3;
+			else if (nearY(sY(eyB))) hover = 4;
+			else {
+				for (int c = 0; c < t->spriteColumns - 1 && !hover; ++c) { int x0,y0,cw,ch; if (t->SpriteCellRect(c, x0, y0, cw, ch) && nearX(sX((float)(x0 + cw)))) hover = 5; }
+				for (int r = 0; r < t->spriteRows - 1 && !hover; ++r)    { int x0,y0,cw,ch; if (t->SpriteCellRect(r * t->spriteColumns, x0, y0, cw, ch) && nearY(sY((float)(y0 + ch)))) hover = 6; }
+			}
+		}
+		if      (hover == 1 || hover == 2 || hover == 5) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+		else if (hover == 3 || hover == 4 || hover == 6) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+		if (hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) w.slDrag = hover;
+		if (w.slDrag && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+			float txp = (io.MousePos.x - ip0.x) / z, typ = (io.MousePos.y - ip0.y) / z;
+			auto Rnd = [](float f){ return (int)floorf(f + 0.5f); };
+			switch (w.slDrag) {
+				case 1: t->spriteMarginLeft   = Rnd(txp); break;
+				case 2: t->spriteMarginRight  = Rnd(t->width  - txp); break;
+				case 3: t->spriteMarginTop    = Rnd(typ); break;
+				case 4: t->spriteMarginBottom = Rnd(t->height - typ); break;
+				case 5: t->spriteSpacingX += Rnd(io.MouseDelta.x / z); break;
+				case 6: t->spriteSpacingY += Rnd(io.MouseDelta.y / z); break;
+			}
+			clampGrid(); w.dirty = true; SlicerApplyLive(t);
+		}
+		if (w.slDrag && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) { SlicerPushUndo(w); w.slDrag = 0; }
+
+		// ---- draw sheet + grid (clipped to the image area) ----
+		dl->PushClipRect(ia0, ImVec2(ia0.x + iaW, ia0.y + iaH), true);
+		ImVec2 ip1 = ImVec2(sX((float)t->width), sY((float)t->height));
+		if (w.texPreview) dl->AddImage((ImTextureID)w.texPreview, ip0, ip1);
+		dl->AddRect(ip0, ip1, IM_COL32(70, 70, 70, 255));
+		int cnt = t->SpriteCount();
+		for (int i = 0; i < cnt; ++i) {
+			int x0,y0,cw,ch; if (!t->SpriteCellRect(i, x0, y0, cw, ch)) continue;
+			ImVec2 p0 = ImVec2(sX((float)x0), sY((float)y0)), p1 = ImVec2(sX((float)(x0 + cw)), sY((float)(y0 + ch)));
+			if (i == activeCell) dl->AddRect(p0, p1, IM_COL32(255, 210, 60, 255), 0, 0, 2.0f);
+			else                 DashRect(dl, p0, p1, IM_COL32(60, 200, 255, 170), 1.0f);
+			if (w.slShowMirror) {
+				ImVec2 q0 = ImVec2(p0.x + w.slPadL * z, p0.y + w.slPadT * z), q1 = ImVec2(p1.x - w.slPadR * z, p1.y - w.slPadB * z);
+				if (q1.x > q0.x && q1.y > q0.y) dl->AddRect(q0, q1, IM_COL32(255, 120, 120, 110), 0, 0, 1.0f);
+			}
+		}
+		if (t->sliceLeft || t->sliceRight || t->sliceTop || t->sliceBottom) {   // 9-slice guides
+			ImU32 sc = IM_COL32(120, 255, 120, 150);
+			float L = sX((float)t->sliceLeft), R = sX((float)(t->width - t->sliceRight));
+			float T = sY((float)t->sliceTop),  B = sY((float)(t->height - t->sliceBottom));
+			dl->AddLine(ImVec2(L, sY(0)), ImVec2(L, sY((float)t->height)), sc);
+			dl->AddLine(ImVec2(R, sY(0)), ImVec2(R, sY((float)t->height)), sc);
+			dl->AddLine(ImVec2(sX(0), T), ImVec2(sX((float)t->width), T), sc);
+			dl->AddLine(ImVec2(sX(0), B), ImVec2(sX((float)t->width), B), sc);
+		}
+		ImU32 edge = IM_COL32(255, 140, 40, 220);   // outer margin frame (solid, brighter than the cell grid)
+		dl->AddLine(ImVec2(sX(exL), sY(eyT)), ImVec2(sX(exL), sY(eyB)), edge, 1.5f);
+		dl->AddLine(ImVec2(sX(exR), sY(eyT)), ImVec2(sX(exR), sY(eyB)), edge, 1.5f);
+		dl->AddLine(ImVec2(sX(exL), sY(eyT)), ImVec2(sX(exR), sY(eyT)), edge, 1.5f);
+		dl->AddLine(ImVec2(sX(exL), sY(eyB)), ImVec2(sX(exR), sY(eyB)), edge, 1.5f);
+		dl->PopClipRect();
+
+		// ---- rulers: strips OUTSIDE the image clip; tick labels live HERE, never on the sheet ----
+		ImU32 rbg = IM_COL32(28, 28, 28, 255), rtick = IM_COL32(150, 150, 150, 255), rtxt = IM_COL32(205, 205, 205, 255);
+		dl->AddRectFilled(c0, ImVec2(c0.x + csz.x, c0.y + RT), rbg);
+		dl->AddRectFilled(c0, ImVec2(c0.x + RL, c0.y + csz.y), rbg);
+		const int nice[] = { 1,2,5,10,20,25,50,100,200,250,500,1000,2000,2500,5000,10000,20000 };
+		double raw = 64.0 / (z > 1e-6f ? z : 1e-6f); int step = nice[sizeof(nice) / sizeof(int) - 1];
+		for (int k = 0; k < (int)(sizeof(nice) / sizeof(int)); ++k) if (nice[k] >= raw) { step = nice[k]; break; }
+		char buf[16];
+		dl->PushClipRect(ImVec2(c0.x + RL, c0.y), ImVec2(c0.x + csz.x, c0.y + RT), true);
+		for (int px = 0; px <= t->width; px += step) { float x = sX((float)px); if (x < c0.x + RL) continue; dl->AddLine(ImVec2(x, c0.y + RT - 5), ImVec2(x, c0.y + RT), rtick); snprintf(buf, 16, "%d", px); dl->AddText(ImVec2(x + 2, c0.y + 2), rtxt, buf); }
+		dl->PopClipRect();
+		dl->PushClipRect(ImVec2(c0.x, c0.y + RT), ImVec2(c0.x + RL, c0.y + csz.y), true);
+		for (int py = 0; py <= t->height; py += step) { float y = sY((float)py); if (y < c0.y + RT) continue; dl->AddLine(ImVec2(c0.x + RL - 5, y), ImVec2(c0.x + RL, y), rtick); snprintf(buf, 16, "%d", py); dl->AddText(ImVec2(c0.x + 2, y + 1), rtxt, buf); }
+		dl->PopClipRect();
+		// draggable handle marks on the rulers at the outer margin edges
+		auto handleX = [&](float sx){ if (sx > c0.x + RL) dl->AddTriangleFilled(ImVec2(sx - 4, c0.y), ImVec2(sx + 4, c0.y), ImVec2(sx, c0.y + RT), edge); };
+		auto handleY = [&](float sy){ if (sy > c0.y + RT) dl->AddTriangleFilled(ImVec2(c0.x, sy - 4), ImVec2(c0.x, sy + 4), ImVec2(c0.x + RL, sy), edge); };
+		handleX(sX(exL)); handleX(sX(exR)); handleY(sY(eyT)); handleY(sY(eyB));
+	}
+	ImGui::EndChild();
+
+	// ===== RIGHT: live cell preview =====
+	ImGui::SameLine();
+	ImGui::BeginChild("sl_prev", ImVec2(0, 0), ImGuiChildFlags_Borders);
+	ImGui::TextDisabled("Preview  ·  cell %d", activeCell);
+	if (w.texPreview && haveActive && acw > 0 && ach > 0) {
+		ImVec2 uv0((float)ax0 / t->width, (float)ay0 / t->height), uv1((float)(ax0 + acw) / t->width, (float)(ay0 + ach) / t->height);
+		ImVec2 av = ImGui::GetContentRegionAvail();
+		float ar = (float)acw / ach, dw = av.x, dh = dw / ar; if (dh > av.y) { dh = av.y; dw = dh * ar; }
+		ImGui::Image((ImTextureID)w.texPreview, ImVec2(dw, dh), uv0, uv1);
+	}
+	ImGui::EndChild();
 }
 
 void EditorUI::DrawPrefabTree(AssetEditorWin& w, Atom* a)
@@ -555,6 +910,13 @@ bool EditorUI::DrawPrefabAtomEditor(AssetEditorWin& w, Atom* a)
 
 void EditorUI::winAssetEditors()
 {
+	// Flush deferred GPU-preview destroys: only free a handle once enough frames have passed that no
+	// in-flight ImGui draw data (main window + native viewports) still references it.
+	if (!aeTexTrash.empty())
+		if (iRender* r = AppInstance::GetSingleton()->render)
+			for (int i = (int)aeTexTrash.size() - 1; i >= 0; --i)
+				if (--aeTexTrash[i].second <= 0) { r->destroyTexture2D(aeTexTrash[i].first); aeTexTrash.erase(aeTexTrash.begin() + i); }
+
 	aeFocused = -1;   // recomputed below; EditorUI::Undo/Redo route by it
 	for (int i = 0; i < (int)assetEds.size(); ++i)
 	{
@@ -564,10 +926,11 @@ void EditorUI::winAssetEditors()
 		ImGuiWindowClass wcls;
 		wcls.ViewportFlagsOverrideSet = ImGuiViewportFlags_NoAutoMerge;
 		ImGui::SetNextWindowClass(&wcls);
-		const bool isAudio = !w.pv;   // audio previews are the only editors without a 3D scene
+		const bool isSlicer = (w.ext == ".nutex");   // 2D Sprite Slicer — no 3D scene, but not audio either
+		const bool isAudio = !w.pv && !isSlicer;      // audio previews are the only OTHER editors without a scene
 		ImGui::SetNextWindowSize(isAudio ? ImVec2(420.0f, 170.0f)
-		                                 : ImVec2(w.ext == ".nuprefab" ? 900.0f : 420.0f, 640.0f), ImGuiCond_FirstUseEver);
-		const char* icon = isAudio ? ICON_LC_MUSIC
+		                                 : ImVec2(w.ext == ".nuprefab" ? 900.0f : (isSlicer ? 760.0f : 420.0f), 640.0f), ImGuiCond_FirstUseEver);
+		const char* icon = isAudio ? ICON_LC_MUSIC : isSlicer ? ICON_LC_GRID_2X2
 		                 : w.ext == ".numat" ? ICON_LC_PALETTE : (w.ext == ".numesh" ? ICON_LC_BOX : ICON_LC_PACKAGE);
 		std::string title = std::string(icon) + " " + bfs::path(w.path).filename().string() + "###ae:" + w.path;
 		// No window scrollbars: the preview is sized to the free space, and a flickering
@@ -598,6 +961,15 @@ void EditorUI::winAssetEditors()
 						w.prefabRoot = nuke::LoadPrefab(w.path);
 						if (w.prefabRoot) { w.pv->world->Add(w.prefabRoot); w.prefabSelId = (long)w.prefabRoot->id.id; }
 						FramePreview(*w.pv, w.prefabRoot);
+					}
+					else if (w.ext == ".nutex" && w.tex)
+					{
+						if (nuke::Texture* fresh = nuke::Texture::LoadFromFile(w.path))
+						{
+							ApplyMeta(w.tex, SnapMeta(fresh)); delete fresh;
+							w.idleS = SnapMeta(w.tex); w.undoS.clear(); w.redoS.clear();
+							SlicerApplyLive(w.tex);
+						}
 					}
 					w.dirty = false;
 				}
@@ -642,6 +1014,10 @@ void EditorUI::winAssetEditors()
 				}
 				else ImGui::TextDisabled("Mesh is not in the resource DB.");
 				DrawPreviewImage(*w.pv, ImGui::GetContentRegionAvail());   // everything below the stats line
+			}
+			else if (isSlicer && w.tex)
+			{
+				DrawSpriteSlicer(w);
 			}
 			else if (w.ext == ".nuprefab" && w.prefabRoot)
 			{
@@ -871,6 +1247,7 @@ void EditorUI::winAssetEditors()
 			{
 				if      (w.ext == ".numat"    && w.mat)        { w.mat->SaveToFile(w.path); w.dirty = false; }
 				else if (w.ext == ".nuprefab" && w.prefabRoot) { nuke::SavePrefab(w.prefabRoot, w.path); w.dirty = false; }
+				else if (isSlicer && w.tex)                    { w.tex->SaveToFile(w.path); SlicerApplyLive(w.tex); w.dirty = false; }
 				// (saved .numat hot-reloads into the scene via the existing mtime watcher)
 			}
 
@@ -923,6 +1300,7 @@ void EditorUI::winAssetEditors()
 			{
 				if      (w.ext == ".numat"    && w.mat)        w.mat->SaveToFile(w.path);
 				else if (w.ext == ".nuprefab" && w.prefabRoot) nuke::SavePrefab(w.prefabRoot, w.path);
+				else if (w.ext == ".nutex"    && w.tex)        { w.tex->SaveToFile(w.path); SlicerApplyLive(w.tex); }
 				w.dirty = false; w.open = false; aeCloseConfirm = -1; ImGui::CloseCurrentPopup();
 			}
 			ImGui::SameLine();
@@ -945,6 +1323,8 @@ void EditorUI::winAssetEditors()
 			delete w.idleM;
 			for (Material* m : w.undoM) delete m;
 			for (Material* m : w.redoM) delete m;
+			if (w.texPreview) { aeTexTrash.push_back({ w.texPreview, 3 }); w.texPreview = 0; }   // deferred free (in-flight draw data)
+			if (w.tex) delete w.tex;
 			if (w.pv) ReleasePreview(w.pv);
 			assetEds.erase(assetEds.begin() + i);
 		}
