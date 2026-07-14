@@ -490,6 +490,7 @@ int main(int argc, char** argv)
     wd.transparent = config->window.transparent;
     wd.opacity     = config->window.opacity;
     wd.backend     = config->window.backend;   // D3D11 / D3D12 (from config.json window.backend)
+    wd.gpuValidation = config->gpuValidation;   // Debug GPU validation opt-in (config, works for double-click)
     LoadBuiltinShaders(render, "shaders");   // engine loads built-in shaders + feeds the renderer
     render->init(wd);
     render->setVSync(config->window.vsync);   // honour config vsync (Game.SetVSync toggles it live)
