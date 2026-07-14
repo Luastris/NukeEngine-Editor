@@ -24,11 +24,35 @@ static nuke::Atom* PickAtScreen(nuke::Camera* cam, ImVec2 rmin, ImVec2 sz, ImVec
 	nuke::Vector3 o = t->globalPosition();
 	nuke::Vector3 f = t->direction(), rr = t->right(), uu = t->up();
 	float aspect = sz.x / sz.y;
+	if (cam->projBlend >= 0.5f)   // orthographic: rays are PARALLEL (dir = forward), the ORIGIN slides across the frame
+	{
+		float halfH = (cam->orthoSize > 1e-4f) ? cam->orthoSize : 1.0f, halfW = halfH * aspect;
+		nuke::Vector3 ori(o.x + ndcx * halfW * rr.x + ndcy * halfH * uu.x,
+		                  o.y + ndcx * halfW * rr.y + ndcy * halfH * uu.y,
+		                  o.z + ndcx * halfW * rr.z + ndcy * halfH * uu.z);
+		return nuke::AppInstance::GetSingleton()->currentScene->Pick(ori, f);
+	}
 	float thf = tanf((float)cam->fov * 0.5f * 0.01745329252f);
 	nuke::Vector3 dir(f.x + ndcx * thf * aspect * rr.x + ndcy * thf * uu.x,
 	                  f.y + ndcx * thf * aspect * rr.y + ndcy * thf * uu.y,
 	                  f.z + ndcx * thf * aspect * rr.z + ndcy * thf * uu.z);
 	return nuke::AppInstance::GetSingleton()->currentScene->Pick(o, dir);
+}
+
+// The editor camera's projection matrix (glm, LH depth 0..1), matching the renderer's
+// persp<->ortho blend (Camera::projBlend) so gizmos / entity icons / picking stay glued to the
+// rendered image in orthographic mode and during the transition.
+static glm::mat4 EditorCamProj(nuke::Camera* cam, float aspect)
+{
+	glm::mat4 persp = glm::perspectiveLH_ZO((float)cam->fov * 0.01745329252f, aspect, cam->_near, cam->_far);
+	float b = cam->projBlend;
+	if (b <= 0.0001f) return persp;
+	float halfH = (cam->orthoSize > 1e-4f) ? cam->orthoSize : 1.0f;
+	glm::mat4 orth = glm::orthoLH_ZO(-halfH * aspect, halfH * aspect, -halfH, halfH, cam->_near, cam->_far);
+	if (b >= 0.9999f) return orth;
+	glm::mat4 r;
+	for (int i = 0; i < 4; ++i) for (int j = 0; j < 4; ++j) r[i][j] = persp[i][j] * (1.0f - b) + orth[i][j] * b;
+	return r;
 }
 
 // Billboard icons for invisible entities (2.1): cameras, lights, reflection probes and
@@ -56,7 +80,8 @@ void EditorUI::DrawEntityIcons(ImVec2 rmin, ImVec2 sz)
 			glm::vec3((float)e.x, (float)e.y, (float)e.z),
 			glm::vec3((float)(e.x + f.x), (float)(e.y + f.y), (float)(e.z + f.z)),
 			glm::vec3((float)u.x, (float)u.y, (float)u.z));
-		vp = glm::perspectiveLH_ZO(fovy, aspect, editorCam->_near, editorCam->_far) * v;
+		(void)fovy;
+		vp = EditorCamProj(editorCam, aspect) * v;   // persp/ortho blended (matches the render)
 	}
 
 	struct Icon { float depth; ImVec2 c; const char* glyph; ImU32 col; Atom* atom; };
@@ -282,12 +307,11 @@ void EditorUI::winRender()
 					Vector3 ge = gcam->globalPosition();
 					Vector3 gf = gcam->direction(), gu = gcam->up();
 					float gaspect = (gsz.y > 0.0f) ? gsz.x / gsz.y : 1.0f;
-					float gfovy   = (float)editorCam->fov * 0.01745329252f;
 					glm::mat4 gv = glm::lookAtLH(
 						glm::vec3((float)ge.x, (float)ge.y, (float)ge.z),
 						glm::vec3((float)(ge.x + gf.x), (float)(ge.y + gf.y), (float)(ge.z + gf.z)),
 						glm::vec3((float)gu.x, (float)gu.y, (float)gu.z));
-					glm::mat4 gp = glm::perspectiveLH_ZO(gfovy, gaspect, editorCam->_near, editorCam->_far);
+					glm::mat4 gp = EditorCamProj(editorCam, gaspect);   // persp/ortho blended (matches the render)
 					// ImGuizmo uses ROW convention, glm uses COLUMN — transpose all matrices.
 					memcpy(gview, glm::value_ptr(gv), sizeof(gview));   // glm passed directly (no transpose)
 					memcpy(gproj, glm::value_ptr(gp), sizeof(gproj));

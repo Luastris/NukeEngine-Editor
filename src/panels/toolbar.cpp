@@ -112,6 +112,8 @@ void EditorUI::Toolbar()
 			if (ImGui::MenuItem(ICON_LC_BOX    " Cube"))   SpawnPrimitive("Cube",   "builtin:cube");
 			if (ImGui::MenuItem(ICON_LC_CIRCLE " Sphere")) SpawnPrimitive("Sphere", "builtin:sphere");
 			if (ImGui::MenuItem(ICON_LC_SQUARE " Plane"))  SpawnPrimitive("Plane",  "builtin:plane");
+			if (ImGui::MenuItem(ICON_LC_CYLINDER " Cylinder")) SpawnPrimitive("Cylinder", "builtin:cylinder");
+			if (ImGui::MenuItem(ICON_LC_PILL     " Capsule"))  SpawnPrimitive("Capsule",  "builtin:capsule");
 			if (ImGui::MenuItem(ICON_LC_VIDEO  " Camera")) SpawnCamera();
 			if (ImGui::BeginMenu(ICON_LC_LIGHTBULB " Light"))
 			{
@@ -167,10 +169,15 @@ void EditorUI::Toolbar()
 			app->playState = 0;
 		}
 
-		// RIGHT — viewport draw mode (Solid / Wireframe)
-		float rightW = bw * 2 + st.ItemSpacing.x;
+		// RIGHT — camera projection (Perspective / Orthographic) + viewport draw mode (Solid / Wireframe)
+		float rightW = bw * 3 + st.ItemSpacing.x * 2;
 		ImGui::SameLine();
 		ImGui::SetCursorPosX(winW - rightW - 8.0f);
+		bool ortho = editorCam && editorCam->projection == nuke::Projection::Orthographic;
+		if (ToolBtn(ortho ? ICON_LC_PROPORTIONS : ICON_LC_BOXES,
+		            ortho ? "Orthographic (click: Perspective)" : "Perspective (click: Orthographic)", ortho, bw))
+			if (editorCam) editorCam->projection = ortho ? nuke::Projection::Perspective : nuke::Projection::Orthographic;
+		ImGui::SameLine();
 		if (ToolBtn(ICON_LC_BOX,      "Solid",     !app->wireframe, bw)) app->wireframe = false; ImGui::SameLine();
 		if (ToolBtn(ICON_LC_GRID_3X3, "Wireframe",  app->wireframe, bw)) app->wireframe = true;
 	}
