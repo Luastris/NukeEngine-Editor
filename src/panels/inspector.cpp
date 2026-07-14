@@ -1098,6 +1098,8 @@ void EditorUI::DrawAssetInspector(const std::string& path)
 			ImGui::SameLine();
 			if (ImGui::Button(inspChromaPick ? "Picking\xE2\x80\xA6 (click image)" : "Pick")) inspChromaPick = !inspChromaPick;
 			ImGui::SetNextItemWidth(160); ImGui::SliderInt("Tolerance", &inspChromaTol, 0, 128);
+			ImGui::Checkbox("Outside only (keep enclosed areas)", &inspChromaOutside);
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("On: clears only the background touching the image edge (white eyes etc. stay).\nOff: clears every matching pixel.");
 			if (ImGui::Button("Apply Chroma Key") && inspTex)
 			{
 				// Writes pixels/format/mip to the file + the live ResDB copy, then re-uploads. Used by undo/redo too.
@@ -1116,7 +1118,7 @@ void EditorUI::DrawAssetInspector(const std::string& path)
 				auto before = std::make_shared<std::vector<unsigned char>>(inspTex->pixels);
 				int bfmt = inspTex->format, bmip = inspTex->mipCount;
 				int kr = (int)(inspChroma[0] * 255 + 0.5f), kg = (int)(inspChroma[1] * 255 + 0.5f), kb = (int)(inspChroma[2] * 255 + 0.5f);
-				if (inspTex->ApplyChromaKey(kr, kg, kb, inspChromaTol))
+				if (inspTex->ApplyChromaKey(kr, kg, kb, inspChromaTol, inspChromaOutside))
 				{
 					inspTex->SaveToFile(path);
 					auto after = std::make_shared<std::vector<unsigned char>>(inspTex->pixels);

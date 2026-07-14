@@ -471,6 +471,13 @@ void EditorUI::OpenAssetEditor(const std::string& path)
 		if (!w.tex) return;
 		if (w.tex->usage != nuke::Texture::UsageSprite) w.tex->usage = nuke::Texture::UsageSprite;  // opening it in the slicer implies it IS a sprite
 		w.texPreview = UploadTexPreview(w.tex, 2048, w.texPrevW, w.texPrevH);
+		// createTexture2D hands back the GPU view POINTER as the handle; a freed view's memory can be
+		// reused, so a fresh preview may get a handle still queued for deferred destroy — cancel that
+		// pending destroy or it would free this LIVE texture a few frames later (use-after-free -> device
+		// removed on the next draw that binds it).
+		if (w.texPreview)
+			for (auto it = aeTexTrash.begin(); it != aeTexTrash.end(); )
+				it = (it->first == w.texPreview) ? aeTexTrash.erase(it) : it + 1;
 		w.slFirst = 0; w.slCount = w.tex->SpriteCount();
 		w.idleS = SnapMeta(w.tex);
 		assetEds.push_back(std::move(w));
@@ -521,19 +528,31 @@ static void DashLine(ImDrawList* dl, ImVec2 a, ImVec2 b, ImU32 col, float th, fl
 {
 	float dx = b.x - a.x, dy = b.y - a.y, len = sqrtf(dx * dx + dy * dy);
 	if (len < 0.001f) return;
-	float ux = dx / len, uy = dy / len, step = dash + gap;
+	float step = dash + gap;
+	// HARD safety: a very long line would emit thousands of segments -> a single UI draw list past 65535
+	// verts overflows the renderer's 16-bit index buffer -> GPU reads OOB -> device removed. Callers clip
+	// to the canvas first, but if anything slips through, fall back to a solid line (2 verts).
+	if (len / step > 4096.0f) { dl->AddLine(a, b, col, th); return; }
+	float ux = dx / len, uy = dy / len;
 	for (float d = 0; d < len; d += step)
 	{
 		float e = d + dash; if (e > len) e = len;
 		dl->AddLine(ImVec2(a.x + ux * d, a.y + uy * d), ImVec2(a.x + ux * e, a.y + uy * e), col, th);
 	}
 }
-static void DashRect(ImDrawList* dl, ImVec2 p0, ImVec2 p1, ImU32 col, float th)
+// Dashed axis-aligned rectangle, each edge CLIPPED to [cmin,cmax] (and culled if outside) so the segment
+// count is bounded by the visible canvas, never by the zoom level.
+static void DashRect(ImDrawList* dl, ImVec2 p0, ImVec2 p1, ImVec2 cmin, ImVec2 cmax, ImU32 col, float th)
 {
-	DashLine(dl, ImVec2(p0.x, p0.y), ImVec2(p1.x, p0.y), col, th, 6, 4);
-	DashLine(dl, ImVec2(p1.x, p0.y), ImVec2(p1.x, p1.y), col, th, 6, 4);
-	DashLine(dl, ImVec2(p1.x, p1.y), ImVec2(p0.x, p1.y), col, th, 6, 4);
-	DashLine(dl, ImVec2(p0.x, p1.y), ImVec2(p0.x, p0.y), col, th, 6, 4);
+	if (p0.x > p1.x) { float t = p0.x; p0.x = p1.x; p1.x = t; }
+	if (p0.y > p1.y) { float t = p0.y; p0.y = p1.y; p1.y = t; }
+	if (p1.x < cmin.x || p0.x > cmax.x || p1.y < cmin.y || p0.y > cmax.y) return;   // fully outside
+	float cl = p0.x < cmin.x ? cmin.x : p0.x, cr = p1.x > cmax.x ? cmax.x : p1.x;   // clamped x span
+	float ct = p0.y < cmin.y ? cmin.y : p0.y, cb = p1.y > cmax.y ? cmax.y : p1.y;   // clamped y span
+	if (p0.y >= cmin.y && p0.y <= cmax.y && cr > cl) DashLine(dl, ImVec2(cl, p0.y), ImVec2(cr, p0.y), col, th, 6, 4);
+	if (p1.y >= cmin.y && p1.y <= cmax.y && cr > cl) DashLine(dl, ImVec2(cl, p1.y), ImVec2(cr, p1.y), col, th, 6, 4);
+	if (p0.x >= cmin.x && p0.x <= cmax.x && cb > ct) DashLine(dl, ImVec2(p0.x, ct), ImVec2(p0.x, cb), col, th, 6, 4);
+	if (p1.x >= cmin.x && p1.x <= cmax.x && cb > ct) DashLine(dl, ImVec2(p1.x, ct), ImVec2(p1.x, cb), col, th, 6, 4);
 }
 
 // Sprite Slicer body (mode 0): a GIMP-style 2D editor for the sheet. Left = properties (drag OR type),
@@ -718,8 +737,9 @@ void EditorUI::DrawSpriteSlicer(AssetEditorWin& w)
 		for (int i = 0; i < cnt; ++i) {
 			int x0,y0,cw,ch; if (!t->SpriteCellRect(i, x0, y0, cw, ch)) continue;
 			ImVec2 p0 = ImVec2(sX((float)x0), sY((float)y0)), p1 = ImVec2(sX((float)(x0 + cw)), sY((float)(y0 + ch)));
+			if (p1.x < ia0.x || p0.x > ia0.x + iaW || p1.y < ia0.y || p0.y > ia0.y + iaH) continue;   // cull off-screen cells (bounds vertex count)
 			if (i == activeCell) dl->AddRect(p0, p1, IM_COL32(255, 210, 60, 255), 0, 0, 2.0f);
-			else                 DashRect(dl, p0, p1, IM_COL32(60, 200, 255, 170), 1.0f);
+			else                 DashRect(dl, p0, p1, ia0, ImVec2(ia0.x + iaW, ia0.y + iaH), IM_COL32(60, 200, 255, 170), 1.0f);
 			if (w.slShowMirror) {
 				ImVec2 q0 = ImVec2(p0.x + w.slPadL * z, p0.y + w.slPadT * z), q1 = ImVec2(p1.x - w.slPadR * z, p1.y - w.slPadB * z);
 				if (q1.x > q0.x && q1.y > q0.y) dl->AddRect(q0, q1, IM_COL32(255, 120, 120, 110), 0, 0, 1.0f);
@@ -750,10 +770,12 @@ void EditorUI::DrawSpriteSlicer(AssetEditorWin& w)
 		for (int k = 0; k < (int)(sizeof(nice) / sizeof(int)); ++k) if (nice[k] >= raw) { step = nice[k]; break; }
 		char buf[16];
 		dl->PushClipRect(ImVec2(c0.x + RL, c0.y), ImVec2(c0.x + csz.x, c0.y + RT), true);
-		for (int px = 0; px <= t->width; px += step) { float x = sX((float)px); if (x < c0.x + RL) continue; dl->AddLine(ImVec2(x, c0.y + RT - 5), ImVec2(x, c0.y + RT), rtick); snprintf(buf, 16, "%d", px); dl->AddText(ImVec2(x + 2, c0.y + 2), rtxt, buf); }
+		{ int a = (int)((c0.x + RL - ip0.x) / z); if (a < 0) a = 0; int b = (int)((c0.x + csz.x - ip0.x) / z) + 1; if (b > t->width) b = t->width;
+		for (int px = (a / step) * step; px <= b; px += step) { float x = sX((float)px); if (x < c0.x + RL) continue; dl->AddLine(ImVec2(x, c0.y + RT - 5), ImVec2(x, c0.y + RT), rtick); snprintf(buf, 16, "%d", px); dl->AddText(ImVec2(x + 2, c0.y + 2), rtxt, buf); } }
 		dl->PopClipRect();
 		dl->PushClipRect(ImVec2(c0.x, c0.y + RT), ImVec2(c0.x + RL, c0.y + csz.y), true);
-		for (int py = 0; py <= t->height; py += step) { float y = sY((float)py); if (y < c0.y + RT) continue; dl->AddLine(ImVec2(c0.x + RL - 5, y), ImVec2(c0.x + RL, y), rtick); snprintf(buf, 16, "%d", py); dl->AddText(ImVec2(c0.x + 2, y + 1), rtxt, buf); }
+		{ int a = (int)((c0.y + RT - ip0.y) / z); if (a < 0) a = 0; int b = (int)((c0.y + csz.y - ip0.y) / z) + 1; if (b > t->height) b = t->height;
+		for (int py = (a / step) * step; py <= b; py += step) { float y = sY((float)py); if (y < c0.y + RT) continue; dl->AddLine(ImVec2(c0.x + RL - 5, y), ImVec2(c0.x + RL, y), rtick); snprintf(buf, 16, "%d", py); dl->AddText(ImVec2(c0.x + 2, y + 1), rtxt, buf); } }
 		dl->PopClipRect();
 		// draggable handle marks on the rulers at the outer margin edges
 		auto handleX = [&](float sx){ if (sx > c0.x + RL) dl->AddTriangleFilled(ImVec2(sx - 4, c0.y), ImVec2(sx + 4, c0.y), ImVec2(sx, c0.y + RT), edge); };

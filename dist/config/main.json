@@ -1,8 +1,27 @@
 {
-  // NukeEngine config (JSON). Comments are allowed.
+  "gpuValidation": true,
+  "logToConsole": true,
+  "raytracing": {
+    "bounces": 3,
+    "intensity": 1.0,
+    "maxDist": 165.0,
+    "roughCutoff": 0.6000000238418579
+  },
   "window": {
-    "width": 1700,
+    "backend": 1,
+    "decorated": true,
+    "floating": false,
+    "fullscreen": false,
     "height": 920,
-    "mainFont": "fonts/OpenSansLight.ttf"
+    "mainFont": "fonts/OpenSansLight.ttf",
+    "maximized": false,
+    "mode": 0,
+    "opacity": 1.0,
+    "resizable": true,
+    "showConsole": true,
+    "title": "NukeEngine",
+    "transparent": false,
+    "vsync": false,
+    "width": 1700
   }
 }

@@ -374,6 +374,7 @@ public:
 	float inspChroma[3] = { 1.0f, 0.0f, 1.0f };    // chroma-key colour (magenta default)
 	int   inspChromaTol = 24;                       // per-channel tolerance
 	bool  inspChromaPick = false;                   // eyedropper armed (click the preview to sample)
+	bool  inspChromaOutside = true;                 // key only the border-connected background (keep enclosed areas)
 	nuke::Material* inspMat = nullptr;             // cached loaded .numat (field editing)
 	// text editor (2.2): tabs of open text files; syntax from the file-type descriptor (0.6);
 	// Ctrl+S saves; saved shaders/materials hot-reload through the existing mtime watcher.
