@@ -198,11 +198,12 @@ void EditorUI::EntryContextMenu(const std::string& path, bool isDir)
 		{
 			std::string cext = bfs::path(path).extension().string();
 			for (char& c : cext) c = (char)std::tolower((unsigned char)c);
-			if (cext == ".numat" || cext == ".numesh" || cext == ".nuprefab"
+			if (cext == ".numat" || cext == ".numesh" || cext == ".nuprefab" || cext == ".nuinput"
 			    || cext == ".ogg" || cext == ".wav" || cext == ".mp3" || cext == ".flac")
 			{
 				if (ImGui::MenuItem(ICON_LC_PENCIL_RULER " Open in Editor")) OpenAssetEditor(path);
 				if (cext == ".nuprefab" && ImGui::MenuItem(ICON_LC_PACKAGE_PLUS " Instantiate")) SpawnPrefab(path);
+				if (cext == ".nuinput" && ImGui::MenuItem(ICON_LC_FILE_PEN " Edit as text")) OpenExternal(path, 0);
 				ImGui::Separator();
 			}
 			else if (IsTextFile(cext))
@@ -1110,7 +1111,7 @@ void EditorUI::winBrowser()
 					if (e.pak) OpenWorldCmd(e.path.substr(strlen("pak://content/")));
 					else       OpenWorldFromBrowser(e.path);
 				}
-				else if (!e.pak && (e.ext == ".nuprefab" || e.ext == ".numat" || e.ext == ".numesh"
+				else if (!e.pak && (e.ext == ".nuprefab" || e.ext == ".numat" || e.ext == ".numesh" || e.ext == ".nuinput"
 				         || e.ext == ".ogg" || e.ext == ".wav" || e.ext == ".mp3" || e.ext == ".flac"))
 					OpenAssetEditor(e.path);   // asset editor window (audio opens its preview player)
 				else if (!e.pak && IsTextFile(e.ext)) OpenExternal(e.path, 0);   // scripts/shaders/configs -> the chosen editor
@@ -1153,7 +1154,7 @@ void EditorUI::winBrowser()
 						if (e.pak) OpenWorldCmd(e.path.substr(strlen("pak://content/")));
 						else       OpenWorldFromBrowser(e.path);
 					}
-					else if (!e.pak && (e.ext == ".nuprefab" || e.ext == ".numat" || e.ext == ".numesh"
+					else if (!e.pak && (e.ext == ".nuprefab" || e.ext == ".numat" || e.ext == ".numesh" || e.ext == ".nuinput"
 					         || e.ext == ".ogg" || e.ext == ".wav" || e.ext == ".mp3" || e.ext == ".flac"))
 						OpenAssetEditor(e.path);   // asset editor window (audio opens its preview player)
 					else if (!e.pak && IsTextFile(e.ext)) OpenExternal(e.path, 0);   // scripts/shaders/configs -> the chosen editor

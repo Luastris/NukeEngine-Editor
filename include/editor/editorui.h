@@ -29,6 +29,7 @@
 #include "API/Model/Log.h"     // console panel: the engine log ring
 #include "editor/exteditor.h"  // external editor detection/launch (Preferences)
 #include "input/Hotkeys.h"     // centralized hotkey pool (editor + plugins)
+#include "input/InputTypes.h"  // InputAction/InputContext/InputBinding (.nuinput asset editor)
 #include <boost/container/list.hpp>
 #include <boost/bind/bind.hpp>
 #include <cstring>
@@ -347,6 +348,7 @@ public:
 	void winWorldSettings();   // World Settings window (global shadow settings, saved in the .nuworld)
 	bool worldSettingsOpen = false;
 	bool worldSettingsFocus = false;   // focus the window only when opened via menu, not when restored on load
+
 	World::Settings wsBefore;  // pre-edit snapshot of world settings (idle baseline for undo)
 	bool wsEditing = false;
 
@@ -459,6 +461,11 @@ public:
 		bool      slPlay = false; float slAcc = 0; int slCur = 0;
 		bool      slShowMirror = false; int slPadL = 0, slPadR = 0, slPadT = 0, slPadB = 0;   // cell-0 markup mirrored dimly
 		std::vector<SpriteMeta> undoS, redoS; SpriteMeta idleS; bool haveIdleS = false;
+		// .nuinput: the parsed input map (actions/contexts/bindings), edited in place + saved to the file.
+		std::vector<nuke::InputAction>  inActions;
+		std::vector<nuke::InputContext> inContexts;
+		std::vector<std::string> undoI, redoI;   // .nuinput history (serialized map JSON)
+		std::string idleI;                        // pre-edit baseline (map JSON)
 		Atom*     prefabRoot = nullptr;     // .nuprefab: loaded subtree (lives in pv->world)
 		long      prefabSelId = 0;          // selected atom in the prefab tree (stable id)
 		int       previewMesh = 0;          // .numat: 0 sphere / 1 cube / 2 plane
@@ -487,16 +494,18 @@ public:
 		bool dirty = false, open = true, wantFocus = false;
 	};
 	std::vector<AssetEditorWin> assetEds;
-	// GPU preview handles pending destroy. A closing window's ImGui draw data (esp. its native viewport)
-	// can still reference the texture the frame it closes, so freeing it inline binds a dead ITextureView
-	// (crash in the D3D12 SRB). Defer a few frames until all in-flight draw data has been rendered.
-	std::vector<std::pair<uint64_t, int>> aeTexTrash;
+	// (GPU preview destroys go straight to iRender::destroyTexture2D — the renderer's centralized
+	// trash defers the actual release until no in-flight draw data can reference the handle.)
 	int  aeCloseConfirm = -1;               // editor index awaiting the discard-changes modal
 	int  aeFocused   = -1;                  // asset-editor window focused THIS frame (undo routing)
 	int  textFocused = -1;                  // text-editor window focused THIS frame (undo routing)
 	void OpenAssetEditor(const std::string& path);   // open (or focus) the editor for an asset
 	void winAssetEditors();
 	void DrawSpriteSlicer(AssetEditorWin& w);        // .nutex Sprite Slicer body
+	void        DrawInputEditor(AssetEditorWin& w);  // .nuinput editor body (actions/contexts/bindings)
+	std::string InputMapJson(AssetEditorWin& w);                              // serialize w.in* -> JSON
+	void        LoadInputMapJson(AssetEditorWin& w, const std::string& json); // JSON -> w.in*
+	void        SaveInputAsset(AssetEditorWin& w);                            // write the file + apply to live
 	void SlicerPushUndo(AssetEditorWin& w);          // snapshot sprite metadata for undo (coalesced)
 	// Decode + upload a texture's mip0 as a GPU preview, box-downsampled so the longest side <= cap
 	// (huge sheets would otherwise be a multi-MB VRAM spike). Returns the handle; fills the uploaded size.

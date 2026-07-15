@@ -701,14 +701,29 @@ void EditorUI::PackageProjectNow()
 				CopyOne(it->path(), dist / n);
 			}
 			CopyOne(rt / "config" / "main.json", dist / "config" / "main.json");
-			// The game's window carries the game's name, not the engine's.
 			try
 			{
 				nlohmann::json cj;
 				bfs::ifstream in(dist / "config" / "main.json");
 				if (in) { std::stringstream ss; ss << in.rdbuf(); cj = nlohmann::json::parse(ss.str(), nullptr, false, true); }
 				if (!cj.is_object()) cj = nlohmann::json::object();
-				cj["window"]["title"] = gameName;
+				// The GAME's window settings live in the PROJECT (<project>/window.json — written by
+				// Game.Set* from PIE scripts; the editor's own config is never touched by them). Merge
+				// that block over the shipped defaults, then stamp the game's title.
+				{
+					bfs::ifstream pw(bfs::path(projDir) / "window.json");
+					if (pw)
+					{
+						std::stringstream ps; ps << pw.rdbuf();
+						nlohmann::json pj = nlohmann::json::parse(ps.str(), nullptr, false, true);
+						if (pj.is_object() && pj.contains("window") && pj["window"].is_object())
+							for (auto& kv : pj["window"].items()) cj["window"][kv.key()] = kv.value();
+					}
+				}
+				// (No title stamp: the Player titles its window from game.nuproj "name" — packed
+				// in the pak — so the game's name binds at packaging without a config field.)
+				if (cj.contains("window") && cj["window"].is_object())
+					cj["window"].erase("title");   // drop the legacy key if the shipped defaults had it
 				bfs::ofstream outc(dist / "config" / "main.json");
 				if (outc) outc << cj.dump(2);
 			}

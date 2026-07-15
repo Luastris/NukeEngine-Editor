@@ -3,6 +3,8 @@
 #include <nukeui.h>
 #include "imgui.h"
 #include <editor/editorui.h>
+#include <input/DesktopInput.h>   // gameplay input provider (keyboard/mouse)
+#include <interface/AssetCreators.h>   // register the .nuinput asset type
 #include <input/keyboard.h>
 #include <config.h>
 #include <interface/Modular.h>
@@ -481,13 +483,15 @@ int main(int argc, char** argv)
 	cout << "[main]\t\t\t" << ">> Window size: w(" << config->window.w << "), h(" << config->window.h << ")" << endl;
     WindowDesc wd;
     wd.w = config->window.w; wd.h = config->window.h;
-    wd.title       = "NukeEngine Editor";   // editor's OWN title; config.title is the game/Player window
+    wd.title       = "NukeEngine Editor";   // fixed: the editor is always the editor (the game window
+                                            // titles itself from the project's name — not config)
     wd.decorated   = config->window.decorated;
     wd.resizable   = config->window.resizable;
     wd.floating    = config->window.floating;
     wd.maximized   = config->window.maximized;
     wd.fullscreen  = config->window.fullscreen;
-    wd.transparent = config->window.transparent;
+    wd.transparent = false;   // per-pixel transparency is a GAME/runtime feature — the editor window is
+                              // always opaque (no DComp swap chain), whatever the config says
     wd.opacity     = config->window.opacity;
     wd.backend     = config->window.backend;   // D3D11 / D3D12 (from config.json window.backend)
     wd.gpuValidation = config->gpuValidation;   // Debug GPU validation opt-in (config, works for double-click)
@@ -500,40 +504,40 @@ int main(int argc, char** argv)
 	// seam, so this works regardless of which renderer module is loaded.
 	NukeUI::Init(render);
 
+	nuke::InstallDesktopInput(render);   // gameplay input: keyboard/mouse -> Input controls (chains the UI callbacks)
+
+	// .nuinput = a first-class, text-editable input map asset. New-menu template = a ready Gameplay context
+	// (WASD -> Move, mouse -> Look, Space -> Jump, LMB -> Fire). Any .nuinput in content auto-loads (ResDB).
+	{
+		nuke::AssetCreator ic;
+		ic.label = "Input Map"; ic.ext = ".nuinput"; ic.baseName = "Input"; ic.category = "Input";
+		ic.textEditable = true; ic.syntaxLanguage = "json";
+		ic.content =
+			"{\n  \"actions\": [\n"
+			"    { \"name\": \"Move\", \"type\": 2 },\n"
+			"    { \"name\": \"Look\", \"type\": 2 },\n"
+			"    { \"name\": \"Jump\", \"type\": 0 },\n"
+			"    { \"name\": \"Fire\", \"type\": 0 }\n  ],\n"
+			"  \"contexts\": [\n    { \"name\": \"Gameplay\", \"priority\": 0, \"active\": true, \"bindings\": [\n"
+			"      { \"action\": \"Move\", \"controls\": [\"Key.W\"], \"axis\": 1, \"scale\": 1,  \"phase\": 1 },\n"
+			"      { \"action\": \"Move\", \"controls\": [\"Key.S\"], \"axis\": 1, \"scale\": -1, \"phase\": 1 },\n"
+			"      { \"action\": \"Move\", \"controls\": [\"Key.A\"], \"axis\": 0, \"scale\": -1, \"phase\": 1 },\n"
+			"      { \"action\": \"Move\", \"controls\": [\"Key.D\"], \"axis\": 0, \"scale\": 1,  \"phase\": 1 },\n"
+			"      { \"action\": \"Look\", \"controls\": [\"Mouse.DeltaX\"], \"axis\": 0, \"phase\": 1 },\n"
+			"      { \"action\": \"Look\", \"controls\": [\"Mouse.DeltaY\"], \"axis\": 1, \"phase\": 1 },\n"
+			"      { \"action\": \"Jump\", \"controls\": [\"Key.Space\"], \"phase\": 0 },\n"
+			"      { \"action\": \"Fire\", \"controls\": [\"Mouse.Left\"], \"phase\": 1 }\n    ] }\n  ]\n}\n";
+		nuke::RegisterAssetCreator(ic);
+	}
+
 	editorinit();                       // SetUp: loads the project + activates its chosen plugins
 	instance->StartFixedThread();       // fixed-frequency update thread (idles until PIE plays)
 	nuke::Jobs::Init(Config::getSingleton()->jobWorkers, Config::getSingleton()->jobPinCores);   // worker pool (2.4)
 	NukeUI::AddDrawCallback(editorDraw); // editor draws via the UI module each frame
 	cout << "[main]\t\t\t" << "Editor UI initialized." << endl;
 
-    //CreateDemoObjects();
-    //cubepositions();
-	cout << "[main]\t\t\t" << "Done! Importing model..." << endl;
-
-    AssImporter::getSingleton()->Import("mpm_vol.09_p35.OBJ");
-    if(ResDB::getSingleton()->prefabs.size() > 0)
-    {
-        for(auto pref : ResDB::getSingleton()->prefabs){
-            AppInstance::GetSingleton()->currentWorld->Add(pref);
-        }
-//        for(auto m : ResDB::getSingleton()->meshes){
-//            Atom* atom = new Atom(m->name);
-//            MeshRenderer* mr = new MeshRenderer();
-//            mr->mesh = m;
-//            atom->AddComponent(mr);//dynamic_cast<Component*>(mr));
-//            cout << "[main]\t\t\t" << atom->name << " : " << atom->transform.position.toStringA() << endl;
-//            AppInstance::GetSingleton()->currentWorld->Add(atom);
-//        }
-    }
-
     // The project's default world is opened from content by editorinit() (SetUp) — after the
     // project's plugins are active, so components deserialize correctly. Nothing to restore here.
-
-	cout << "[main]\t\t\t" << "Hierarchy: " << &AppInstance::GetSingleton()->currentWorld->GetHierarchy() << endl;
-	/*if(AppInstance::GetSingleton()->currentWorld->GetHierarchy().size() > 0)
-		for(auto g : AppInstance::GetSingleton()->currentWorld->GetHierarchy())
-			if(g)
-				PrintHierarchy(g, 0);*/
 
 	cout << "[main]\t\t\t" << "All done. Starting render loop." << endl;
 

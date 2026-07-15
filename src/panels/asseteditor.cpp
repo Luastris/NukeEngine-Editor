@@ -11,7 +11,10 @@
 #include <API/Model/Environment.h>
 #include <API/Model/Prefab.h>
 #include <API/Model/Audio.h>   // audio preview transport (Preview bus)
+#include <input/Input.h>       // .nuinput asset editor (ParseMapString/SerializeMap/ApplyMap)
 #include <boost/filesystem.hpp>
+#include <boost/filesystem/fstream.hpp>
+#include <iterator>   // istreambuf_iterator (read the .nuinput file)
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/gtx/matrix_decompose.hpp>   // prefab gizmo: decompose the manipulated matrix
 #include <glm/gtc/type_ptr.hpp>
@@ -354,6 +357,12 @@ void EditorUI::AssetEditorUndo(AssetEditorWin& w)
 		ApplyMeta(w.tex, w.undoS.back()); w.undoS.pop_back();
 		w.idleS = SnapMeta(w.tex); SlicerApplyLive(w.tex); w.dirty = true;
 	}
+	else if (w.ext == ".nuinput" && !w.undoI.empty())
+	{
+		w.redoI.push_back(InputMapJson(w));
+		LoadInputMapJson(w, w.undoI.back()); w.undoI.pop_back();
+		w.idleI = InputMapJson(w); w.editing = false; w.dirty = true;
+	}
 }
 
 void EditorUI::AssetEditorRedo(AssetEditorWin& w)
@@ -379,6 +388,12 @@ void EditorUI::AssetEditorRedo(AssetEditorWin& w)
 		w.undoS.push_back(SnapMeta(w.tex));
 		ApplyMeta(w.tex, w.redoS.back()); w.redoS.pop_back();
 		w.idleS = SnapMeta(w.tex); SlicerApplyLive(w.tex); w.dirty = true;
+	}
+	else if (w.ext == ".nuinput" && !w.redoI.empty())
+	{
+		w.undoI.push_back(InputMapJson(w));
+		LoadInputMapJson(w, w.redoI.back()); w.redoI.pop_back();
+		w.idleI = InputMapJson(w); w.editing = false; w.dirty = true;
 	}
 }
 
@@ -453,7 +468,20 @@ void EditorUI::OpenAssetEditor(const std::string& path)
 	std::string ext = bfs::path(path).extension().string();
 	for (char& c : ext) c = (char)std::tolower((unsigned char)c);
 	const bool isAudio = (ext == ".ogg" || ext == ".wav" || ext == ".mp3" || ext == ".flac");
-	if (ext != ".numat" && ext != ".numesh" && ext != ".nuprefab" && ext != ".nutex" && !isAudio) return;
+	if (ext != ".numat" && ext != ".numesh" && ext != ".nuprefab" && ext != ".nutex" && ext != ".nuinput" && !isAudio) return;
+
+	if (ext == ".nuinput")   // gameplay input map: pure data CRUD — no 3D scene, edits + saves the file
+	{
+		AssetEditorWin w;
+		w.path = path; w.ext = ext; w.wantFocus = true;
+		bfs::ifstream f{ bfs::path(path) };
+		std::string js((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+		nuke::Input::InputMapData m = nuke::Input::ParseMapString(js);
+		w.inActions = m.actions; w.inContexts = m.contexts;
+		w.idleI = nuke::Input::SerializeMap(m);   // undo baseline
+		assetEds.push_back(std::move(w));
+		return;
+	}
 
 	if (isAudio)   // audio preview: no 3D scene — just the file path + a Preview-bus voice
 	{
@@ -471,13 +499,8 @@ void EditorUI::OpenAssetEditor(const std::string& path)
 		if (!w.tex) return;
 		if (w.tex->usage != nuke::Texture::UsageSprite) w.tex->usage = nuke::Texture::UsageSprite;  // opening it in the slicer implies it IS a sprite
 		w.texPreview = UploadTexPreview(w.tex, 2048, w.texPrevW, w.texPrevH);
-		// createTexture2D hands back the GPU view POINTER as the handle; a freed view's memory can be
-		// reused, so a fresh preview may get a handle still queued for deferred destroy — cancel that
-		// pending destroy or it would free this LIVE texture a few frames later (use-after-free -> device
-		// removed on the next draw that binds it).
-		if (w.texPreview)
-			for (auto it = aeTexTrash.begin(); it != aeTexTrash.end(); )
-				it = (it->first == w.texPreview) ? aeTexTrash.erase(it) : it + 1;
+		// (destroyTexture2D defers destruction INSIDE the renderer now — a destroyed handle's view
+		// stays alive until no in-flight draw data can reference it, so handle reuse can't collide.)
 		w.slFirst = 0; w.slCount = w.tex->SpriteCount();
 		w.idleS = SnapMeta(w.tex);
 		assetEds.push_back(std::move(w));
@@ -932,13 +955,6 @@ bool EditorUI::DrawPrefabAtomEditor(AssetEditorWin& w, Atom* a)
 
 void EditorUI::winAssetEditors()
 {
-	// Flush deferred GPU-preview destroys: only free a handle once enough frames have passed that no
-	// in-flight ImGui draw data (main window + native viewports) still references it.
-	if (!aeTexTrash.empty())
-		if (iRender* r = AppInstance::GetSingleton()->render)
-			for (int i = (int)aeTexTrash.size() - 1; i >= 0; --i)
-				if (--aeTexTrash[i].second <= 0) { r->destroyTexture2D(aeTexTrash[i].first); aeTexTrash.erase(aeTexTrash.begin() + i); }
-
 	aeFocused = -1;   // recomputed below; EditorUI::Undo/Redo route by it
 	for (int i = 0; i < (int)assetEds.size(); ++i)
 	{
@@ -949,16 +965,18 @@ void EditorUI::winAssetEditors()
 		wcls.ViewportFlagsOverrideSet = ImGuiViewportFlags_NoAutoMerge;
 		ImGui::SetNextWindowClass(&wcls);
 		const bool isSlicer = (w.ext == ".nutex");   // 2D Sprite Slicer — no 3D scene, but not audio either
-		const bool isAudio = !w.pv && !isSlicer;      // audio previews are the only OTHER editors without a scene
+		const bool isInput  = (w.ext == ".nuinput"); // gameplay input map — pure data CRUD, no scene
+		const bool isAudio = !w.pv && !isSlicer && !isInput;   // audio previews are the only OTHER sceneless editors
 		ImGui::SetNextWindowSize(isAudio ? ImVec2(420.0f, 170.0f)
-		                                 : ImVec2(w.ext == ".nuprefab" ? 900.0f : (isSlicer ? 760.0f : 420.0f), 640.0f), ImGuiCond_FirstUseEver);
-		const char* icon = isAudio ? ICON_LC_MUSIC : isSlicer ? ICON_LC_GRID_2X2
+		                                 : ImVec2(w.ext == ".nuprefab" ? 900.0f : (isSlicer ? 760.0f : (isInput ? 820.0f : 420.0f)), 640.0f), ImGuiCond_FirstUseEver);
+		const char* icon = isAudio ? ICON_LC_MUSIC : isSlicer ? ICON_LC_GRID_2X2 : isInput ? ICON_LC_SETTINGS_2
 		                 : w.ext == ".numat" ? ICON_LC_PALETTE : (w.ext == ".numesh" ? ICON_LC_BOX : ICON_LC_PACKAGE);
 		std::string title = std::string(icon) + " " + bfs::path(w.path).filename().string() + "###ae:" + w.path;
-		// No window scrollbars: the preview is sized to the free space, and a flickering
-		// scrollbar would oscillate that size every frame (children scroll themselves).
-		ImGuiWindowFlags wf = window_flags | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse
-		                    | (w.dirty ? ImGuiWindowFlags_UnsavedDocument : 0);
+		// No window scrollbars for PREVIEW editors: the 3D/image view is sized to the free space and
+		// a flickering scrollbar would oscillate that size every frame (children scroll themselves).
+		// Pure-form editors (.nuinput) have flowing content and DO scroll like a normal window.
+		ImGuiWindowFlags wf = window_flags | (w.dirty ? ImGuiWindowFlags_UnsavedDocument : 0)
+		                    | (isInput ? 0 : (ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse));
 		if (ImGui::Begin(title.c_str(), &w.open, wf))
 		{
 			const bool focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
@@ -992,6 +1010,14 @@ void EditorUI::winAssetEditors()
 							w.idleS = SnapMeta(w.tex); w.undoS.clear(); w.redoS.clear();
 							SlicerApplyLive(w.tex);
 						}
+					}
+					else if (w.ext == ".nuinput")
+					{
+						bfs::ifstream f{ bfs::path(w.path) };
+						std::string js((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+						nuke::Input::InputMapData m = nuke::Input::ParseMapString(js);
+						w.inActions = m.actions; w.inContexts = m.contexts;
+						w.idleI = nuke::Input::SerializeMap(m); w.undoI.clear(); w.redoI.clear();
 					}
 					w.dirty = false;
 				}
@@ -1262,6 +1288,8 @@ void EditorUI::winAssetEditors()
 					else ImGui::TextDisabled(playing ? "streaming..." : "stopped");
 				}
 			}
+			else if (isInput)
+				DrawInputEditor(w);   // actions / contexts / bindings CRUD + press-to-bind (edits w.in*)
 
 			// Save (button or Ctrl+S while focused).
 			if (focused && ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S, false)) wantSave = true;
@@ -1270,6 +1298,7 @@ void EditorUI::winAssetEditors()
 				if      (w.ext == ".numat"    && w.mat)        { w.mat->SaveToFile(w.path); w.dirty = false; }
 				else if (w.ext == ".nuprefab" && w.prefabRoot) { nuke::SavePrefab(w.prefabRoot, w.path); w.dirty = false; }
 				else if (isSlicer && w.tex)                    { w.tex->SaveToFile(w.path); SlicerApplyLive(w.tex); w.dirty = false; }
+				else if (isInput)                              { SaveInputAsset(w); w.dirty = false; }
 				// (saved .numat hot-reloads into the scene via the existing mtime watcher)
 			}
 
@@ -1290,6 +1319,12 @@ void EditorUI::winAssetEditors()
 					for (Material* m : w.redoM) delete m;
 					w.redoM.clear();
 				}
+				else if (w.ext == ".nuinput" && !w.idleI.empty())
+				{
+					w.undoI.push_back(w.idleI);
+					if (w.undoI.size() > kAeUndoCap) w.undoI.erase(w.undoI.begin());
+					w.redoI.clear();
+				}
 				w.editing = true;
 			}
 			if (w.editing && !w.editedNow && !ImGui::IsAnyItemActive() && !(w.pv && w.pv->gizmoBusy))
@@ -1298,6 +1333,7 @@ void EditorUI::winAssetEditors()
 				w.editing = false;
 				if      (w.ext == ".nuprefab" && w.prefabRoot) w.idleP = nuke::SaveAtomToString(w.prefabRoot);
 				else if (w.ext == ".numat"    && w.mat)        { delete w.idleM; w.idleM = w.mat->Clone(); }
+				else if (w.ext == ".nuinput")                  w.idleI = InputMapJson(w);
 			}
 			w.editedNow = false;
 		}
@@ -1323,6 +1359,7 @@ void EditorUI::winAssetEditors()
 				if      (w.ext == ".numat"    && w.mat)        w.mat->SaveToFile(w.path);
 				else if (w.ext == ".nuprefab" && w.prefabRoot) nuke::SavePrefab(w.prefabRoot, w.path);
 				else if (w.ext == ".nutex"    && w.tex)        { w.tex->SaveToFile(w.path); SlicerApplyLive(w.tex); }
+				else if (w.ext == ".nuinput")                  SaveInputAsset(w);
 				w.dirty = false; w.open = false; aeCloseConfirm = -1; ImGui::CloseCurrentPopup();
 			}
 			ImGui::SameLine();
@@ -1345,7 +1382,11 @@ void EditorUI::winAssetEditors()
 			delete w.idleM;
 			for (Material* m : w.undoM) delete m;
 			for (Material* m : w.redoM) delete m;
-			if (w.texPreview) { aeTexTrash.push_back({ w.texPreview, 3 }); w.texPreview = 0; }   // deferred free (in-flight draw data)
+			if (w.texPreview)   // destruction is deferred INSIDE the renderer (centralized GPU trash)
+			{
+				if (iRender* r = AppInstance::GetSingleton()->render) r->destroyTexture2D(w.texPreview);
+				w.texPreview = 0;
+			}
 			if (w.tex) delete w.tex;
 			if (w.pv) ReleasePreview(w.pv);
 			assetEds.erase(assetEds.begin() + i);
