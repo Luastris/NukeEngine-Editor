@@ -5,6 +5,8 @@
 #include "API/Model/Light.h"             // entity icons: glyph/tint per component
 #include "API/Model/ReflectionProbe.h"
 #include "API/Model/Environment.h"
+#include "API/Model/Screen.h"    // editor feeds the "game screen" size (the viewport panel)
+#include "API/Model/Canvas.h"    // canvas 2D resize gizmo (corner/edge handles)
 #include <functional>
 #include <cmath>
 #include <algorithm>
@@ -12,6 +14,10 @@
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/gtx/matrix_decompose.hpp>   // gizmo: decompose the manipulated world matrix
 #include <glm/gtc/type_ptr.hpp>
+
+// True while the canvas 2D rect gizmo is hovered/dragged this frame — the click-to-pick handler
+// must not steal (or deselect on) clicks meant for the handles.
+static bool s_canvasGizmoHot = false;
 
 // Cast a ray from a screen point inside the viewport image and return the atom under it (null = none).
 // Shared by left-click selection and asset drag&drop onto an object.
@@ -209,6 +215,7 @@ void EditorUI::winRender()
 		{
 			r->resizeRenderTarget(sceneRTId, (int)avail.x, (int)avail.y); // match the panel
 		}
+		nuke::Screen::Set((int)avail.x, (int)avail.y);   // the editor's "game screen" = the viewport panel
 		uint64_t tex = r->getRenderTargetTexture(sceneRTId);
 		if (tex)
 		{
@@ -362,6 +369,138 @@ void EditorUI::winRender()
 			}
 		}
 
+		// --- Canvas 2D rect gizmo: corner + EDGE handles so specific sides stretch (not the whole
+		// rect at once). Works for WorldSpace rects (world units) and screen-space canvases on their
+		// editor plane (1 ref px = 1/ppu world units). Dragging writes Canvas width/height and shifts the centre so the
+		// opposite side stays put. ------------------------------------------------------------------
+		s_canvasGizmoHot = false;
+		{
+			AppInstance* capp = AppInstance::GetSingleton();
+			Atom* csel = capp->selectedInHieararchy;
+			nuke::Canvas* cv = csel ? csel->GetComponent<nuke::Canvas>() : nullptr;
+			if (cv && cv->transform && editorCam && editorCam->transform)
+			{
+				ImVec2 rmin = ImGui::GetItemRectMin();
+				ImVec2 vsz  = ImGui::GetItemRectSize();
+				Transform* gcam = editorCam->transform;
+				Vector3 ge = gcam->globalPosition();
+				Vector3 gf = gcam->direction(), gu = gcam->up(), gr = gcam->right();
+				float aspect = (vsz.y > 0.0f) ? vsz.x / vsz.y : 1.0f;
+				glm::mat4 gv = glm::lookAtLH(
+					glm::vec3((float)ge.x, (float)ge.y, (float)ge.z),
+					glm::vec3((float)(ge.x + gf.x), (float)(ge.y + gf.y), (float)(ge.z + gf.z)),
+					glm::vec3((float)gu.x, (float)gu.y, (float)gu.z));
+				glm::mat4 gp = EditorCamProj(editorCam, aspect);
+				auto toScreen = [&](const Vector3& w, ImVec2& out) -> bool
+				{
+					glm::vec4 c = gp * gv * glm::vec4((float)w.x, (float)w.y, (float)w.z, 1.0f);
+					if (c.w <= 1e-4f) return false;
+					out = ImVec2(rmin.x + (c.x / c.w * 0.5f + 0.5f) * vsz.x,
+					             rmin.y + (0.5f - c.y / c.w * 0.5f) * vsz.y);
+					return true;
+				};
+
+				const float es = (cv->mode == nuke::CanvasMode::WorldSpace) ? 1.0f : cv->PxToWorld();
+				Transform* ct = cv->transform;
+				Vector3 P = ct->globalPosition(), R = ct->right(), U = ct->up();
+				float hw = cv->width * 0.5f * es, hh = cv->height * 0.5f * es;
+
+				// 8 handles (corners + edge midpoints), plane-signed codes.
+				ImVec2 hpos[8]; int codes[8][2]; int k = 0;
+				for (int sy = -1; sy <= 1; ++sy)
+					for (int sx = -1; sx <= 1; ++sx)
+					{
+						if (!sx && !sy) continue;
+						Vector3 wp(P.x + R.x * sx * hw + U.x * sy * hh,
+						           P.y + R.y * sx * hw + U.y * sy * hh,
+						           P.z + R.z * sx * hw + U.z * sy * hh);
+						ImVec2 s2;
+						hpos[k]  = toScreen(wp, s2) ? s2 : ImVec2(-10000, -10000);
+						codes[k][0] = sx; codes[k][1] = sy;
+						++k;
+					}
+				ImVec2 mp = ImGui::GetIO().MousePos;
+				int hover = -1;
+				for (int i = 0; i < 8; ++i)
+				{
+					float dx = mp.x - hpos[i].x, dy = mp.y - hpos[i].y;
+					if (dx * dx + dy * dy < 8.0f * 8.0f) { hover = i; break; }
+				}
+
+				static bool dragging = false; static int dragIdx = -1; static void* dragCv = nullptr;
+				if (!dragging && hover >= 0 && ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+				{ dragging = true; dragIdx = hover; dragCv = cv; }
+				if (dragging && (!ImGui::IsMouseDown(ImGuiMouseButton_Left) || dragCv != (void*)cv))
+				{ dragging = false; dragIdx = -1; dragCv = nullptr; }
+				s_canvasGizmoHot = (hover >= 0) || dragging;
+
+				if (dragging && dragCv == (void*)cv && dragIdx >= 0)
+				{
+					// Mouse ray (same math as PickAtScreen) -> canvas plane -> plane coords (du, dv).
+					float ndcx = ((mp.x - rmin.x) / vsz.x) * 2.0f - 1.0f;
+					float ndcy = 1.0f - ((mp.y - rmin.y) / vsz.y) * 2.0f;
+					Vector3 ro = ge, rdir = gf;
+					if (editorCam->projBlend >= 0.5f)
+					{
+						float oh = (editorCam->orthoSize > 1e-4f) ? editorCam->orthoSize : 1.0f, ow = oh * aspect;
+						ro = Vector3(ge.x + ndcx * ow * gr.x + ndcy * oh * gu.x,
+						             ge.y + ndcx * ow * gr.y + ndcy * oh * gu.y,
+						             ge.z + ndcx * ow * gr.z + ndcy * oh * gu.z);
+					}
+					else
+					{
+						float thf = tanf((float)editorCam->fov * 0.5f * 0.01745329252f);
+						rdir = Vector3(gf.x + ndcx * thf * aspect * gr.x + ndcy * thf * gu.x,
+						               gf.y + ndcx * thf * aspect * gr.y + ndcy * thf * gu.y,
+						               gf.z + ndcx * thf * aspect * gr.z + ndcy * thf * gu.z);
+					}
+					Vector3 n(R.y * U.z - R.z * U.y, R.z * U.x - R.x * U.z, R.x * U.y - R.y * U.x);
+					double denom = rdir.x * n.x + rdir.y * n.y + rdir.z * n.z;
+					if (fabs(denom) > 1e-8)
+					{
+						double tHit = ((P.x - ro.x) * n.x + (P.y - ro.y) * n.y + (P.z - ro.z) * n.z) / denom;
+						Vector3 hit(ro.x + rdir.x * tHit, ro.y + rdir.y * tHit, ro.z + rdir.z * tHit);
+						Vector3 dv3(hit.x - P.x, hit.y - P.y, hit.z - P.z);
+						float du = (float)(dv3.x * R.x + dv3.y * R.y + dv3.z * R.z);
+						float dvv = (float)(dv3.x * U.x + dv3.y * U.y + dv3.z * U.z);
+						const int sx = codes[dragIdx][0], sy = codes[dragIdx][1];
+						Vector3 shift(0, 0, 0);
+						if (sx)   // horizontal side follows the mouse; the opposite side stays fixed
+						{
+							float fixedE = -sx * hw, newE = du;
+							float newW = fabsf(newE - fixedE); if (newW < 0.01f * es) newW = 0.01f * es;
+							float cOff = (fixedE + newE) * 0.5f;
+							cv->width = newW / es;
+							shift = Vector3(shift.x + R.x * cOff, shift.y + R.y * cOff, shift.z + R.z * cOff);
+						}
+						if (sy)   // vertical side
+						{
+							float fixedE = -sy * hh, newE = dvv;
+							float newH = fabsf(newE - fixedE); if (newH < 0.01f * es) newH = 0.01f * es;
+							float cOff = (fixedE + newE) * 0.5f;
+							cv->height = newH / es;
+							shift = Vector3(shift.x + U.x * cOff, shift.y + U.y * cOff, shift.z + U.z * cOff);
+						}
+						if (shift.x || shift.y || shift.z)
+							ct->SetGlobal(Vector3(P.x + shift.x, P.y + shift.y, P.z + shift.z),
+							              ct->globalRotation(), ct->globalScale());
+					}
+				}
+
+				// Draw the handles on the viewport overlay (filled = hovered/dragged).
+				ImDrawList* dl = ImGui::GetWindowDrawList();
+				for (int i = 0; i < 8; ++i)
+				{
+					if (hpos[i].x < -999.0f) continue;
+					const bool hot = (i == hover) || (dragging && i == dragIdx);
+					const ImU32 col = hot ? IM_COL32(255, 200, 60, 255) : IM_COL32(80, 180, 255, 255);
+					const bool corner = codes[i][0] && codes[i][1];
+					if (corner) dl->AddRectFilled(ImVec2(hpos[i].x - 4, hpos[i].y - 4), ImVec2(hpos[i].x + 4, hpos[i].y + 4), col);
+					else        dl->AddCircleFilled(hpos[i], 4.0f, col);
+				}
+			}
+		}
+
 		// Viewport camera control (while hovering the image):
 		//   RMB drag = orbit/look, MMB drag = pan, wheel = dolly.
 		if (editorCam && editorCam->transform && ImGui::IsItemHovered())
@@ -372,7 +511,7 @@ void EditorUI::winRender()
 
 			// Left-click: pick the object under the cursor (null = deselect).
 			// Skip if the gizmo is being interacted with, so dragging it doesn't deselect.
-			if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGuizmo::IsUsing() && !ImGuizmo::IsOver())
+			if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGuizmo::IsUsing() && !ImGuizmo::IsOver() && !s_canvasGizmoHot)
 			{
 				ImVec2 rmin = ImGui::GetItemRectMin();
 				ImVec2 sz   = ImGui::GetItemRectSize();

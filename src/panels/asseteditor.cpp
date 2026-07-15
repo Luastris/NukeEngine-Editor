@@ -431,7 +431,8 @@ static EditorUI::SpriteMeta SnapMeta(const nuke::Texture* t)
 {
 	return { t->spriteColumns, t->spriteRows,
 	         t->spriteMarginLeft, t->spriteMarginRight, t->spriteMarginTop, t->spriteMarginBottom,
-	         t->spriteSpacingX, t->spriteSpacingY, t->sliceLeft, t->sliceRight, t->sliceTop, t->sliceBottom };
+	         t->spriteSpacingX, t->spriteSpacingY, t->sliceLeft, t->sliceRight, t->sliceTop, t->sliceBottom,
+	         t->nineSlice };
 }
 static void ApplyMeta(nuke::Texture* t, const EditorUI::SpriteMeta& m)
 {
@@ -439,6 +440,7 @@ static void ApplyMeta(nuke::Texture* t, const EditorUI::SpriteMeta& m)
 	t->spriteMarginLeft = m.ml; t->spriteMarginRight = m.mr; t->spriteMarginTop = m.mt; t->spriteMarginBottom = m.mb;
 	t->spriteSpacingX = m.sx; t->spriteSpacingY = m.sy;
 	t->sliceLeft = m.sl; t->sliceRight = m.sr; t->sliceTop = m.st; t->sliceBottom = m.sb;
+	t->nineSlice = m.nine;
 }
 // Mirror the edited slice metadata onto the live ResDB texture so scene sprites re-slice immediately
 // (int fields only — no pixel re-upload, no cache invalidation).
@@ -598,8 +600,9 @@ void EditorUI::DrawSpriteSlicer(AssetEditorWin& w)
 
 	// ---- header ----
 	ImGui::SetNextItemWidth(150);
-	const char* modes[] = { "Sprite Slicer" };
+	const char* modes[] = { "Sprite Slicer", "Nine-Slice" };
 	ImGui::Combo("##mode", &w.slMode, modes, IM_ARRAYSIZE(modes));
+	const bool nineMode = (w.slMode == 1);   // drag the 9-slice borders instead of the grid
 	ImGui::SameLine(); ImGui::TextDisabled("%d x %d px", t->width, t->height);
 	ImGui::SameLine(); if (ImGui::SmallButton("Fit")) w.slUserView = false;
 	ImGui::Separator();
@@ -632,6 +635,8 @@ void EditorUI::DrawSpriteSlicer(AssetEditorWin& w)
 		ImGui::TableSetupColumn("v", ImGuiTableColumnFlags_WidthStretch);
 		return true;
 	};
+	if (!nineMode)
+	{
 	ImGui::SeparatorText("Grid");
 	if (Table("sl_grid")) {
 		Row("Columns", &t->spriteColumns, 1, 256);
@@ -644,6 +649,7 @@ void EditorUI::DrawSpriteSlicer(AssetEditorWin& w)
 		Row("Spacing Y", &t->spriteSpacingY, 0, t->height);
 		ImGui::EndTable();
 	}
+	}
 	ImGui::SeparatorText("9-Slice");
 	if (Table("sl_9s")) {
 		Row("Left",   &t->sliceLeft,   0, t->width);
@@ -652,6 +658,13 @@ void EditorUI::DrawSpriteSlicer(AssetEditorWin& w)
 		Row("Bottom", &t->sliceBottom, 0, t->height);
 		ImGui::EndTable();
 	}
+	if (nineMode)
+	{
+		if (ImGui::Checkbox("Enable nine-slice", &t->nineSlice)) { w.dirty = true; SlicerApplyLive(t); SlicerPushUndo(w); }
+		ImGui::TextWrapped("Drag the green border lines on the sheet. Corners never stretch; edges stretch "
+		                   "along one axis, the centre along both. Applies to EVERY sprite using this texture.");
+	}
+	if (!nineMode) {
 	ImGui::SeparatorText("Animation");
 	if (Table("sl_anim")) {
 		ImGui::TableNextRow(); ImGui::TableSetColumnIndex(0); ImGui::AlignTextToFramePadding(); ImGui::TextUnformatted("First");
@@ -672,6 +685,7 @@ void EditorUI::DrawSpriteSlicer(AssetEditorWin& w)
 		PadRow("Pad L", &w.slPadL); PadRow("Pad R", &w.slPadR); PadRow("Pad T", &w.slPadT); PadRow("Pad B", &w.slPadB);
 		ImGui::EndTable();
 	}
+	}   // !nineMode (animation/mirror sections)
 	clampGrid();
 	ImGui::EndChild();
 
@@ -722,8 +736,17 @@ void EditorUI::DrawSpriteSlicer(AssetEditorWin& w)
 		bool inArea = overArea || (w.slDrag != 0);
 		auto nearX = [&](float sx){ return fabsf(io.MousePos.x - sx) < 5.0f && io.MousePos.y > c0.y && io.MousePos.y < c0.y + csz.y; };
 		auto nearY = [&](float sy){ return fabsf(io.MousePos.y - sy) < 5.0f && io.MousePos.x > c0.x && io.MousePos.x < c0.x + csz.x; };
-		int hover = 0;   // 1..4 outer L/R/T/B, 5 spacingX, 6 spacingY
+		int hover = 0;   // 1..4 outer L/R/T/B, 5 spacingX, 6 spacingY; NINE-SLICE mode: 7..10 slice L/R/T/B
 		if (w.slDrag == 0 && inArea) {
+			if (nineMode)
+			{
+				if      (nearX(sX((float)t->sliceLeft)))              hover = 7;
+				else if (nearX(sX((float)(t->width  - t->sliceRight)))) hover = 8;
+				else if (nearY(sY((float)t->sliceTop)))               hover = 9;
+				else if (nearY(sY((float)(t->height - t->sliceBottom)))) hover = 10;
+			}
+			else
+			{
 			if      (nearX(sX(exL))) hover = 1;
 			else if (nearX(sX(exR))) hover = 2;
 			else if (nearY(sY(eyT))) hover = 3;
@@ -732,9 +755,10 @@ void EditorUI::DrawSpriteSlicer(AssetEditorWin& w)
 				for (int c = 0; c < t->spriteColumns - 1 && !hover; ++c) { int x0,y0,cw,ch; if (t->SpriteCellRect(c, x0, y0, cw, ch) && nearX(sX((float)(x0 + cw)))) hover = 5; }
 				for (int r = 0; r < t->spriteRows - 1 && !hover; ++r)    { int x0,y0,cw,ch; if (t->SpriteCellRect(r * t->spriteColumns, x0, y0, cw, ch) && nearY(sY((float)(y0 + ch)))) hover = 6; }
 			}
+			}
 		}
-		if      (hover == 1 || hover == 2 || hover == 5) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
-		else if (hover == 3 || hover == 4 || hover == 6) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+		if      (hover == 1 || hover == 2 || hover == 5 || hover == 7 || hover == 8)  ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+		else if (hover == 3 || hover == 4 || hover == 6 || hover == 9 || hover == 10) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
 		if (hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) w.slDrag = hover;
 		if (w.slDrag && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
 			float txp = (io.MousePos.x - ip0.x) / z, typ = (io.MousePos.y - ip0.y) / z;
@@ -746,6 +770,10 @@ void EditorUI::DrawSpriteSlicer(AssetEditorWin& w)
 				case 4: t->spriteMarginBottom = Rnd(t->height - typ); break;
 				case 5: t->spriteSpacingX += Rnd(io.MouseDelta.x / z); break;
 				case 6: t->spriteSpacingY += Rnd(io.MouseDelta.y / z); break;
+				case 7:  t->sliceLeft   = Rnd(txp); break;
+				case 8:  t->sliceRight  = Rnd(t->width  - txp); break;
+				case 9:  t->sliceTop    = Rnd(typ); break;
+				case 10: t->sliceBottom = Rnd(t->height - typ); break;
 			}
 			clampGrid(); w.dirty = true; SlicerApplyLive(t);
 		}
@@ -768,14 +796,15 @@ void EditorUI::DrawSpriteSlicer(AssetEditorWin& w)
 				if (q1.x > q0.x && q1.y > q0.y) dl->AddRect(q0, q1, IM_COL32(255, 120, 120, 110), 0, 0, 1.0f);
 			}
 		}
-		if (t->sliceLeft || t->sliceRight || t->sliceTop || t->sliceBottom) {   // 9-slice guides
-			ImU32 sc = IM_COL32(120, 255, 120, 150);
+		if (nineMode || t->sliceLeft || t->sliceRight || t->sliceTop || t->sliceBottom) {   // 9-slice guides
+			ImU32 sc = nineMode ? IM_COL32(120, 255, 120, 255) : IM_COL32(120, 255, 120, 150);
+			float th = nineMode ? 2.0f : 1.0f;
 			float L = sX((float)t->sliceLeft), R = sX((float)(t->width - t->sliceRight));
 			float T = sY((float)t->sliceTop),  B = sY((float)(t->height - t->sliceBottom));
-			dl->AddLine(ImVec2(L, sY(0)), ImVec2(L, sY((float)t->height)), sc);
-			dl->AddLine(ImVec2(R, sY(0)), ImVec2(R, sY((float)t->height)), sc);
-			dl->AddLine(ImVec2(sX(0), T), ImVec2(sX((float)t->width), T), sc);
-			dl->AddLine(ImVec2(sX(0), B), ImVec2(sX((float)t->width), B), sc);
+			dl->AddLine(ImVec2(L, sY(0)), ImVec2(L, sY((float)t->height)), sc, th);
+			dl->AddLine(ImVec2(R, sY(0)), ImVec2(R, sY((float)t->height)), sc, th);
+			dl->AddLine(ImVec2(sX(0), T), ImVec2(sX((float)t->width), T), sc, th);
+			dl->AddLine(ImVec2(sX(0), B), ImVec2(sX((float)t->width), B), sc, th);
 		}
 		ImU32 edge = IM_COL32(255, 140, 40, 220);   // outer margin frame (solid, brighter than the cell grid)
 		dl->AddLine(ImVec2(sX(exL), sY(eyT)), ImVec2(sX(exL), sY(eyB)), edge, 1.5f);
@@ -807,15 +836,54 @@ void EditorUI::DrawSpriteSlicer(AssetEditorWin& w)
 	}
 	ImGui::EndChild();
 
-	// ===== RIGHT: live cell preview =====
+	// ===== RIGHT: live cell preview (nine-slice mode: a STRETCHED preview built from the 9 patches) =====
 	ImGui::SameLine();
 	ImGui::BeginChild("sl_prev", ImVec2(0, 0), ImGuiChildFlags_Borders);
-	ImGui::TextDisabled("Preview  ·  cell %d", activeCell);
-	if (w.texPreview && haveActive && acw > 0 && ach > 0) {
-		ImVec2 uv0((float)ax0 / t->width, (float)ay0 / t->height), uv1((float)(ax0 + acw) / t->width, (float)(ay0 + ach) / t->height);
-		ImVec2 av = ImGui::GetContentRegionAvail();
-		float ar = (float)acw / ach, dw = av.x, dh = dw / ar; if (dh > av.y) { dh = av.y; dw = dh * ar; }
-		ImGui::Image((ImTextureID)w.texPreview, ImVec2(dw, dh), uv0, uv1);
+	if (nineMode)
+	{
+		ImGui::TextDisabled("Stretch preview");
+		static float s_pw = 2.0f, s_ph = 1.5f;   // preview stretch factors (edit-session UI state)
+		ImGui::SetNextItemWidth(-1); ImGui::SliderFloat("##pw", &s_pw, 0.25f, 4.0f, "W x%.2f");
+		ImGui::SetNextItemWidth(-1); ImGui::SliderFloat("##ph", &s_ph, 0.25f, 4.0f, "H x%.2f");
+		if (w.texPreview && t->width > 0 && t->height > 0)
+		{
+			// Fit the stretched rect into the panel, then compose 9 sub-images: corners keep their
+			// pixel size (scaled by the fit), edges stretch one axis, the centre both.
+			ImVec2 av = ImGui::GetContentRegionAvail();
+			float outW = t->width * s_pw, outH = t->height * s_ph;
+			float fitP = 1.0f;
+			if (outW > 0 && outH > 0) { fitP = (av.x - 8) / outW; float fy = (av.y - 8) / outH; if (fy < fitP) fitP = fy; if (fitP <= 0) fitP = 0.01f; }
+			float dw = outW * fitP, dh = outH * fitP;
+			float bl = t->sliceLeft * fitP, br = t->sliceRight * fitP, bt = t->sliceTop * fitP, bb = t->sliceBottom * fitP;
+			if (bl + br > dw && bl + br > 0) { float s = dw / (bl + br); bl *= s; br *= s; }
+			if (bt + bb > dh && bt + bb > 0) { float s = dh / (bt + bb); bt *= s; bb *= s; }
+			ImVec2 p0 = ImGui::GetCursorScreenPos();
+			ImDrawList* pdl = ImGui::GetWindowDrawList();
+			float xs[4] = { 0, bl, dw - br, dw };
+			float ys[4] = { 0, bt, dh - bb, dh };   // screen top -> bottom
+			float us[4] = { 0, (float)t->sliceLeft / t->width, 1.0f - (float)t->sliceRight / t->width, 1.0f };
+			float vs[4] = { 0, (float)t->sliceTop / t->height, 1.0f - (float)t->sliceBottom / t->height, 1.0f };
+			for (int cxi = 0; cxi < 3; ++cxi)
+				for (int ryi = 0; ryi < 3; ++ryi)
+				{
+					if (xs[cxi + 1] <= xs[cxi] || ys[ryi + 1] <= ys[ryi]) continue;
+					pdl->AddImage((ImTextureID)w.texPreview,
+					              ImVec2(p0.x + xs[cxi], p0.y + ys[ryi]), ImVec2(p0.x + xs[cxi + 1], p0.y + ys[ryi + 1]),
+					              ImVec2(us[cxi], vs[ryi]), ImVec2(us[cxi + 1], vs[ryi + 1]));
+				}
+			pdl->AddRect(p0, ImVec2(p0.x + dw, p0.y + dh), IM_COL32(120, 255, 120, 120));
+			ImGui::Dummy(ImVec2(dw, dh));
+		}
+	}
+	else
+	{
+		ImGui::TextDisabled("Preview  ·  cell %d", activeCell);
+		if (w.texPreview && haveActive && acw > 0 && ach > 0) {
+			ImVec2 uv0((float)ax0 / t->width, (float)ay0 / t->height), uv1((float)(ax0 + acw) / t->width, (float)(ay0 + ach) / t->height);
+			ImVec2 av = ImGui::GetContentRegionAvail();
+			float ar = (float)acw / ach, dw = av.x, dh = dw / ar; if (dh > av.y) { dh = av.y; dw = dh * ar; }
+			ImGui::Image((ImTextureID)w.texPreview, ImVec2(dw, dh), uv0, uv1);
+		}
 	}
 	ImGui::EndChild();
 }

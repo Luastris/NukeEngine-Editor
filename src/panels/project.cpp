@@ -1,6 +1,7 @@
 // project panel — EditorUI method definitions (translation unit).
 #include <editor/editorui.h>
 #include <API/Model/PostProcess.h>   // serialize the editor camera's post-effect chain (RTX/rtreflect)
+#include <API/Model/Layers.h>        // render-layer slot names persist in the .nuproj
 #include <iterator>   // istreambuf_iterator (read world file for disk-sync)
 
 // The project manifest (project/game.nuproj): content dir, startup world, plugin load list.
@@ -62,6 +63,7 @@ void EditorUI::SaveProject()
 	nlohmann::json hk = nlohmann::json::object();   // hotkey bindings (id -> chord), saved with the project
 	for (auto& kv : nuke::Hotkeys::Get()->ExportBindings()) hk[kv.first] = kv.second;
 	j["hotkeys"] = hk;
+	j["layers"] = nuke::Layers::All();   // render-layer slot names (32; see nuke::Layers)
 	bfs::ofstream f{bfs::path(projectFile)};
 	if (f) f << j.dump(2);
 }
@@ -108,6 +110,13 @@ void EditorUI::LoadProject()
 	{
 		pluginListLoaded = true;
 		for (auto& p : j["plugins"]) enabledPlugins.push_back(p.get<std::string>());
+	}
+	// Render-layer slot names (project data -> the engine's Layers registry).
+	if (j.contains("layers") && j["layers"].is_array())
+	{
+		std::vector<std::string> names;
+		for (auto& n : j["layers"]) names.push_back(n.is_string() ? n.get<std::string>() : std::string());
+		nuke::Layers::SetAll(names);
 	}
 	// Hotkey bindings are applied AFTER plugins load (so plugin-registered hotkeys exist) — stash them.
 	pendingHotkeyBinds.clear();

@@ -311,7 +311,8 @@ void InitEngine()
         edcamc->transform->position = { 0, 10, -10};
         edcamc->freeMode = true;
         //edcamc->Init(edcam);
-        edcam->layer = NUKEE_LAYER_EDITOR;
+        edcam->layer = 31;   // "Editor" layer: the editor's own objects (see nuke::Layers)
+        edcamc->editorCamera = true;   // screen-space canvases render as editable world planes for it
         AppInstance::GetSingleton()->currentWorld->GetHierarchy().push_back(edcam);
         //edcamc->renderer->currentWorld = AppInstance::GetSingleton()->currentWorld;
     }

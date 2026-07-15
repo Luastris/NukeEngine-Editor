@@ -442,7 +442,7 @@ public:
 	// live 3D view (own preview scene) and type-specific editing; saves back to the file.
 	// Snapshot of a texture's sprite-slice metadata (Sprite Slicer undo/redo — small enough to copy).
 	// margins ml/mr/mt/mb (per side), spacing sx/sy, 9-slice sl/sr/st/sb.
-	struct SpriteMeta { int cols=1,rows=1, ml=0,mr=0,mt=0,mb=0, sx=0,sy=0, sl=0,sr=0,st=0,sb=0; };
+	struct SpriteMeta { int cols=1,rows=1, ml=0,mr=0,mt=0,mb=0, sx=0,sy=0, sl=0,sr=0,st=0,sb=0; bool nine=false; };
 
 	struct AssetEditorWin
 	{

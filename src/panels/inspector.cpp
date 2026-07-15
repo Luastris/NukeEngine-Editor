@@ -10,6 +10,11 @@
 #include <API/Model/Material.h> // asset inspector: .numat fields
 #include <API/Model/Light.h>       // asset preview world: sun
 #include <API/Model/Environment.h> // asset preview world: sky/ambient
+#include <API/Model/Layers.h>      // render layers: atom Layer combo + camera Layer Mask
+#include <API/Model/Canvas.h>      // Anchors block: canvas-child detection + units
+#include <API/Model/RectAnchor.h>  // Anchors block: per-side anchors storage
+#include <API/Model/Sprite.h>      // Anchors block: element size for distance capture
+#include <functional>              // AtomRef picker: recursive hierarchy walk
 #include <boost/filesystem.hpp>
 namespace bfs = boost::filesystem;
 
@@ -80,6 +85,37 @@ void EditorUI::CamComponent(Camera* cam)
 	ImGui::DragFloat("Near", &cam->_near);
 	ImGui::DragFloat("Far", &cam->_far);
 	ImGui::Checkbox("Free mode", &cam->freeMode);
+
+	// Render-layer mask: which layers this camera draws (named multi-select over nuke::Layers).
+	{
+		unsigned int m = (unsigned int)cam->layerMask;
+		std::string shown = (m == 0xFFFFFFFFu) ? "Everything" : (m == 0 ? "Nothing" : "Mixed");
+		if (m != 0xFFFFFFFFu && m != 0)   // count the named picks for a nicer summary
+		{
+			int bits = 0; std::string one;
+			for (int i = 0; i < 32; ++i)
+				if ((m >> i) & 1u) { ++bits; if (bits == 1) { one = nuke::Layers::Name(i); if (one.empty()) one = "Layer " + std::to_string(i); } }
+			if (bits == 1) shown = one;
+		}
+		if (ImGui::BeginCombo("Layer Mask", shown.c_str()))
+		{
+			if (ImGui::Selectable("Everything")) { cam->layerMask = -1; m = 0xFFFFFFFFu; }
+			if (ImGui::Selectable("Nothing"))    { cam->layerMask = 0;  m = 0; }
+			ImGui::Separator();
+			for (int i = 0; i < 32; ++i)
+			{
+				std::string nm = nuke::Layers::Name(i);
+				if (nm.empty()) continue;   // unnamed slots hidden (still reachable from scripts)
+				bool on = (m >> i) & 1u;
+				if (ImGui::Checkbox((nm + "##lm" + std::to_string(i)).c_str(), &on))
+				{
+					if (on) m |= (1u << i); else m &= ~(1u << i);
+					cam->layerMask = (int)m;
+				}
+			}
+			ImGui::EndCombo();
+		}
+	}
 }
 
 // --- reusable asset picker -------------------------------------------------------------------
@@ -648,6 +684,52 @@ bool EditorUI::DrawFields(void* obj, nuke::TypeInfo* ti)
 			if (ImGui::ColorEdit4(w, t)) { c->r = t[0]; c->g = t[1]; c->b = t[2]; c->a = t[3]; changed = true; }
 			break;
 		}
+		case nuke::FT::AtomRef:
+		{
+			// A reference to a live Atom: combo of the world's atoms (+ None) and a drag-drop
+			// target from the hierarchy. Stored as the pointer; serialization travels by stable id.
+			// The prop's asset= hint FILTERS the picker to atoms carrying that component (e.g.
+			// asset="Camera" lists only camera atoms) — drops of anything else are rejected too.
+			Atom** slot = (Atom**)a;
+			auto passes = [&](Atom* at) -> bool
+			{
+				if (f.asset.empty() || !at) return at != nullptr;
+				for (nuke::Component* c : at->components)
+					if (c) if (nuke::TypeInfo* ti = c->GetType()) if (ti->name == f.asset) return true;
+				return false;
+			};
+			const char* cur = *slot ? (*slot)->name.c_str() : "<none>";
+			if (ImGui::BeginCombo(w, cur))
+			{
+				if (ImGui::Selectable("<none>", *slot == nullptr)) { *slot = nullptr; changed = true; }
+				std::function<void(bc::list<Atom*>&)> walk = [&](bc::list<Atom*>& gos)
+				{
+					for (Atom* at : gos)
+					{
+						if (!at) continue;
+						if (passes(at))
+						{
+							ImGui::PushID((void*)at);
+							if (ImGui::Selectable(at->name.c_str(), *slot == at)) { *slot = at; changed = true; }
+							ImGui::PopID();
+						}
+						walk(at->children);
+					}
+				};
+				walk(AppInstance::GetSingleton()->currentWorld->GetHierarchy());
+				ImGui::EndCombo();
+			}
+			if (ImGui::BeginDragDropTarget())   // drop an atom from the hierarchy panel
+			{
+				if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("NUKE_ATOM"))
+				{
+					Atom* dropped = *(Atom**)p->Data;
+					if (passes(dropped)) { *slot = dropped; changed = true; }
+				}
+				ImGui::EndDragDropTarget();
+			}
+			break;
+		}
 		default: break;
 		}
 	}
@@ -779,6 +861,25 @@ void EditorUI::winInspector()
 		strncpy(name, sltd->GetName().c_str(), 127); name[127] = 0;
 		if (ImGui::InputText("Name", name, 128)) sltd->SetName(name);
 
+		// Render layer: which channel this atom renders on (cameras filter by their Layer Mask).
+		{
+			std::string cur = nuke::Layers::Name(sltd->layer);
+			if (cur.empty()) cur = "Layer " + std::to_string(sltd->layer);
+			ImGui::SetNextItemWidth(180);
+			if (ImGui::BeginCombo("Layer", cur.c_str()))
+			{
+				for (int i = 0; i < 32; ++i)
+				{
+					std::string nm = nuke::Layers::Name(i);
+					if (nm.empty() && i != sltd->layer) continue;   // unnamed slots hidden
+					if (nm.empty()) nm = "Layer " + std::to_string(i);
+					if (ImGui::Selectable(nm.c_str(), i == sltd->layer)) sltd->layer = i;
+				}
+				ImGui::EndCombo();
+			}
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Render channel (named in Project Settings > Layers); cameras pick what they draw via Layer Mask");
+		}
+
 		// Prefab instance bar: this atom IS an instance (a prefab with individual params). Manual sync only.
 		if (!sltd->prefabGuid.empty())
 		{
@@ -806,6 +907,68 @@ void EditorUI::winInspector()
 		double s[3] = { t.scale.x, t.scale.y, t.scale.z };
 		if (EditV3("Scale", s))
 		{ t.scale.x = s[0]; t.scale.y = s[1]; t.scale.z = s[2]; }
+
+		// --- Anchors (canvas children only): pin edges to canvas sides. Enabling a side captures the
+		// CURRENT distance; opposite pair enabled = the element stretches with the canvas. Backed by a
+		// RectAnchor component (auto-added on first enable); applied every frame by the world.
+		{
+			nuke::Canvas* cvAnc = nullptr;
+			for (Atom* p = sltd->parent; p && !cvAnc; p = p->parent) cvAnc = p->GetComponent<nuke::Canvas>();
+			if (cvAnc && cvAnc->transform)
+			{
+				ImGui::SeparatorText("Anchors");
+				nuke::RectAnchor* ra = sltd->GetComponent<nuke::RectAnchor>();
+				// Current geometry in canvas units (same conventions as the world's layout pass).
+				const bool  world = (cvAnc->mode == nuke::CanvasMode::WorldSpace);
+				const float ppu = world ? 1.0f : (cvAnc->pixelsPerUnit > 0.01f ? cvAnc->pixelsPerUnit : 100.0f);
+				const float hw = cvAnc->width * 0.5f, hh = cvAnc->height * 0.5f;
+				Vector3 cp = cvAnc->transform->globalPosition();
+				Vector3 gp = t.globalPosition(), gs = t.globalScale();
+				float cx, cy;
+				if (world)
+				{
+					Vector3 R = cvAnc->transform->right(), U = cvAnc->transform->up();
+					Vector3 d(gp.x - cp.x, gp.y - cp.y, gp.z - cp.z);
+					cx = (float)(d.x*R.x + d.y*R.y + d.z*R.z);
+					cy = (float)(d.x*U.x + d.y*U.y + d.z*U.z);
+				}
+				else { cx = (float)(gp.x - cp.x) * ppu; cy = (float)(gp.y - cp.y) * ppu; }
+				nuke::Sprite* spA = sltd->GetComponent<nuke::Sprite>();
+				const float ew = spA ? spA->width  * (float)gs.x * ppu : 0.0f;
+				const float eh = spA ? spA->height * (float)gs.y * ppu : 0.0f;
+
+				auto ensureRA = [&]() -> nuke::RectAnchor*
+				{
+					if (!ra) { ra = new nuke::RectAnchor(); sltd->AddComponent(ra); }
+					return ra;
+				};
+				bool l = ra && ra->left, r_ = ra && ra->right, tp = ra && ra->top, b = ra && ra->bottom;
+				bool nl = l, nr = r_, nt = tp, nb = b;
+				ImGui::Checkbox("Left##anc", &nl);   ImGui::SameLine(120);
+				ImGui::Checkbox("Right##anc", &nr);
+				ImGui::Checkbox("Bottom##anc", &nb); ImGui::SameLine(120);
+				ImGui::Checkbox("Top##anc", &nt);
+				if (nl != l || nr != r_ || nt != tp || nb != b)
+				{
+					nuke::RectAnchor* r2 = ensureRA();
+					if (nl && !l) r2->distLeft   = (cx - ew * 0.5f) - (-hw);
+					if (nr && !r_) r2->distRight = hw - (cx + ew * 0.5f);
+					if (nb && !b) r2->distBottom = (cy - eh * 0.5f) - (-hh);
+					if (nt && !tp) r2->distTop   = hh - (cy + eh * 0.5f);
+					r2->left = nl; r2->right = nr; r2->top = nt; r2->bottom = nb;
+				}
+				if (ra)
+				{
+					const char* unit = world ? "u" : "px";
+					if (ra->left)   { ImGui::SetNextItemWidth(90); ImGui::DragFloat((std::string("Dist Left (") + unit + ")##anc").c_str(),   &ra->distLeft); }
+					if (ra->right)  { ImGui::SetNextItemWidth(90); ImGui::DragFloat((std::string("Dist Right (") + unit + ")##anc").c_str(),  &ra->distRight); }
+					if (ra->bottom) { ImGui::SetNextItemWidth(90); ImGui::DragFloat((std::string("Dist Bottom (") + unit + ")##anc").c_str(), &ra->distBottom); }
+					if (ra->top)    { ImGui::SetNextItemWidth(90); ImGui::DragFloat((std::string("Dist Top (") + unit + ")##anc").c_str(),    &ra->distTop); }
+					if ((ra->left && ra->right) || (ra->top && ra->bottom))
+						ImGui::TextDisabled("opposite sides pinned: stretches with the canvas");
+				}
+			}
+		}
 
 		// Expand/Collapse all — affects the Components category AND every component header.
 		std::string atomName = sltd->GetName();

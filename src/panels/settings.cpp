@@ -1,5 +1,6 @@
 // settings panel — hotkeys, world (level) commands, Project Settings window. EditorUI methods.
 #include <editor/editorui.h>
+#include <API/Model/Layers.h>   // render-layer names (Project Settings > Layers)
 #include <boost/filesystem.hpp>
 #include <boost/filesystem/fstream.hpp>
 #include <config.h>
@@ -745,6 +746,32 @@ void EditorUI::winSettings()
 				if (rebindId == h.id) { if (ImGui::SmallButton("cancel")) rebindId.clear(); }
 				else                  { if (ImGui::SmallButton("rebind")) rebindId = h.id; }
 				if (h.bound) { ImGui::SameLine(); if (ImGui::SmallButton("clear")) { hk->Unbind(h.id); SaveProject(); } }
+				ImGui::PopID();
+			}
+			ImGui::EndTable();
+		}
+
+		// --- Render layers: 32 named channels (Atom.layer + Camera.layerMask filter on them) ---
+		ImGui::SeparatorText("Layers");
+		ImGui::Text("Named render channels. Atoms pick a Layer; cameras pick what they draw via Layer Mask.");
+		if (ImGui::BeginTable("layers", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit, ImVec2(320, 0)))
+		{
+			ImGui::TableSetupColumn("##idx",  ImGuiTableColumnFlags_WidthFixed, 30.0f);
+			ImGui::TableSetupColumn("##name", ImGuiTableColumnFlags_WidthStretch);
+			for (int i = 0; i < 32; ++i)
+			{
+				ImGui::TableNextRow();
+				ImGui::TableNextColumn(); ImGui::AlignTextToFramePadding(); ImGui::TextDisabled("%d", i);
+				ImGui::TableNextColumn();
+				char lbuf[64]; std::string nm = nuke::Layers::Name(i);
+				strncpy(lbuf, nm.c_str(), sizeof(lbuf) - 1); lbuf[sizeof(lbuf) - 1] = 0;
+				ImGui::SetNextItemWidth(-FLT_MIN);
+				ImGui::PushID(2000 + i);
+				if (ImGui::InputText("##ln", lbuf, sizeof(lbuf)))
+				{
+					nuke::Layers::SetName(i, lbuf);
+					SaveProject();   // slot names are project data (game.nuproj "layers")
+				}
 				ImGui::PopID();
 			}
 			ImGui::EndTable();

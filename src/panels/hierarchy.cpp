@@ -100,7 +100,18 @@ void EditorUI::DrawAtomNode(Atom* atom)
 	bool open = ImGui::TreeNodeEx(rowLabel.c_str(), fl);
 	if (!atom->modOrigin.empty() && ImGui::IsItemHovered())
 		ImGui::SetTooltip("Added by mod: %s", atom->modOrigin.c_str());
-	if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) app->selectedInHieararchy = atom;
+	// Select on mouse RELEASE, not press: selecting on press instantly switches the inspector to
+	// the grabbed atom, which kills a drag&drop into another component's field (e.g. dragging a
+	// camera into a Canvas's Camera slot) before it can start. A release after a real drag is
+	// consumed by the drag&drop system, so plain clicks still select as before. An expand-arrow
+	// click toggles on PRESS — remember it so its release doesn't select the row.
+	static bool s_toggleSuppress = false;
+	if (ImGui::IsItemToggledOpen()) s_toggleSuppress = true;
+	if (ImGui::IsItemHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Left)
+	    && !ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left) && !s_toggleSuppress)
+		app->selectedInHieararchy = atom;
+	if (!ImGui::IsMouseDown(ImGuiMouseButton_Left) && !ImGui::IsMouseReleased(ImGuiMouseButton_Left))
+		s_toggleSuppress = false;   // cleared once the click fully settles
 	if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) { app->selectedInHieararchy = atom; FocusSelected(); }
 
 	if (ImGui::BeginDragDropSource())
