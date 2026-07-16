@@ -216,6 +216,38 @@ void EditorUI::winRender()
 			r->resizeRenderTarget(sceneRTId, (int)avail.x, (int)avail.y); // match the panel
 		}
 		nuke::Screen::Set((int)avail.x, (int)avail.y);   // the editor's "game screen" = the viewport panel
+
+		// --- PIE possess: which camera drives the viewport RT this frame ---------------------------
+		// Playing with the toolbar switch on "Game Camera" (default, UE-style possess): the world's
+		// main camera (World::GetMainCamera — Main flag, else first) takes the viewport; the editor
+		// camera stops rendering. Everything is re-resolved EVERY frame from the live world — scripts
+		// can destroy/spawn cameras and PIE Stop reloads the world, so no Camera* is ever cached.
+		// While possessed the viewport is a pure game view: gizmos/icons/editor picking/camera
+		// controls are suspended (they are editor-camera-ray based); Stop returns them instantly.
+		nuke::Camera* driveCam = editorCam;
+		{
+			AppInstance* papp = AppInstance::GetSingleton();
+			if (papp->playState != 0 && !pieUseEditorCam && papp->currentWorld)
+				if (nuke::Camera* mc = papp->currentWorld->GetMainCamera())
+					if (mc->targetTexGuid.empty())   // a RenderTexture camera keeps its own target
+						driveCam = mc;
+			// Exactly ONE camera owns the viewport RT: strip it from every other camera (covers the
+			// editor cam while possessed, the previous game camera after a switch/destroy, and
+			// snapshot-restored cameras after Stop).
+			std::function<void(bc::list<nuke::Atom*>&)> strip = [&](bc::list<nuke::Atom*>& gos)
+			{
+				for (nuke::Atom* at : gos)
+				{
+					if (!at) continue;
+					if (nuke::Camera* c = at->GetComponent<nuke::Camera>())
+						if (c != driveCam && c->renderTarget == sceneRTId) c->renderTarget = 0;
+					strip(at->children);
+				}
+			};
+			if (papp->currentWorld) strip(papp->currentWorld->GetHierarchy());
+			if (driveCam) driveCam->renderTarget = sceneRTId;
+		}
+		const bool possessed = (driveCam != editorCam);
 		uint64_t tex = r->getRenderTargetTexture(sceneRTId);
 		if (tex)
 		{
@@ -232,7 +264,8 @@ void EditorUI::winRender()
 					std::transform(dext.begin(), dext.end(), dext.begin(), ::tolower);
 					if (dext == ".numat" || dext == ".nutex")
 					{
-						if (nuke::Atom* hit = PickAtScreen(editorCam, ImGui::GetItemRectMin(), ImGui::GetItemRectSize(), ImGui::GetMousePos()))
+						// Pick with the camera that ACTUALLY renders the image (game cam while possessed).
+						if (nuke::Atom* hit = PickAtScreen(driveCam, ImGui::GetItemRectMin(), ImGui::GetItemRectSize(), ImGui::GetMousePos()))
 							DropAssetOnAtom(hit, dpath);
 					}
 					else DropAsset(dpath);
@@ -247,7 +280,9 @@ void EditorUI::winRender()
 			app->uiW = (int)avail.x; app->uiH = (int)avail.y;
 
 			// Invisible-entity icons (edit mode): drawn UNDER the camera preview and the gizmo.
-			DrawEntityIcons(imin, avail);
+			// Suspended in the possessed game view (their rays/rects are editor-camera based).
+			if (!possessed) DrawEntityIcons(imin, avail);
+			else            iconHits.clear();   // no stale clickable rects from the edit view
 		}
 		else
 			ImGui::Text("No scene texture.");
@@ -258,7 +293,7 @@ void EditorUI::winRender()
 			Atom* sel = AppInstance::GetSingleton()->selectedInHieararchy;
 			Camera* selCam = sel ? sel->GetComponent<Camera>() : nullptr;
 			if (selCam && !selCam->enabled) selCam = nullptr;   // disabled camera: no preview (it renders nothing)
-			if (tex && selCam && selCam != editorCam)
+			if (tex && selCam && selCam != editorCam && selCam != driveCam)   // the driving camera IS the big image
 			{
 				uint64_t ptex = 0;
 				if (!selCam->targetTexGuid.empty())
@@ -294,7 +329,7 @@ void EditorUI::winRender()
 		{
 			AppInstance* gapp = AppInstance::GetSingleton();
 			Atom* gsel = gapp->selectedInHieararchy;
-			if (gsel && editorCam && gapp->manipulationMode != 0)
+			if (!possessed && gsel && editorCam && gapp->manipulationMode != 0)
 			{
 				ImGuizmo::SetOrthographic(false);
 				ImGuizmo::SetDrawlist();
@@ -378,7 +413,7 @@ void EditorUI::winRender()
 			AppInstance* capp = AppInstance::GetSingleton();
 			Atom* csel = capp->selectedInHieararchy;
 			nuke::Canvas* cv = csel ? csel->GetComponent<nuke::Canvas>() : nullptr;
-			if (cv && cv->transform && editorCam && editorCam->transform)
+			if (!possessed && cv && cv->transform && editorCam && editorCam->transform)
 			{
 				ImVec2 rmin = ImGui::GetItemRectMin();
 				ImVec2 vsz  = ImGui::GetItemRectSize();
@@ -503,7 +538,9 @@ void EditorUI::winRender()
 
 		// Viewport camera control (while hovering the image):
 		//   RMB drag = orbit/look, MMB drag = pan, wheel = dolly.
-		if (editorCam && editorCam->transform && ImGui::IsItemHovered())
+		// Suspended while possessed — the game owns the mouse/keys there, and the editor
+		// camera isn't the one on screen (its rays would pick against the wrong view).
+		if (!possessed && editorCam && editorCam->transform && ImGui::IsItemHovered())
 		{
 			ImGuiIO& io = ImGui::GetIO();
 			Transform* t = editorCam->transform;

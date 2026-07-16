@@ -91,6 +91,10 @@ private:
 	uint64_t sceneRTId = 0;   // render target the editor camera draws into
 	uint64_t camPreviewRT = 0;          // small RT for the selected camera's preview
 	nuke::Camera* previewCam = nullptr; // camera currently retargeted to the preview RT
+	// PIE possess (toolbar switch): false = play through the GAME's main camera (UE-style,
+	// World::GetMainCamera), true = keep the editor camera view. Editor-only choice —
+	// the player always uses the game camera rule.
+	bool pieUseEditorCam = false;
 	std::map<std::string, bool> uiOpen; // persisted CollapsingHeader states (Components + per atom/component)
 	long pendingSelectId = 0;           // atom id to reselect after load (from editor_state.json; recursive)
 	int  browserView = 0;               // asset browser: 0 Tiles, 1 List, 2 Tree, 3 By Type

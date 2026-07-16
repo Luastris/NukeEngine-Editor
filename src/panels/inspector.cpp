@@ -72,6 +72,42 @@ void EditorUI::RenderAssetPreview(iRender* r)
 	}
 }
 
+// Layer-mask multi-select: an int bitmask over nuke::Layers drawn as a named dropdown
+// (Everything / Nothing / per-layer checkboxes). Used by every [[nuke::prop(widget="layers")]]
+// field via DrawFields — components never get a raw numeric box for a mask.
+static bool DrawLayerMaskCombo(const char* id, int& mask)
+{
+	bool changed = false;
+	unsigned int m = (unsigned int)mask;
+	std::string shown = (m == 0xFFFFFFFFu) ? "Everything" : (m == 0 ? "Nothing" : "Mixed");
+	if (m != 0xFFFFFFFFu && m != 0)   // count the named picks for a nicer summary
+	{
+		int bits = 0; std::string one;
+		for (int i = 0; i < 32; ++i)
+			if ((m >> i) & 1u) { ++bits; if (bits == 1) { one = nuke::Layers::Name(i); if (one.empty()) one = "Layer " + std::to_string(i); } }
+		if (bits == 1) shown = one;
+	}
+	if (ImGui::BeginCombo(id, shown.c_str()))
+	{
+		if (ImGui::Selectable("Everything")) { mask = -1; m = 0xFFFFFFFFu; changed = true; }
+		if (ImGui::Selectable("Nothing"))    { mask = 0;  m = 0; changed = true; }
+		ImGui::Separator();
+		for (int i = 0; i < 32; ++i)
+		{
+			std::string nm = nuke::Layers::Name(i);
+			if (nm.empty()) continue;   // unnamed slots hidden (still reachable from scripts)
+			bool on = (m >> i) & 1u;
+			if (ImGui::Checkbox((nm + "##lm" + std::to_string(i)).c_str(), &on))
+			{
+				if (on) m |= (1u << i); else m &= ~(1u << i);
+				mask = (int)m; changed = true;
+			}
+		}
+		ImGui::EndCombo();
+	}
+	return changed;
+}
+
 void EditorUI::CamComponent(Camera* cam)
 {
 	if (cam->renderer)
@@ -87,35 +123,7 @@ void EditorUI::CamComponent(Camera* cam)
 	ImGui::Checkbox("Free mode", &cam->freeMode);
 
 	// Render-layer mask: which layers this camera draws (named multi-select over nuke::Layers).
-	{
-		unsigned int m = (unsigned int)cam->layerMask;
-		std::string shown = (m == 0xFFFFFFFFu) ? "Everything" : (m == 0 ? "Nothing" : "Mixed");
-		if (m != 0xFFFFFFFFu && m != 0)   // count the named picks for a nicer summary
-		{
-			int bits = 0; std::string one;
-			for (int i = 0; i < 32; ++i)
-				if ((m >> i) & 1u) { ++bits; if (bits == 1) { one = nuke::Layers::Name(i); if (one.empty()) one = "Layer " + std::to_string(i); } }
-			if (bits == 1) shown = one;
-		}
-		if (ImGui::BeginCombo("Layer Mask", shown.c_str()))
-		{
-			if (ImGui::Selectable("Everything")) { cam->layerMask = -1; m = 0xFFFFFFFFu; }
-			if (ImGui::Selectable("Nothing"))    { cam->layerMask = 0;  m = 0; }
-			ImGui::Separator();
-			for (int i = 0; i < 32; ++i)
-			{
-				std::string nm = nuke::Layers::Name(i);
-				if (nm.empty()) continue;   // unnamed slots hidden (still reachable from scripts)
-				bool on = (m >> i) & 1u;
-				if (ImGui::Checkbox((nm + "##lm" + std::to_string(i)).c_str(), &on))
-				{
-					if (on) m |= (1u << i); else m &= ~(1u << i);
-					cam->layerMask = (int)m;
-				}
-			}
-			ImGui::EndCombo();
-		}
-	}
+	DrawLayerMaskCombo("Layer Mask", cam->layerMask);
 }
 
 // --- reusable asset picker -------------------------------------------------------------------
@@ -628,13 +636,17 @@ bool EditorUI::DrawFields(void* obj, nuke::TypeInfo* ti)
 		std::string hid = "##" + f.name; const char* w = hid.c_str();
 		ImGui::AlignTextToFramePadding();
 		ImGui::TextUnformatted(n);
+		// [[prop(tip="...")]] -> tooltip on the label AND on the widget (checked again after the switch)
+		bool tipHover = !f.tip.empty() && ImGui::IsItemHovered();
 		ImGui::SameLine(ImGui::GetContentRegionAvail().x * 0.42f);
 		ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
 		switch (f.type)
 		{
 		case nuke::FT::Bool:   changed |= ImGui::Checkbox(w, (bool*)a); break;
 		case nuke::FT::Int:
-			if (!f.enumLabels.empty())   // [[prop(enum=...)]] -> dropdown; the int is the selected index
+			if (f.widget == "layers")    // [[prop(widget="layers")]] -> named multi-select over nuke::Layers
+				changed |= DrawLayerMaskCombo(w, *(int*)a);
+			else if (!f.enumLabels.empty())   // [[prop(enum=...)]] -> dropdown; the int is the selected index
 			{
 				int* iv = (int*)a; int cur = (*iv < 0 || *iv >= (int)f.enumLabels.size()) ? 0 : *iv;
 				if (ImGui::BeginCombo(w, f.enumLabels[cur].c_str()))
@@ -732,6 +744,8 @@ bool EditorUI::DrawFields(void* obj, nuke::TypeInfo* ti)
 		}
 		default: break;
 		}
+		if (!f.tip.empty() && (tipHover || ImGui::IsItemHovered()))
+			ImGui::SetTooltip("%s", f.tip.c_str());
 	}
 	return changed;
 }

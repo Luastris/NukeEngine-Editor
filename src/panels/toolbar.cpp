@@ -161,9 +161,9 @@ void EditorUI::Toolbar()
 		            worldMode ? "World space (X)" : "Local space (X)", false, bw))
 			app->manipulationWorld = !app->manipulationWorld;
 
-		// CENTER — PIE (Play / Pause / Stop)
+		// CENTER — PIE (Play / Pause / Stop + possess switch)
 		float winW = ImGui::GetWindowWidth();
-		float centerW = bw * 3 + st.ItemSpacing.x * 2;
+		float centerW = bw * 4 + st.ItemSpacing.x * 3;
 		ImGui::SameLine();
 		ImGui::SetCursorPosX((winW - centerW) * 0.5f);
 		if (ToolBtn(ICON_LC_PLAY, "Play", app->playState == 1, bw))
@@ -196,6 +196,15 @@ void EditorUI::Toolbar()
 			}
 			app->playState = 0;
 		}
+		// PIE possess switch (UE-style): Game Camera = play through World::GetMainCamera (the one
+		// flagged Main, else the world's first camera); Editor Camera = keep the free-fly view.
+		// Editor-only — the player always plays through the game camera rule.
+		ImGui::SameLine();
+		if (ToolBtn(pieUseEditorCam ? ICON_LC_EYE : ICON_LC_VIDEO,
+		            pieUseEditorCam ? "PIE view: Editor Camera (click: play through the game's Main Camera)"
+		                            : "PIE view: Game Camera — Main flag, else the first camera (click: keep the editor camera view)",
+		            !pieUseEditorCam && app->playState != 0, bw))
+			pieUseEditorCam = !pieUseEditorCam;
 
 		// RIGHT — camera projection (Perspective / Orthographic) + viewport draw mode (Solid / Wireframe)
 		float rightW = bw * 3 + st.ItemSpacing.x * 2;

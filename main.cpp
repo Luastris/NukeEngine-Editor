@@ -358,7 +358,11 @@ iRender* PreInitRender(){
         // FIRST: apply a queued world switch at the frame boundary — tearing the world
         // down mid-command-list (from a click handler) breaks D3D12 (render safety).
         EditorUI::getSingleton()->ApplyPendingWorldOpen();
+        // Viewport draw mode (toolbar Solid/Wireframe) applies to the LIVE scene only —
+        // asset previews (inspector/editor 3D thumbnails) always render solid.
+        r->setWireframe(false);
         EditorUI::getSingleton()->RenderAssetPreview(r);
+        r->setWireframe(AppInstance::GetSingleton()->wireframe);
         AppInstance::GetSingleton()->currentWorld->Render(r);
     });
     // UI is driven by the UI module (NukeUI); it is wired in main() after the
