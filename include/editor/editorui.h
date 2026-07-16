@@ -98,6 +98,7 @@ private:
 	std::map<std::string, bool> uiOpen; // persisted CollapsingHeader states (Components + per atom/component)
 	long pendingSelectId = 0;           // atom id to reselect after load (from editor_state.json; recursive)
 	int  browserView = 0;               // asset browser: 0 Tiles, 1 List, 2 Tree, 3 By Type
+	int  browserRoot = 0;               // browse root: 0 = content, 1 = <project>/source (6.0)
 	char browserSearch[128] = "";
 	bool fMesh = true, fMat = true, fTex = true, fPrefab = true;   // browser type filters
 	std::string contentDir = "project/content";   // project content root (imported assets live here)

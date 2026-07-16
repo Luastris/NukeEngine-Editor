@@ -21,7 +21,8 @@ static TextEditor::LanguageDefinitionId LangForFile(const std::string& ext)
 		else if (ext == ".hlsl" || ext == ".fx")                  lang = "hlsl";
 		else if (ext == ".glsl" || ext == ".vert" || ext == ".frag") lang = "glsl";
 		else if (ext == ".json" || ext == ".nuproj" || ext == ".numat" || ext == ".nuworld" || ext == ".nuprefab") lang = "json";
-		else if (ext == ".c" || ext == ".h" || ext == ".cpp" || ext == ".hpp" || ext == ".cs") lang = "cpp";
+		else if (ext == ".c" || ext == ".h" || ext == ".cpp" || ext == ".hpp" || ext == ".cs"
+		         || ext == ".cc" || ext == ".inl" || ext == ".inc") lang = "cpp";
 	}
 	for (char& c : lang) c = (char)std::tolower((unsigned char)c);
 	if (lang == "lua")  return TextEditor::LanguageDefinitionId::Lua;
@@ -42,7 +43,9 @@ bool EditorUI::IsTextFile(const std::string& ext)
 		if (ac->textEditable) return true;
 	static const char* kText[] = { ".lua", ".hlsl", ".fx", ".glsl", ".vert", ".frag",
 	                               ".json", ".txt", ".md", ".ini", ".cfg", ".nuproj",
-	                               ".nubonemap" };   // retarget map = plain JSON
+	                               ".nubonemap",   // retarget map = plain JSON
+	                               // C++ sources (the browser's source root, 6.0)
+	                               ".cpp", ".h", ".hpp", ".c", ".cc", ".inl", ".inc", ".cmake" };
 	for (const char* t : kText) if (ext == t) return true;
 	return false;
 }

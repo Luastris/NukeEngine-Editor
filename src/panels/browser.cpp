@@ -52,6 +52,9 @@ const char* EditorUI::ExtIcon(const std::string& ext)
 	if (ext == ".ogg" || ext == ".wav" || ext == ".mp3" || ext == ".flac") return ICON_LC_MUSIC;
 	if (ext == ".lua" || ext == ".cs") return ICON_LC_FILE_CODE;
 	if (ext == ".hlsl" || ext == ".nushader") return ICON_LC_FILE_CODE;
+	// C++ sources (the source root, 6.0)
+	if (ext == ".cpp" || ext == ".h" || ext == ".hpp" || ext == ".c" || ext == ".cc"
+	    || ext == ".inl" || ext == ".inc" || ext == ".cmake") return ICON_LC_FILE_CODE;
 	return ICON_LC_FILE;
 }
 // Whether a file of this extension passes the current type filters.
@@ -98,7 +101,8 @@ void EditorUI::BrowserTree(const std::string& dir)
 		}
 	}
 	// Mounted stack (pak/mod session): this level's PACKED children too (read-only).
-	if (nuke::Package::MountedCount() > 0)
+	// Content-root only — paks never carry C++ sources.
+	if (browserRoot == 0 && nuke::Package::MountedCount() > 0)
 	{
 		std::string relDir = "content";
 		bfs::path r2 = bfs::path(dir).lexically_relative(bfs::path(contentDir));
@@ -843,6 +847,13 @@ void EditorUI::winBrowser()
 		else if (d && d->bound && ImGui::IsKeyChordPressed((ImGuiKeyChord)d->chord)) RequestDelete(browserSel);          // Del: confirm
 	}
 
+	// --- browse ROOT (6.0): content or the project's C++ sources (<project>/source, when
+	// present). Assets/import/pak-union are content-only concepts; sources browse + open.
+	const bfs::path srcRootP = bfs::path(projectDir) / "source";
+	boost::system::error_code srcEc;
+	const bool hasSrc = bfs::exists(srcRootP, srcEc) && bfs::is_directory(srcRootP, srcEc);
+	if (!hasSrc) browserRoot = 0;
+
 	// --- toolbar: view mode | search | filters ---
 	const char* modes[] = { ICON_LC_LAYOUT_GRID " Tiles", ICON_LC_LIST " List", ICON_LC_FOLDER_TREE " Tree" };
 	if (browserView < 0 || browserView > 2) browserView = 0;   // drop the removed "By Type" mode
@@ -853,6 +864,8 @@ void EditorUI::winBrowser()
 	ImGui::InputTextWithHint("##bsearch", ICON_LC_SEARCH " Search", browserSearch, sizeof(browserSearch));
 	ImGui::SameLine();
 	if (ImGui::Button(ICON_LC_FILTER " Filters")) ImGui::OpenPopup("bfilters");
+	if (browserRoot == 0)   // Import/New create ASSETS — meaningless inside the C++ sources
+	{
 	ImGui::SameLine();
 	if (ImGui::Button(ICON_LC_DOWNLOAD " Import"))
 	{
@@ -871,6 +884,7 @@ void EditorUI::winBrowser()
 	ImGui::SameLine();
 	if (ImGui::Button(ICON_LC_FILE_PLUS " New")) ImGui::OpenPopup("bnew");
 	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Create a new asset/folder here");
+	}
 	if (ImGui::BeginPopup("bnew"))
 	{
 		std::string folder = browserCwd.empty() ? contentDir : browserCwd;
@@ -928,10 +942,22 @@ void EditorUI::winBrowser()
 	DrawRenamePopup();   // rename modal (works in all views; before the mode early-returns)
 	DrawDeletePopup();   // delete-confirm modal
 
-	bfs::path root = bfs::path(contentDir);
+	bfs::path root = (browserRoot == 1) ? srcRootP : bfs::path(contentDir);
 	bfs::path cwd  = browserCwd.empty() ? root : bfs::path(browserCwd);
+	{
+		// A cwd that isn't under the CURRENT root (root switch, deleted folder, stale
+		// editor_state) snaps back to the root instead of listing a foreign tree.
+		boost::system::error_code cec;
+		bfs::path relc = bfs::relative(cwd, root, cec);
+		const std::string rs = relc.generic_string();
+		if (cec || rs.compare(0, 2, "..") == 0 || !bfs::exists(cwd, cec))
+		{
+			cwd = root;
+			browserCwd = root.string();
+		}
+	}
 
-	// --- path bar: Up + current location (relative to the content root) ---
+	// --- path bar: Up + root selector + current location (relative to the root) ---
 	ImGui::Separator();
 	boost::system::error_code rc;
 	bool atRoot = (cwd == root) || (bfs::exists(cwd, rc) && bfs::exists(root, rc) && bfs::equivalent(cwd, root, rc));
@@ -954,8 +980,26 @@ void EditorUI::winBrowser()
 	if (ImGui::Button(ICON_LC_CORNER_LEFT_UP "##up") && !atRoot)
 		BrowserNavigate(cwd.parent_path().string());
 	ImGui::SameLine();
+	// Root selector: a dropdown only when the project HAS sources; plain text otherwise.
+	if (hasSrc)
+	{
+		const char* roots[] = { "content", "source" };
+		ImGui::SetNextItemWidth(96);
+		int r = browserRoot;
+		if (ImGui::Combo("##broot", &r, roots, 2) && r != browserRoot)
+		{
+			browserRoot = r;
+			root = (r == 1) ? srcRootP : bfs::path(contentDir);
+			cwd  = root;
+			browserCwd = root.string();
+			browserBack.clear(); browserFwd.clear(); browserSel.clear();
+			atRoot = true;
+		}
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Browse the project content or its C++ sources");
+		ImGui::SameLine();
+	}
 	bfs::path rel = bfs::relative(cwd, root, rc);
-	std::string loc = "content";
+	std::string loc = hasSrc ? "" : "content";   // the combo already names the root
 	if (!rc && !rel.empty() && rel.generic_string() != ".") loc += "/" + rel.generic_string();
 	ImGui::Text("%s", loc.c_str());
 	ImGui::Separator();
@@ -1002,7 +1046,8 @@ void EditorUI::winBrowser()
 	// Mounted stack (pak/mod session): union the packed content with the disk overlay —
 	// the base game's resources are BROWSABLE, not invisible. Disk wins name collisions
 	// (the modder's copy overrides); pak-only entries are read-only ("pak://<rel>" paths).
-	if (Package::MountedCount() > 0)
+	// Content-root only — paks never carry C++ sources.
+	if (browserRoot == 0 && Package::MountedCount() > 0)
 	{
 		std::string relDir = "content";
 		{
@@ -1171,8 +1216,9 @@ void EditorUI::winBrowser()
 	ImGui::InvisibleButton("##browser-drop", rest);
 	if (ImGui::BeginDragDropTarget())
 	{
+		// Prefabs are ASSETS — a drop while browsing the C++ sources lands in the content root.
 		if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("NUKE_ATOM"))
-			SaveAtomAsPrefab(*(Atom**)p->Data, browserCwd.empty() ? contentDir : browserCwd);
+			SaveAtomAsPrefab(*(Atom**)p->Data, (browserRoot != 0 || browserCwd.empty()) ? contentDir : browserCwd);
 		ImGui::EndDragDropTarget();
 	}
 	ImGui::EndChild();   // end the scrolling file list
