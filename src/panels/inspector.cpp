@@ -1034,6 +1034,14 @@ void EditorUI::winInspector()
 					else
 					{
 						ImGui::Checkbox("Enabled", &cmp->enabled);
+						// Tick interval (6.8): Update() every Nth frame, staggered by component id.
+						ImGui::SameLine(ImGui::GetContentRegionAvail().x * 0.55f);
+						ImGui::TextUnformatted("Tick every");
+						ImGui::SameLine();
+						ImGui::SetNextItemWidth(64);
+						if (ImGui::InputInt("##tickevery", &cmp->tickEvery) && cmp->tickEvery < 1) cmp->tickEvery = 1;
+						if (ImGui::IsItemHovered())
+							ImGui::SetTooltip("Run Update() every Nth frame (1 = every frame). Staggered across components,\nso heavy crowds spread over frames. FixedUpdate is unaffected.");
 						if (nuke::TypeInfo* cti = cmp->GetType())   // which plugin provides this type
 						{
 							const char* pl = nuke::PluginForType(cti->name);
