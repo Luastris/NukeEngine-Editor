@@ -748,6 +748,10 @@ void EditorUI::PackageProjectNow()
 			for (const std::string& m : modules)
 			{
 				bfs::path src = rt / "modules" / m;
+				// Project-local C++ GAME modules (<project>/modules, Phase 6.0) ship too —
+				// they aren't in the editor's runtime dir. Editor modules win on name clash.
+				boost::system::error_code mec;
+				if (!bfs::exists(src, mec)) src = bfs::path(projDir) / "modules" / m;
 				if (IsEditorOnlyModule(src))
 				{
 					std::cout << "[Package]\tmodule '" << m << "' is editor-only (imports NukeImGui.dll) — not shipped" << std::endl;

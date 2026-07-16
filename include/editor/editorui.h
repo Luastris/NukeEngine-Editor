@@ -290,6 +290,17 @@ public:
 	// Skipped with a note when the asked config is the one this editor is RUNNING
 	// (its binaries are locked). onDone fires on the game thread.
 	void RunEngineBuild(const std::string& config, std::function<void(bool)> onDone);
+
+	// C++ game modules (Phase 6.0, panels/gamemodule.cpp): the game is native NUKEModule
+	// DLLs living in <project>/source (built to <project>/modules). Scaffold generates a
+	// ready-to-build module; DiscoverProjectModules pulls the DLLs into the plugin pool
+	// (auto-enabled on first sight); BuildGameModules runs the rebuild + DLL hot-swap cycle
+	// (unload -> cmake build -> re-discover -> enable; components survive as placeholders).
+	void CreateGameModuleScaffold(const std::string& name);
+	void DiscoverProjectModules();
+	void BuildGameModules();
+	bool gmNamePopup = false;            // "New C++ Game Module" modal trigger (main menu)
+	char gmNameBuf[64] = "";
 	void PackageMod(const std::string& name = "");   // "" -> last used / project name (dev hook)
 	void PackageModCmd();            // open the "Package Mod" modal (prefills the name)
 	void DrawPackageModPopup();      // the modal itself (drawn each frame)

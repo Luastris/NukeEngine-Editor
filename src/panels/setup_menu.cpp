@@ -54,6 +54,10 @@ void EditorUI::SetUp()
 	LoadProject();   // .nuproj: content dir, startup world, plugin load list, hotkey bindings (default if missing)
 	LoadPreferences();   // engine-wide (%APPDATA%): external editor choice + detection scan
 
+	// Project-local C++ GAME modules (<project>/modules, Phase 6.0) join the shared pool
+	// BEFORE the plugin list applies — their types must register before the world loads.
+	DiscoverProjectModules();
+
 	// Activate the project's chosen plugins from the shared pool (InitModules discovered
 	// them already). Types register here (OnLoad) BEFORE the world auto-loads, so a world's
 	// components resolve; plugins left off keep their components as inert placeholders.
@@ -268,6 +272,12 @@ void EditorUI::EditorMenu()
 			if (ImGui::MenuItem(ICON_LC_HAMMER " Build Engine (Release)")) RunEngineBuild("Release", nullptr);
 			if (ImGui::MenuItem(ICON_LC_HAMMER " Build Engine (Debug)"))   RunEngineBuild("Debug", nullptr);
 			ImGui::Separator();
+			// C++ GAME modules (Phase 6.0): the game lives in <project>/source as native
+			// NUKEModule DLLs; Build & Reload rebuilds them and hot-swaps the DLLs in place
+			// (components survive as placeholders through the swap). Refused while playing.
+			if (ImGui::MenuItem(ICON_LC_FILE_PLUS_2 " New C++ Game Module...")) gmNamePopup = true;
+			if (ImGui::MenuItem(ICON_LC_HAMMER " Build & Reload Game Modules")) BuildGameModules();
+			ImGui::Separator();
 			if (ImGui::MenuItem("Quit", "Alt+F4")) {}
 			ImGui::EndMenu();
 		}
@@ -303,5 +313,26 @@ void EditorUI::EditorMenu()
 			ImGui::EndMenu();
 		}
 		ImGui::EndMainMenuBar();
+	}
+
+	// "New C++ Game Module" name modal (opened from the Project menu above).
+	if (gmNamePopup) { ImGui::OpenPopup("New C++ Game Module"); gmNamePopup = false; gmNameBuf[0] = 0; }
+	if (ImGui::BeginPopupModal("New C++ Game Module", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+	{
+		ImGui::TextUnformatted("Module name (a C++ identifier, e.g. MyGame):");
+		ImGui::SetNextItemWidth(280);
+		bool enter = ImGui::InputText("##gmname", gmNameBuf, sizeof(gmNameBuf), ImGuiInputTextFlags_EnterReturnsTrue);
+		bool valid = gmNameBuf[0] && (isalpha((unsigned char)gmNameBuf[0]) || gmNameBuf[0] == '_');
+		for (char* c = gmNameBuf; valid && *c; ++c)
+			if (!isalnum((unsigned char)*c) && *c != '_') valid = false;
+		if (!valid && gmNameBuf[0]) ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1), "Letters/digits/underscore, not starting with a digit.");
+		if ((ImGui::Button("Create") || enter) && valid)
+		{
+			CreateGameModuleScaffold(gmNameBuf);
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+		ImGui::EndPopup();
 	}
 }

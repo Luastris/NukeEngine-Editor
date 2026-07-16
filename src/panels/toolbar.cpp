@@ -245,6 +245,20 @@ void EditorUI::Draw()
 			if (modDelay > 0 && strcmp(e, "1") != 0) modHookName = e;
 		}
 		if (modDelay > 0 && --modDelay == 0) PackageMod(modHookName);
+		// NUKE_GM_NEW=<Name>: scaffold a C++ game module ~2 s after boot; NUKE_GM_BUILD=1:
+		// fire Build & Reload Game Modules (6.0) — headless verification without clicks.
+		static int gmNewDelay = -2;
+		static std::string gmNewName;
+		if (gmNewDelay == -2)
+		{
+			const char* e = std::getenv("NUKE_GM_NEW");
+			gmNewDelay = (e && e[0]) ? 120 : -1;
+			if (gmNewDelay > 0) gmNewName = e;
+		}
+		if (gmNewDelay > 0 && --gmNewDelay == 0) CreateGameModuleScaffold(gmNewName);
+		static int gmBuildDelay = -2;
+		if (gmBuildDelay == -2) { const char* e = std::getenv("NUKE_GM_BUILD"); gmBuildDelay = (e && *e == '1') ? 180 : -1; }
+		if (gmBuildDelay > 0 && --gmBuildDelay == 0) BuildGameModules();
 		// NUKE_PLAY=1: enter PIE ~4 s after boot (headless play verification — scripts,
 		// physics, audio all run their real play paths without a click).
 		static int playDelay = -2;
