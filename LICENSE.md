@@ -95,6 +95,18 @@ No other distribution of the Engine is permitted (see Section 5).
    NukeEngine.
 4. **No notice removal.** You may not remove or alter this License or the attribution or
    copyright notices in the Engine.
+5. **No ripping of others' Games.** The Engine and Editor read packaged Game data to support
+   the development and modding of a Game. You may not use the Engine or Editor — and may not
+   modify them — to **extract another party's content** (assets, video, audio, music, art,
+   scripts, or any other files) **from that party's Game in order to publish, redistribute,
+   or otherwise make that content available**, unless the Game's rightsholder has expressly
+   permitted it (for example, in the Game's mod policy). A rightsholder who wants their
+   Game's resources public can simply publish the files; absent such permission, extraction
+   for publication is a breach of this License in addition to whatever rights the content's
+   owner holds. Each Game's rightsholder is an **intended third-party beneficiary** of this
+   Section and may enforce it directly against the violator. Opening Your **own** Game's
+   packages, and modding a Game within the permissions its rightsholder grants, are not
+   restricted by this Section.
 
 ## 6. Modifications, contributions, and internal use
 
@@ -192,6 +204,10 @@ being a registered legal entity.
   for a separate license (e.g. a modified editor so your players can mod your game).
 - **Never rebrand it.** Whatever you're allowed to use or ship — modified or not — stays
   NukeEngine. Don't pass it off as a different or your own engine.
+- **Never rip other people's games with it.** Using (or modifying) the engine/editor to pull
+  assets, video, or audio out of someone else's game and publish them is a license breach —
+  and the game's developer can come after you for it directly. If a developer wants their
+  resources public, they'll allow it (or just publish the files themselves).
 - **Want to sell a closed feature?** Make it a **plugin** and sell it (a marketplace is
   coming; commission may apply).
 - **Free to use; donations welcome, never required.** The goal is a community-driven engine,
