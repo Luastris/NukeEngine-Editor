@@ -224,6 +224,11 @@ void EditorUI::Toolbar()
 
 void EditorUI::Draw()
 {
+	// ImGuizmo::BeginFrame opens its own transparent fullscreen "gizmo" window as the
+	// default canvas. It's a FLOATING window — with ConfigViewportsNoAutoMerge it would
+	// get its own OS window. Pin it to the main viewport: the actual gizmo drawing goes
+	// through SetDrawlist() into the Render panel anyway (works in any viewport).
+	ImGui::SetNextWindowViewport(ImGui::GetMainViewport()->ID);
 	ImGuizmo::BeginFrame();   // must come right after ImGui::NewFrame (done by NukeUI)
 
 	nuke::Time::getSingleton()->NewFrame();   // real frame delta/elapsed (scripts & systems)

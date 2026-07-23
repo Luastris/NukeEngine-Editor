@@ -1,5 +1,6 @@
 // inspector panel — EditorUI method definitions (translation unit).
 #include <editor/editorui.h>
+#include "nukeui.h"   // DocWindow: detachable panels (task #137)
 #include <API/Model/Camera.h>   // restrict the PostProcess component to camera atoms
 #include <API/Model/Package.h>  // packed session: pickers list pak/mod content too (3.2)
 #include <interface/Services.h> // csclass picker: enumerate scripting providers
@@ -15,6 +16,7 @@
 #include <API/Model/RectAnchor.h>  // Anchors block: per-side anchors storage
 #include <API/Model/Sprite.h>      // Anchors block: element size for distance capture
 #include <functional>              // AtomRef picker: recursive hierarchy walk
+#include <interface/AssetCreators.h>   // module-supplied asset editors (AssetEditorForExt)
 #include <boost/filesystem.hpp>
 namespace bfs = boost::filesystem;
 
@@ -148,11 +150,22 @@ static bool IsAudioExt(std::string e)
 	for (char& c : e) c = (char)tolower((unsigned char)c);
 	return e == ".ogg" || e == ".wav" || e == ".mp3" || e == ".flac";
 }
+// "file:<ext>" kinds: a GENERIC by-extension content-file picker (value = content-relative
+// path, like script/audio). Any module-owned file type gets a real picker by declaring
+// `asset="file:.nutile"` on its reflected string prop — no per-type editor-core hardcode.
+static bool IsFileKind(const std::string& kind) { return kind.rfind("file:", 0) == 0; }
+static std::string FileKindExt(const std::string& kind)
+{
+	std::string e = kind.substr(5);
+	for (char& c : e) c = (char)tolower((unsigned char)c);
+	return e;
+}
 // Does a dropped file path match the field's asset kind? (rejects everything else)
 static bool KindMatchesFile(const std::string& kind, const std::string& path)
 {
 	std::string e = bfs::path(path).extension().string();
 	for (char& c : e) c = (char)tolower((unsigned char)c);
+	if (IsFileKind(kind)) return e == FileKindExt(kind);
 	if (kind == "mesh")     return e == ".numesh";
 	if (kind == "material") return e == ".numat";
 	if (kind == "texture")  return e == ".nutex";
@@ -181,7 +194,7 @@ bool EditorUI::AssetPicker(const char* label, std::string& guid, const std::stri
 	// built-ins that have no file. Shaders are keyed by name, so just show that.
 	auto disp = [&](const std::string& g) -> std::string {
 		if (g.empty()) return "(none)";
-		if (kind == "script" || kind == "audio") return bfs::path(g).stem().string();   // value is a content-relative path
+		if (kind == "script" || kind == "audio" || IsFileKind(kind)) return bfs::path(g).stem().string();   // value is a content-relative path
 		if (kind == "shader" || kind == "postshader") { Shader* s = db->GetShader(g); return s ? s->name : g; }
 		std::string p = db->PathForGuid(g);
 		if (!p.empty()) return bfs::path(p).stem().string();
@@ -210,7 +223,7 @@ bool EditorUI::AssetPicker(const char* label, std::string& guid, const std::stri
 			if (KindMatchesFile(kind, path))
 			{
 				std::string g;
-				if      (kind == "script" || kind == "audio") { boost::system::error_code ec; g = bfs::relative(bfs::path(path), bfs::path(contentDir), ec).generic_string(); }
+				if      (kind == "script" || kind == "audio" || IsFileKind(kind)) { boost::system::error_code ec; g = bfs::relative(bfs::path(path), bfs::path(contentDir), ec).generic_string(); }
 				else if (kind == "shader") g = ShaderGuidFromPath(path);
 				else                       g = db->GuidForPath(path);
 				if (!g.empty()) { guid = g; changed = true; }
@@ -223,7 +236,7 @@ bool EditorUI::AssetPicker(const char* label, std::string& guid, const std::stri
 	if (ImGui::Button(ICON_LC_FOLDER_SEARCH "##loc"))   // locate the original file in the browser
 	{
 		std::string path;
-		if      (kind == "script" || kind == "audio") { if (!guid.empty()) path = (bfs::path(contentDir) / guid).string(); }
+		if      (kind == "script" || kind == "audio" || IsFileKind(kind)) { if (!guid.empty()) path = (bfs::path(contentDir) / guid).string(); }
 		else if (kind == "shader" && db->GetShader(guid)) path = db->GetShader(guid)->vsPath;
 		else                       path = db->PathForGuid(guid);
 		if (!path.empty()) { BrowserNavigate(bfs::path(path).parent_path().string()); browserSel = path; if (win) win->browser = true; }
@@ -232,7 +245,8 @@ bool EditorUI::AssetPicker(const char* label, std::string& guid, const std::stri
 	ImGui::SameLine(0, 2);
 	if (ImGui::Button(ICON_LC_ROTATE_CCW "##rst")) { guid = defGuid; changed = true; }   // reset to default
 	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Reset to default");
-	ImGui::SameLine(0, 6); ImGui::TextUnformatted(label);
+	// Trailing label — skipped for hidden ids ("##..." would print literally; list rows pass those).
+	if (label && label[0] && !(label[0] == '#' && label[1] == '#')) { ImGui::SameLine(0, 6); ImGui::TextUnformatted(label); }
 
 	if (ImGui::BeginPopup("##assetpop"))
 	{
@@ -280,10 +294,11 @@ bool EditorUI::AssetPicker(const char* label, std::string& guid, const std::stri
 			}
 			if (!any) ImGui::TextDisabled("no C# classes loaded\n(add a .cs deriving from Electron;\nif the project HAS scripts, check the\nConsole for 'C# build FAILED')");
 		}
-		else if (kind == "script" || kind == "audio")   // scan the project content (value = content-relative path)
+		else if (kind == "script" || kind == "audio" || IsFileKind(kind))   // scan the project content (value = content-relative path)
 		{
 			auto matches = [&](std::string e) {
 				for (char& c : e) c = (char)tolower((unsigned char)c);
+				if (IsFileKind(kind)) return e == FileKindExt(kind);
 				return kind == "script" ? (e == ".lua") : IsAudioExt(e);
 			};
 			std::set<std::string> seen;   // lowercase rel — the disk copy wins over pak layers
@@ -742,6 +757,55 @@ bool EditorUI::DrawFields(void* obj, nuke::TypeInfo* ti)
 			}
 			break;
 		}
+		case nuke::FT::IntList:
+		case nuke::FT::FloatList:
+		case nuke::FT::DoubleList:
+		case nuke::FT::StringList:
+		{
+			// Reflected std::vector<T>: the widget column shows "<N> [+]"; element rows follow
+			// full-width, each with move-up/move-down/remove. Element widgets mirror the scalar
+			// cases — a StringList with an asset= hint gets a real PICKER per row, not a text box.
+			// The FIELD NAME scopes the ID stack: row ids are per-index, and two list fields
+			// side by side would otherwise collide (row 0 of one == row 0 of the next).
+			ImGui::PushID(f.name.c_str());
+			auto listUI = [&](auto* vec, auto drawElem)
+			{
+				ImGui::Text("%d", (int)vec->size());
+				ImGui::SameLine();
+				if (ImGui::SmallButton(ICON_LC_PLUS)) { vec->emplace_back(); changed = true; }
+				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Add element");
+				int rm = -1, up = -1, dn = -1;
+				const float bw = ImGui::GetFrameHeight();
+				const float sp = ImGui::GetStyle().ItemInnerSpacing.x;
+				ImGui::Indent();
+				for (int i = 0; i < (int)vec->size(); ++i)
+				{
+					ImGui::PushID(i);
+					ImGui::SetNextItemWidth(std::max(60.0f, ImGui::GetContentRegionAvail().x - 3 * (bw + sp)));
+					changed |= drawElem((*vec)[i]);
+					ImGui::SameLine(0, sp); if (ImGui::Button(ICON_LC_CHEVRON_UP,   ImVec2(bw, 0))) up = i;
+					ImGui::SameLine(0, sp); if (ImGui::Button(ICON_LC_CHEVRON_DOWN, ImVec2(bw, 0))) dn = i;
+					ImGui::SameLine(0, sp); if (ImGui::Button(ICON_LC_X,            ImVec2(bw, 0))) rm = i;
+					ImGui::PopID();
+				}
+				ImGui::Unindent();
+				if      (up > 0)                                { std::swap((*vec)[up], (*vec)[up - 1]); changed = true; }
+				else if (dn >= 0 && dn + 1 < (int)vec->size())  { std::swap((*vec)[dn], (*vec)[dn + 1]); changed = true; }
+				else if (rm >= 0)                               { vec->erase(vec->begin() + rm); changed = true; }
+			};
+			if      (f.type == nuke::FT::IntList)    listUI((std::vector<int>*)a,    [&](int& e)    { return ImGui::InputInt("##e", &e); });
+			else if (f.type == nuke::FT::FloatList)  listUI((std::vector<float>*)a,  [&](float& e)  { return ImGui::DragFloat("##e", &e, 0.05f); });
+			else if (f.type == nuke::FT::DoubleList) listUI((std::vector<double>*)a, [&](double& e) { return ImGui::InputDouble("##e", &e); });
+			else listUI((std::vector<std::string>*)a, [&](std::string& e) -> bool
+			{
+				if (!f.asset.empty()) return AssetPicker("##e", e, f.asset);
+				char buf[256]; strncpy(buf, e.c_str(), 255); buf[255] = 0;
+				if (ImGui::InputText("##e", buf, sizeof(buf))) { e = buf; return true; }
+				return false;
+			});
+			ImGui::PopID();
+			break;
+		}
 		default: break;
 		}
 		if (!f.tip.empty() && (tipHover || ImGui::IsItemHovered()))
@@ -868,7 +932,8 @@ void EditorUI::RemoveComponent(Atom* a, Component* c)
 void EditorUI::winInspector()
 {
 	if (!win->inspector) return;
-	ImGui::Begin("Inspector", &win->inspector, window_flags);
+	NukeUI::DocPanel("panel:inspector", "Inspector", &win->inspector, window_flags, 380, 700, [this]()
+	{
 	if (auto sltd = AppInstance::GetSingleton()->selectedInHieararchy)
 	{
 		char name[128];
@@ -1035,11 +1100,21 @@ void EditorUI::winInspector()
 					{
 						ImGui::Checkbox("Enabled", &cmp->enabled);
 						// Tick interval (6.8): Update() every Nth frame, staggered by component id.
-						ImGui::SameLine(ImGui::GetContentRegionAvail().x * 0.55f);
-						ImGui::TextUnformatted("Tick every");
-						ImGui::SameLine();
-						ImGui::SetNextItemWidth(64);
-						if (ImGui::InputInt("##tickevery", &cmp->tickEvery) && cmp->tickEvery < 1) cmp->tickEvery = 1;
+						// Anchored to the RIGHT edge. InputInt's item width covers the WHOLE widget
+						// (text box + both step buttons): 64 left a ~14px text box that collapsed to
+						// nothing on narrow panels — give the number itself real room.
+						{
+							const float fieldW = 110.0f;   // text box + [-][+] buttons
+							const float lblW   = ImGui::CalcTextSize("Tick every").x;
+							const float inner  = ImGui::GetStyle().ItemInnerSpacing.x;
+							ImGui::SameLine();
+							float x = ImGui::GetWindowContentRegionMax().x - fieldW - inner - lblW;
+							if (x > ImGui::GetCursorPosX()) ImGui::SetCursorPosX(x);
+							ImGui::TextUnformatted("Tick every");
+							ImGui::SameLine(0, inner);
+							ImGui::SetNextItemWidth(fieldW);
+							if (ImGui::InputInt("##tickevery", &cmp->tickEvery) && cmp->tickEvery < 1) cmp->tickEvery = 1;
+						}
 						if (ImGui::IsItemHovered())
 							ImGui::SetTooltip("Run Update() every Nth frame (1 = every frame). Staggered across components,\nso heavy crowds spread over frames. FixedUpdate is unaffected.");
 						if (nuke::TypeInfo* cti = cmp->GetType())   // which plugin provides this type
@@ -1092,7 +1167,7 @@ void EditorUI::winInspector()
 	{
 		ImGui::TextWrapped("Select an object in the Hierarchy, or an asset in the Browser.");
 	}
-	ImGui::End();
+	});
 }
 
 // Inspector for a project asset selected in the Browser. Dispatched by extension: .nutex (usage + info),
@@ -1155,16 +1230,24 @@ void EditorUI::DrawAssetInspector(const std::string& path)
 
 	ImGui::TextUnformatted(bfs::path(path).filename().string().c_str());
 	ImGui::SameLine(); ImGui::TextDisabled("%s", ext.c_str());
-	// Any text-editable type opens in the text editor (2.2); assets open their own editor window.
-	if (IsTextFile(ext))
+	// Assets open their OWN editor window (module-supplied types included — e.g. .nutile
+	// from NukeTilemapEditor); text-editable types additionally offer the text editor.
+	const bool hasOwnEditor = ext == ".numat" || ext == ".numesh" || ext == ".nuprefab"
+	                       || nuke::AssetEditorForExt(ext) != nullptr;
+	if (hasOwnEditor)
+	{
+		ImGui::SameLine(ImGui::GetContentRegionAvail().x - (IsTextFile(ext) ? 190.0f : 120.0f));
+		if (ImGui::SmallButton(ICON_LC_PENCIL_RULER " Open in Editor")) OpenAssetEditor(path);
+		if (IsTextFile(ext))
+		{
+			ImGui::SameLine();
+			if (ImGui::SmallButton(ICON_LC_FILE_PEN " Edit")) OpenExternal(path, 0);
+		}
+	}
+	else if (IsTextFile(ext))
 	{
 		ImGui::SameLine(ImGui::GetContentRegionAvail().x - 60.0f);
 		if (ImGui::SmallButton(ICON_LC_FILE_PEN " Edit")) OpenExternal(path, 0);
-	}
-	else if (ext == ".numat" || ext == ".numesh" || ext == ".nuprefab")
-	{
-		ImGui::SameLine(ImGui::GetContentRegionAvail().x - 120.0f);
-		if (ImGui::SmallButton(ICON_LC_PENCIL_RULER " Open in Editor")) OpenAssetEditor(path);
 	}
 	ImGui::Separator();
 

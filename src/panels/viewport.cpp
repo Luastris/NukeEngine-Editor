@@ -1,5 +1,6 @@
 // viewport panel — EditorUI method definitions (translation unit).
 #include <editor/editorui.h>
+#include "nukeui.h"   // DocWindow: detachable panels (task #137)
 #include "API/Model/Math.h"
 #include "API/Model/resdb.h"   // RenderTexture camera preview (resolve targetTexGuid -> RT)
 #include "API/Model/Light.h"             // entity icons: glyph/tint per component
@@ -165,7 +166,8 @@ void EditorUI::DrawEntityIcons(ImVec2 rmin, ImVec2 sz)
 void EditorUI::winRender()
 {
 	if (!win->render) return;
-	ImGui::Begin("Render", &win->render, window_flags);
+	NukeUI::DocPanel("panel:render", "Render", &win->render, window_flags, 960, 620, [this]()
+	{
 
 	// Smooth "focus selected": ease the editor camera toward the target each frame (orientation kept).
 	if (camFocusing && editorCam && editorCam->transform)
@@ -273,10 +275,16 @@ void EditorUI::winRender()
 				ImGui::EndDragDropTarget();
 			}
 			// Tell the runtime GUI (NukeGUI) to draw INTO this viewport RT + map input to its rect.
+			// uiX/uiY are consumed against iRender::getCursorPos = GLFW coords RELATIVE TO THE
+			// MAIN WINDOW'S CLIENT AREA, but GetItemRectMin is ImGui SCREEN space (multi-viewport:
+			// absolute desktop coords) — subtract the main viewport origin or every game-UI click
+			// and Input.MouseX lands offset by the window position. (A game view dragged out to
+			// its own OS window can't map main-window cursor coords — known limitation.)
 			ImVec2 imin = ImGui::GetItemRectMin();
+			ImVec2 vpos = ImGui::GetMainViewport()->Pos;
 			AppInstance* app = AppInstance::GetSingleton();
 			app->uiTarget = sceneRTId;
-			app->uiX = (int)imin.x; app->uiY = (int)imin.y;
+			app->uiX = (int)(imin.x - vpos.x); app->uiY = (int)(imin.y - vpos.y);
 			app->uiW = (int)avail.x; app->uiH = (int)avail.y;
 
 			// Invisible-entity icons (edit mode): drawn UNDER the camera preview and the gizmo.
@@ -623,5 +631,5 @@ void EditorUI::winRender()
 			}
 		}
 	}
-	ImGui::End();
+	});
 }

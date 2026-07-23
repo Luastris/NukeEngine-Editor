@@ -1,5 +1,6 @@
 // browser panel — EditorUI method definitions (translation unit).
 #include <editor/editorui.h>
+#include "nukeui.h"   // DocWindow: detachable panels (task #137)
 #include "API/Model/Material.h"   // regen GUIDs of copied assets
 #include "API/Model/Mesh.h"
 #include "API/Model/Texture.h"
@@ -813,7 +814,8 @@ void EditorUI::CreateShaderAsset(const std::string& folder)
 void EditorUI::winBrowser()
 {
 	if (!win->browser) return;
-	ImGui::Begin("Browser", &win->browser, window_flags);
+	NukeUI::DocPanel("panel:browser", "Browser", &win->browser, window_flags, 920, 380, [this]()
+	{
 
 	// Back/Forward navigate the folder history while the browser is hovered. The chords come from the
 	// centralized hotkey pool (rebindable in Project Settings, conflict-aware); default M4/M5. They're
@@ -1157,7 +1159,8 @@ void EditorUI::winBrowser()
 					else       OpenWorldFromBrowser(e.path);
 				}
 				else if (!e.pak && (e.ext == ".nuprefab" || e.ext == ".numat" || e.ext == ".numesh" || e.ext == ".nuinput"
-				         || e.ext == ".ogg" || e.ext == ".wav" || e.ext == ".mp3" || e.ext == ".flac"))
+				         || e.ext == ".ogg" || e.ext == ".wav" || e.ext == ".mp3" || e.ext == ".flac"
+				         || nuke::AssetEditorForExt(e.ext)))   // module-supplied editors (e.g. .nutile)
 					OpenAssetEditor(e.path);   // asset editor window (audio opens its preview player)
 				else if (!e.pak && IsTextFile(e.ext)) OpenExternal(e.path, 0);   // scripts/shaders/configs -> the chosen editor
 			}
@@ -1200,7 +1203,8 @@ void EditorUI::winBrowser()
 						else       OpenWorldFromBrowser(e.path);
 					}
 					else if (!e.pak && (e.ext == ".nuprefab" || e.ext == ".numat" || e.ext == ".numesh" || e.ext == ".nuinput"
-					         || e.ext == ".ogg" || e.ext == ".wav" || e.ext == ".mp3" || e.ext == ".flac"))
+					         || e.ext == ".ogg" || e.ext == ".wav" || e.ext == ".mp3" || e.ext == ".flac"
+					         || nuke::AssetEditorForExt(e.ext)))   // module-supplied editors (e.g. .nutile)
 						OpenAssetEditor(e.path);   // asset editor window (audio opens its preview player)
 					else if (!e.pak && IsTextFile(e.ext)) OpenExternal(e.path, 0);   // scripts/shaders/configs -> the chosen editor
 				}
@@ -1222,5 +1226,5 @@ void EditorUI::winBrowser()
 		ImGui::EndDragDropTarget();
 	}
 	ImGui::EndChild();   // end the scrolling file list
-	ImGui::End();
+	});
 }

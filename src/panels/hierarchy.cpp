@@ -1,5 +1,6 @@
 // hierarchy panel — tree, icons, search, drag&drop (reparent + asset instantiate), focus. EditorUI.
 #include <editor/editorui.h>
+#include "nukeui.h"   // DocWindow: detachable panels (task #137)
 #include <API/Model/Light.h>
 #include <cmath>
 
@@ -147,7 +148,8 @@ void EditorUI::DrawAtomNode(Atom* atom)
 void EditorUI::winHierarchy()
 {
 	if (!win->hierarchy) return;
-	ImGui::Begin("Hierarchy", &win->hierarchy, window_flags);
+	NukeUI::DocPanel("panel:hierarchy", "Hierarchy", &win->hierarchy, window_flags, 300, 620, [this]()
+	{
 	AppInstance* app = AppInstance::GetSingleton();
 
 	ImGui::SetNextItemWidth(-1);
@@ -229,5 +231,5 @@ void EditorUI::winHierarchy()
 		dndAsset.clear(); dndAssetParent = nullptr;
 	}
 
-	ImGui::End();
+	});
 }

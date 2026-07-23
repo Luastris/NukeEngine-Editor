@@ -19,6 +19,8 @@
 #include <iostream>
 #include <boost/filesystem.hpp>
 #include <boost/filesystem/fstream.hpp>
+#include <nlohmann/json.hpp>   // early Preferences read (editor render backend)
+#include <sstream>
 #include <boost/dll/runtime_symbol_info.hpp>   // program_location() -> exe dir
 #include <boost/thread.hpp>
 #include <boost/chrono.hpp>
@@ -59,10 +61,20 @@ static LONG WINAPI NukeCrashTrace(EXCEPTION_POINTERS* ep)
 	SymInitialize(proc, nullptr, TRUE);
 
 	CONTEXT ctx = *ep->ContextRecord;
+	// A CALL through a null/garbage pointer parks RIP outside every module — the walker
+	// dies on frame 0. The return address of that call is on top of the stack: resume
+	// from it so the report names the CALLER.
+	if (ctx.Rip < 0x10000 && ctx.Rsp && !IsBadReadPtr((void*)ctx.Rsp, 8))
+	{
+		fprintf(stderr, "[CRASH] RIP invalid (call through a bad pointer) — resuming from the return address\n");
+		ctx.Rip = *(DWORD64*)ctx.Rsp;
+		ctx.Rsp += 8;
+	}
 	STACKFRAME64 sf = {};
 	sf.AddrPC.Offset    = ctx.Rip; sf.AddrPC.Mode    = AddrModeFlat;
 	sf.AddrFrame.Offset = ctx.Rbp; sf.AddrFrame.Mode = AddrModeFlat;
 	sf.AddrStack.Offset = ctx.Rsp; sf.AddrStack.Mode = AddrModeFlat;
+	int printed = 0;
 	for (int i = 0; i < 64; ++i)
 	{
 		if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64, proc, GetCurrentThread(), &sf, &ctx,
@@ -99,6 +111,35 @@ static LONG WINAPI NukeCrashTrace(EXCEPTION_POINTERS* ep)
 		}
 		else
 			fprintf(stderr, "[CRASH] #%02d %s+0x%llx\n", i, mod, (unsigned long long)pc);
+		++printed;
+	}
+	// Backstop when the walk yields nothing: raw-scan the stack for code addresses.
+	// Noisier than a real walk (stale frames show up) but always names the neighborhood.
+	if (printed < 2 && ep->ContextRecord->Rsp)
+	{
+		fprintf(stderr, "[CRASH] stack walk failed — raw scan:\n");
+		DWORD64* sp = (DWORD64*)ep->ContextRecord->Rsp;
+		for (int w = 0; w < 512 && !IsBadReadPtr(sp + w, 8); ++w)
+		{
+			DWORD64 pc = sp[w];
+			HMODULE hm = nullptr;
+			if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+			                        GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)pc, &hm) || !hm)
+				continue;
+			char mod[MAX_PATH] = "?";
+			GetModuleFileNameA(hm, mod, MAX_PATH);
+			const char* slash = strrchr(mod, '\\');
+			if (slash) memmove(mod, slash + 1, strlen(slash + 1) + 1);
+			char symBuf[sizeof(SYMBOL_INFO) + 256] = {};
+			SYMBOL_INFO* si = (SYMBOL_INFO*)symBuf;
+			si->SizeOfStruct = sizeof(SYMBOL_INFO);
+			si->MaxNameLen = 255;
+			DWORD64 disp64 = 0;
+			if (SymFromAddr(proc, pc, &disp64, si))
+				fprintf(stderr, "[CRASH] rsp+0x%03x %s!%s+0x%llx\n", w * 8, mod, si->Name, (unsigned long long)disp64);
+			else
+				fprintf(stderr, "[CRASH] rsp+0x%03x %s+0x%llx\n", w * 8, mod, (unsigned long long)pc);
+		}
 	}
 	fflush(stderr);
 	fflush(stdout);
@@ -498,7 +539,25 @@ int main(int argc, char** argv)
     wd.transparent = false;   // per-pixel transparency is a GAME/runtime feature — the editor window is
                               // always opaque (no DComp swap chain), whatever the config says
     wd.opacity     = config->window.opacity;
-    wd.backend     = config->window.backend;   // D3D11 / D3D12 (from config.json window.backend)
+    // EDITOR backend comes from the engine-wide PREFERENCES (%APPDATA%), NOT the project
+    // config: config/main.json window.backend is the RUNTIME (Player) backend and ships
+    // with the packaged game. Editor default = Vulkan (native detachable windows).
+    int editorBackend = 2;
+    if (const char* appdata = std::getenv("APPDATA"))
+    {
+        try
+        {
+            boost::filesystem::ifstream pf(boost::filesystem::path(appdata) / "NukeEngine" / "preferences.json");
+            if (pf)
+            {
+                std::stringstream ss; ss << pf.rdbuf();
+                nlohmann::json pj = nlohmann::json::parse(ss.str(), nullptr, false, true);
+                if (pj.is_object()) editorBackend = pj.value("editorBackend", 2);
+            }
+        }
+        catch (...) {}
+    }
+    wd.backend     = editorBackend;
     wd.gpuValidation = config->gpuValidation;   // Debug GPU validation opt-in (config, works for double-click)
     LoadBuiltinShaders(render, "shaders");   // engine loads built-in shaders + feeds the renderer
     render->init(wd);
@@ -507,6 +566,10 @@ int main(int argc, char** argv)
 
 	// Bring up the UI module (ImGui) — it renders through the renderer's neutral
 	// seam, so this works regardless of which renderer module is loaded.
+	// VULKAN: native imgui multi-viewport — any panel/editor dragged out becomes a real
+	// per-window swapchain OS window (the Vulkan WSI has none of the DXGI races that
+	// forced the single-window model + GDI hosts on D3D, which remain the fallback).
+	NukeUI::EnableNativeViewports(editorBackend == 2);
 	NukeUI::Init(render);
 
 	nuke::InstallDesktopInput(render);   // gameplay input: keyboard/mouse -> Input controls (chains the UI callbacks)

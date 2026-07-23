@@ -1,5 +1,6 @@
 // plugins panel — EditorUI method definitions (translation unit).
 #include <editor/editorui.h>
+#include "nukeui.h"   // DocWindow: detachable panels (task #137)
 #include <algorithm>
 #include <cctype>
 #include <set>
@@ -30,7 +31,7 @@ static bool PassesFilter(nuke::NUKEModule* m, const std::string& text, const std
 void EditorUI::PluginMGRWindow()
 {
 	if (!win->plugmgr) return;
-	if (ImGui::Begin("Plugins", &win->plugmgr, window_flags))
+	NukeUI::DocPanel("panel:plugins", "Plugins", &win->plugmgr, window_flags, 700, 520, [this]()
 	{
 		auto& mods = nuke::GetModules();
 
@@ -149,6 +150,5 @@ void EditorUI::PluginMGRWindow()
 			ImGui::TextWrapped("Select a plugin on the left. To install one, put its DLL in the `modules` directory.");
 		}
 		ImGui::EndChild();
-	}
-	ImGui::End();
+	});
 }

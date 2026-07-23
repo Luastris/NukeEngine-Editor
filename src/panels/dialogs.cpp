@@ -1,5 +1,6 @@
 // dialogs panel — EditorUI method definitions (translation unit).
 #include <editor/editorui.h>
+#include "nukeui.h"   // DocDetachAll: the preference toggle applies to doc windows too
 #include <nlohmann/json.hpp>
 #include <boost/filesystem/fstream.hpp>
 #include <cstdlib>   // getenv (preferences path)
@@ -7,10 +8,11 @@
 void EditorUI::winAbout()
 {
 	if (!win->about) return;
-	ImGui::Begin("About", &win->about, window_flags);
+	NukeUI::DocPanel("panel:about", "About", &win->about, window_flags, 480, 200, [this]()
+	{
 	ImGui::TextWrapped("NukeEngine - free, modular game engine. Renderer (Diligent) and UI (ImGui) "
 	                   "are loaded as independent modules and communicate only through a neutral seam.");
-	ImGui::End();
+	});
 }
 
 // ---- Console: viewer over the engine Log ring (cout/cerr are captured into it) -----------------
@@ -66,7 +68,8 @@ static bool ParseSourceRef(const std::string& text, std::string& file, int& line
 void EditorUI::winConsole()
 {
 	if (!win->console) return;
-	ImGui::Begin("Console", &win->console, window_flags);
+	NukeUI::DocPanel("panel:console", "Console", &win->console, window_flags, 920, 320, [this]()
+	{
 
 	// Toolbar: severity toggles (with live counts), filter, clear, auto-scroll — all
 	// FULL-SIZE controls (a SmallButton row next to a regular checkbox/input reads broken).
@@ -173,7 +176,7 @@ void EditorUI::winConsole()
 	if (conAutoScroll && grew && ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 40)
 		ImGui::SetScrollHereY(1.0f);
 	ImGui::EndChild();
-	ImGui::End();
+	});
 }
 
 // Resolve a log entry's source path (absolute; else project content; else engine shaders)
@@ -214,8 +217,13 @@ void EditorUI::LoadPreferences()
 			extEditorName  = j.value("externalEditor", std::string());
 			extCustomExe   = j.value("customEditorExe", std::string());
 			extCustomArgs  = j.value("customEditorArgs", std::string());
+			detachAssetEditors = j.value("detachAssetEditors", false);
+			editorBackend      = j.value("editorBackend", 2);   // editor default = Vulkan
 		}
 	}
+	// Doc windows (text editor, module editors) must know the default BEFORE their first
+	// frame — module draw callbacks can run ahead of winAssetEditors' per-frame refresh.
+	NukeUI::DocDetachDefault(detachAssetEditors);
 	if (!extCustomExe.empty())
 		extEditors.push_back({ "Custom", extCustomExe,
 		                       extCustomArgs.empty() ? "\"{file}\"" : extCustomArgs });
@@ -229,6 +237,8 @@ void EditorUI::SavePreferences()
 	j["externalEditor"]   = extEditorName;
 	j["customEditorExe"]  = extCustomExe;
 	j["customEditorArgs"] = extCustomArgs;
+	j["detachAssetEditors"] = detachAssetEditors;
+	j["editorBackend"]      = editorBackend;
 	bfs::ofstream f(PreferencesPath(), std::ios::trunc);
 	if (f) f << j.dump(2);
 }
@@ -236,11 +246,48 @@ void EditorUI::SavePreferences()
 void EditorUI::winPreferences()
 {
 	if (!prefsOpen) return;
-	if (prefsFocus) { ImGui::SetNextWindowFocus(); prefsFocus = false; }
-	ImGui::SetNextWindowSize(ImVec2(520, 0), ImGuiCond_FirstUseEver);
-	if (ImGui::Begin("Preferences", &prefsOpen, window_flags | ImGuiWindowFlags_AlwaysAutoResize))
+	if (prefsFocus) { NukeUI::DocFocus("panel:preferences"); prefsFocus = false; }
+	NukeUI::DocPanel("panel:preferences", "Preferences", &prefsOpen, window_flags, 540, 460, [this]()
 	{
 		// Engine-wide (per machine/user, NOT per project) — lives in %APPDATA%/NukeEngine.
+		ImGui::SeparatorText("Editor");
+		{
+			// The EDITOR's render backend. The RUNTIME (Player) backend is a PROJECT
+			// setting (Project Settings > Render Backend) and ships with the game.
+			const char* ebModes[] = { "Direct3D 11", "Direct3D 12 (ray tracing)", "Vulkan (default)" };
+			int eb = editorBackend;
+			if (ImGui::Combo("Editor Render Backend", &eb, ebModes, IM_ARRAYSIZE(ebModes)) && eb != editorBackend)
+			{
+				editorBackend = eb;
+				SavePreferences();
+			}
+			ImGui::SameLine(); ImGui::TextDisabled("(?)");
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("Vulkan: native detachable windows (default).\n"
+				                  "D3D12: RT reflections in the editor viewport.\n"
+				                  "Applied on the next editor restart.");
+		}
+		ImGui::SeparatorText("Windows");
+		if (ImGui::Checkbox("Open asset editors detached by default", &detachAssetEditors))
+		{
+			SavePreferences();
+			// The toggle acts NOW, not just on future windows: every open editor follows
+			// it immediately (hosts are torn down via wantDock — next frame, never from
+			// inside their own tick).
+			for (AssetEditorWin& w : assetEds)
+			{
+				if (detachAssetEditors) { if (!w.host) w.detached = true; }
+				else if (w.host)        { w.wantDock = true; }
+			}
+			NukeUI::DocDetachAll(detachAssetEditors);   // text editor + module doc windows too
+		}
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("On: material/mesh/prefab/... editors open as separate OS windows.\n"
+			                  "Off (default): they open INSIDE the main window (dock or float them\n"
+			                  "like any panel). Either way: drag an editor's title bar past the\n"
+			                  "main-window edge to tear it off into its own OS window, and drag\n"
+			                  "the detached window's tab back onto the main window to re-dock it.");
+		ImGui::Spacing();
 		ImGui::SeparatorText("External editor");
 		ImGui::TextDisabled("Used by the Console's double-click-to-source and script/asset editing.");
 		std::string cur = extEditorName.empty() ? std::string("(built-in text editor)") : extEditorName;
@@ -298,8 +345,7 @@ void EditorUI::winPreferences()
 			if (ImGui::IsItemHovered())
 				ImGui::SetTooltip("{file} and {line} expand, e.g.:  -g \"{file}:{line}\"");
 		}
-	}
-	ImGui::End();
+	});
 }
 
 // Open file:line in the chosen external editor; no choice (or a vanished exe) falls back

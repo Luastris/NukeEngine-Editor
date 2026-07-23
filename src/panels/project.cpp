@@ -297,7 +297,12 @@ void EditorUI::ApplyProjectPlugins()
 	for (auto& m : mods)
 	{
 		if (m->phase() == nuke::PHASE_BOOT) continue;
-		bool want = std::find(enabledPlugins.begin(), enabledPlugins.end(), m->moduleFile) != enabledPlugins.end();
+		// Editor TOOLING modules (asset editors for plugin file types) are always on in the
+		// editor host — tooling availability must not depend on a per-project plugin list.
+		// editorTool is ABI 2: a module DLL built before it has a SHORTER vtable and calling
+		// the slot jumps into garbage — stale project modules must load fine, not crash.
+		bool want = (nuke::ModuleAbi(m.get()) >= 2 && m->editorTool())
+		         || std::find(enabledPlugins.begin(), enabledPlugins.end(), m->moduleFile) != enabledPlugins.end();
 		if (want) nuke::EnablePlugin(m.get());
 	}
 }
@@ -477,10 +482,9 @@ void EditorUI::LoadEditorState()
 		for (auto& kv : j["uiOpen"].items()) uiOpen[kv.key()] = kv.value().get<bool>();
 	// NOTE: asset editors deliberately do NOT auto-reopen (user: surprise windows at
 	// startup; and a bad asset would crash every launch). Stale "assetEditors" keys in
-	// old state files are simply ignored. DEV HOOK: the env var below opens one at boot
-	// for headless testing of the secondary-window render path.
-	if (const char* devOpen = std::getenv("NUKE_OPEN_ASSET"))
-		if (devOpen[0]) OpenAssetEditor(devOpen);
+	// old state files are simply ignored. (The NUKE_OPEN_ASSET dev hook lives in
+	// setup_menu.cpp ONLY — a second copy here fired with the UNRESOLVED path and opened
+	// every asset twice: two windows for one document.)
 	if (j.contains("selected") && j["selected"].is_number_integer())
 		pendingSelectId = (long)j["selected"].get<long long>();
 	lastWorld = j.value("lastWorld", std::string());

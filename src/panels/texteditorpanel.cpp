@@ -5,6 +5,7 @@
 // existing mtime watcher (ResDB::HotReloadShaders/Assets), no extra plumbing needed.
 #include <editor/editorui.h>
 #include "interface/AssetCreators.h"
+#include "nukeui.h"   // DocWindow: detachable document windows (task #136)
 #include "../textedit/TextEditor.h"
 #include <boost/filesystem/fstream.hpp>
 
@@ -99,30 +100,36 @@ void EditorUI::winTextEditor()
 	{
 		TextDoc& d = textDocs[i];
 		const bool dirty = d.ed->GetUndoIndex() != d.savedUndoIndex;
-		if (d.wantFocus) { ImGui::SetNextWindowFocus(); d.wantFocus = false; }
-		// A NATIVE OS window, always: never merged into the main window's viewport.
-		ImGuiWindowClass wcls;
-		wcls.ViewportFlagsOverrideSet = ImGuiViewportFlags_NoAutoMerge;
-		ImGui::SetNextWindowClass(&wcls);
-		ImGui::SetNextWindowSize(ImVec2(720, 520), ImGuiCond_FirstUseEver);
+		const std::string docId = "txt:" + d.path;
+		if (d.wantFocus) { NukeUI::DocFocus(docId.c_str()); d.wantFocus = false; }
 		std::string title = std::string(ICON_LC_FILE_PEN " ") + bfs::path(d.path).filename().string()
-		                  + "###txt:" + d.path;   // stable id = the path; the dirty dot is a flag
+		                  + "###" + docId;   // stable identity: the dirty flag changes, the id doesn't
 		ImGuiWindowFlags wf = window_flags | (dirty ? ImGuiWindowFlags_UnsavedDocument : 0);
-		if (ImGui::Begin(title.c_str(), &d.open, wf))
+		// DETACHABLE document window (NukeUI): docked = a normal imgui window, detached =
+		// its own OS window; tear-off/dock-back by dragging like every asset editor. The
+		// content lambda looks the doc up BY PATH — it may run in the host pass, and the
+		// vector can shift under it.
+		const std::string keyPath = d.path;
+		NukeUI::DocWindow(docId.c_str(), title.c_str(), &d.open, wf, 720, 520, [this, keyPath]()
 		{
-			if (ImGui::SmallButton(ICON_LC_SAVE " Save")) SaveTextDoc(d);
-			ImGui::SameLine(); ImGui::TextDisabled("%s", d.path.c_str());
-			ImGui::SameLine();
-			int ln, col; d.ed->GetCursorPosition(ln, col);
-			ImGui::TextDisabled("  %d:%d  %s", ln + 1, col + 1, d.ed->GetLanguageDefinitionName());
-			const bool focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
-			if (focused) textFocused = i;   // the widget owns Ctrl+Z; scene undo must stay away
-			d.ed->Render("##text", focused, ImGui::GetContentRegionAvail());
-			// Ctrl+S saves this document while its window is focused.
-			if (focused && ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S, false))
-				SaveTextDoc(d);
-		}
-		ImGui::End();
+			for (int k = 0; k < (int)textDocs.size(); ++k)
+			{
+				TextDoc& dd = textDocs[k];
+				if (dd.path != keyPath) continue;
+				if (ImGui::SmallButton(ICON_LC_SAVE " Save")) SaveTextDoc(dd);
+				ImGui::SameLine(); ImGui::TextDisabled("%s", dd.path.c_str());
+				ImGui::SameLine();
+				int ln, col; dd.ed->GetCursorPosition(ln, col);
+				ImGui::TextDisabled("  %d:%d  %s", ln + 1, col + 1, dd.ed->GetLanguageDefinitionName());
+				const bool focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+				if (focused) textFocused = k;   // the widget owns Ctrl+Z; scene undo must stay away
+				dd.ed->Render("##text", focused, ImGui::GetContentRegionAvail());
+				// Ctrl+S saves this document while its window is focused.
+				if (focused && ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S, false))
+					SaveTextDoc(dd);
+				return;
+			}
+		});
 		if (!d.open && dirty)
 		{
 			d.open = true;               // keep the window until the user answers

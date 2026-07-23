@@ -125,6 +125,29 @@ void EditorUI::SetUp()
 	}
 
 	SyncWorldBaseline();   // baseline = the world we just opened; title "NukeEngine Editor - <project> - <world>"
+
+	// Dev hook (NUKE_OPEN_ASSET=<content-relative path>): open the file's asset editor right
+	// after boot — lets test harnesses exercise asset-editor windows without a hand on the
+	// mouse (same family as NUKE_GM_NEW/NUKE_GM_BUILD).
+	if (const char* oa = std::getenv("NUKE_OPEN_ASSET"))
+		if (oa[0])
+		{
+			// ';'-separated list: the harness can open several editors at once
+			// (multi-window render path testing).
+			std::string all = oa;
+			for (size_t p = 0; p < all.size(); )
+			{
+				size_t q = all.find(';', p);
+				if (q == std::string::npos) q = all.size();
+				const std::string one = all.substr(p, q - p);
+				p = q + 1;
+				if (one.empty()) continue;
+				const std::string full = AppInstance::GetSingleton()->ResolveContent(one);
+				cout << "[editorui]\t\t" << "NUKE_OPEN_ASSET -> " << full << endl;
+				OpenAssetEditor(full);
+			}
+		}
+
 	cout << "[editorui]\t\t" << "EditorUI ready." << endl;
 }
 

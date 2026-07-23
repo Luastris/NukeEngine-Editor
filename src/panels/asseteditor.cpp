@@ -12,6 +12,14 @@
 #include <API/Model/Prefab.h>
 #include <API/Model/Audio.h>   // audio preview transport (Preview bus)
 #include <input/Input.h>       // .nuinput asset editor (ParseMapString/SerializeMap/ApplyMap)
+#include <interface/AssetCreators.h>   // module-supplied asset editors (AssetEditorForExt)
+#include "nukeui.h"                     // NukeUI host windows (editor-owned detached editors)
+#include "imgui_internal.h"             // MovingWindow/ClearActiveID — drag-out detach (task #135)
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <Windows.h>                    // GetCursorPos/GetSystemMetrics — screen-edge tear-off
+#endif
 #include <boost/filesystem.hpp>
 #include <boost/filesystem/fstream.hpp>
 #include <iterator>   // istreambuf_iterator (read the .nuinput file)
@@ -470,12 +478,16 @@ void EditorUI::OpenAssetEditor(const std::string& path)
 	std::string ext = bfs::path(path).extension().string();
 	for (char& c : ext) c = (char)std::tolower((unsigned char)c);
 	const bool isAudio = (ext == ".ogg" || ext == ".wav" || ext == ".mp3" || ext == ".flac");
+	// MODULE-supplied editors first: the module that registered a file type registers its
+	// editor too (RegisterAssetEditor — e.g. NukeTilemapEditor owns .nutile). The editor
+	// core stays format-blind about plugin types.
+	if (const auto* open = nuke::AssetEditorForExt(ext)) { (*open)(path); return; }
 	if (ext != ".numat" && ext != ".numesh" && ext != ".nuprefab" && ext != ".nutex" && ext != ".nuinput" && !isAudio) return;
 
 	if (ext == ".nuinput")   // gameplay input map: pure data CRUD — no 3D scene, edits + saves the file
 	{
 		AssetEditorWin w;
-		w.path = path; w.ext = ext; w.wantFocus = true;
+		w.path = path; w.ext = ext; w.wantFocus = true; w.detached = detachAssetEditors;
 		bfs::ifstream f{ bfs::path(path) };
 		std::string js((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
 		nuke::Input::InputMapData m = nuke::Input::ParseMapString(js);
@@ -488,7 +500,7 @@ void EditorUI::OpenAssetEditor(const std::string& path)
 	if (isAudio)   // audio preview: no 3D scene — just the file path + a Preview-bus voice
 	{
 		AssetEditorWin w;
-		w.path = path; w.ext = ext; w.wantFocus = true;
+		w.path = path; w.ext = ext; w.wantFocus = true; w.detached = detachAssetEditors;
 		assetEds.push_back(std::move(w));
 		return;
 	}
@@ -496,7 +508,7 @@ void EditorUI::OpenAssetEditor(const std::string& path)
 	if (ext == ".nutex")   // Sprite Slicer: 2D — no preview scene, just an owned texture + a GPU preview
 	{
 		AssetEditorWin w;
-		w.path = path; w.ext = ext; w.wantFocus = true;
+		w.path = path; w.ext = ext; w.wantFocus = true; w.detached = detachAssetEditors;
 		w.tex = nuke::Texture::LoadFromFile(path);
 		if (!w.tex) return;
 		if (w.tex->usage != nuke::Texture::UsageSprite) w.tex->usage = nuke::Texture::UsageSprite;  // opening it in the slicer implies it IS a sprite
@@ -510,7 +522,7 @@ void EditorUI::OpenAssetEditor(const std::string& path)
 	}
 
 	AssetEditorWin w;
-	w.path = path; w.ext = ext; w.wantFocus = true;
+	w.path = path; w.ext = ext; w.wantFocus = true; w.detached = detachAssetEditors;
 	w.pv = AcquirePreview();
 	if (!w.pv) return;
 	ResDB* db = ResDB::getSingleton();
@@ -1024,14 +1036,131 @@ bool EditorUI::DrawPrefabAtomEditor(AssetEditorWin& w, Atom* a)
 void EditorUI::winAssetEditors()
 {
 	aeFocused = -1;   // recomputed below; EditorUI::Undo/Redo route by it
+	// NEW detachable DOCUMENT windows (text editor, module editors) follow the same
+	// preference as the asset editors.
+	NukeUI::DocDetachDefault(detachAssetEditors);
+
+	// NORMAL DOCKING, tear-off half (D3D fallback only — with NATIVE viewports imgui
+	// detaches windows itself): the user drags an asset editor's title bar PAST the
+	// main-window edge -> the window detaches into a host OS window that keeps following
+	// the cursor (the drag continues seamlessly). Releasing it back over the main window
+	// re-docks it at the drop point (HostDockDrop, consumed in the loop below).
+	if (!NukeUI::NativeViewportsActive())
+	if (ImGuiContext* g = ImGui::GetCurrentContext())
+		if (g->MovingWindow && g->MovingWindow->RootWindow)
+		{
+			const char* tag = strstr(g->MovingWindow->RootWindow->Name, "###ae:");
+			const ImVec2 m  = ImGui::GetMousePos();
+			const ImVec2 ds = ImGui::GetIO().DisplaySize;
+			// Torn off when the cursor CLEARLY left the window (margin, e.g. onto another
+			// monitor) — or when it is pinned against the VIRTUAL-SCREEN edge (a maximized
+			// main window clamps the cursor there, so "past the edge" is unreachable).
+			const float out = 12.0f;
+			const bool left = m.x < -out || m.y < -out || m.x >= ds.x + out || m.y >= ds.y + out;
+			bool clamped = false;
+#ifdef _WIN32
+			{
+				POINT cp; GetCursorPos(&cp);
+				const int vx = GetSystemMetrics(SM_XVIRTUALSCREEN), vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+				const int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN), vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+				clamped = cp.x <= vx || cp.y <= vy || cp.x >= vx + vw - 1 || cp.y >= vy + vh - 1;
+			}
+#endif
+			if (tag && (left || clamped))
+				for (AssetEditorWin& w : assetEds)
+					if (!w.host && w.path == tag + 6)
+					{
+						w.detached = true; w.dragOut = true;
+						ImGui::ClearActiveID();   // hand the drag over to the host window
+						g->MovingWindow = nullptr;
+						break;
+					}
+		}
+
 	for (int i = 0; i < (int)assetEds.size(); ++i)
 	{
 		AssetEditorWin& w = assetEds[i];
+		// "Dock back" pressed inside the host window last frame: a host can't destroy
+		// itself from within its own content tick, so the request lands here.
+		if (w.wantDock)
+		{
+			if (w.host) { NukeUI::HostDestroy(w.host); w.host = nullptr; }
+			w.detached = false; w.wantDock = false; w.wantFocus = true;
+		}
+		// NATIVE viewports (Vulkan): imgui owns embedding/detaching — no forced modes.
+		// DETACHED mode below is the D3D fallback only (PER WINDOW; the preference is the
+		// default for newly opened editors): an EDITOR-OWNED OS window (NukeUI host, the
+		// Godot model) — we create a borderless GLFW window ourselves, imgui draws into it
+		// through its own context, pixels arrive via the GDI blit (the imgui multi-viewport
+		// platform-window path raced DXGI into device removal).
+		if (w.detached && !NukeUI::NativeViewportsActive())
+		{
+			if (!w.host)
+			{
+				const std::string title = bfs::path(w.path).filename().string();
+				const bool isSlicerH = (w.ext == ".nutex"), isInputH = (w.ext == ".nuinput");
+				const bool isAudioH = !w.pv && !isSlicerH && !isInputH;
+				const int hw = isAudioH ? 460 : (w.ext == ".nuprefab" ? 900 : (isSlicerH ? 760 : (isInputH ? 820 : 640)));
+				const int hh = isAudioH ? 200 : 640;
+				w.host = NukeUI::HostCreate(title.c_str(), hw, hh);
+				const std::string keyPath = w.path;   // vector may reallocate: look up by path
+				NukeUI::HostSetContent(w.host, [this, keyPath]()
+				{
+					for (int k = 0; k < (int)assetEds.size(); ++k)
+						if (assetEds[k].path == keyPath)
+						{
+							if (assetEds[k].host && NukeUI::HostFocused(assetEds[k].host)) aeFocused = k;
+							DrawAssetEditorBody(k);
+							return;
+						}
+				});
+			}
+			// Tear-off: the host was born mid-drag — it picks the drag up and rides the
+			// cursor until the user lets go (release back over the main window = re-dock).
+			if (w.dragOut) { NukeUI::HostBeginDrag(w.host, 220.0f, 12.0f); w.dragOut = false; }
+			// Content-window flags mirror the docked window: dirty dot + the same
+			// no-scrollbar rule for preview editors (see the docked path below).
+			{
+				const bool isInputH = (w.ext == ".nuinput");
+				NukeUI::HostSetContentFlags(w.host, (w.dirty ? ImGuiWindowFlags_UnsavedDocument : 0)
+				    | (isInputH ? 0 : (ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)));
+			}
+			// Dropped back onto the main window: re-dock at the drop point.
+			float dropX = 0, dropY = 0;
+			if (NukeUI::HostDockDrop(w.host, &dropX, &dropY))
+			{
+				w.wantDock = true; w.hasDrop = true;
+				w.dropX = dropX; w.dropY = dropY;
+			}
+			if (w.wantFocus) { NukeUI::HostFocus(w.host); w.wantFocus = false; }
+			if (!NukeUI::HostAlive(w.host)) w.open = false;   // OS close button
+			if (!w.open && w.dirty)
+			{
+				w.open = true;                // keep it until the user answers (modal below)
+				aeCloseConfirm = i;
+			}
+			continue;                          // content is drawn by the host tick, not here
+		}
 		if (w.wantFocus) { ImGui::SetNextWindowFocus(); w.wantFocus = false; }
-		// A NATIVE OS window, always: never merged into the main window's viewport.
-		ImGuiWindowClass wcls;
-		wcls.ViewportFlagsOverrideSet = ImGuiViewportFlags_NoAutoMerge;
-		ImGui::SetNextWindowClass(&wcls);
+		if (w.hasDrop)
+		{
+			// Re-docked by drag: appear right where the user dropped it (title bar under
+			// the cursor), floating — from there normal imgui docking (drag onto panels /
+			// dock nodes with the usual preview overlays) takes over.
+			w.hasDrop = false;
+			ImGui::SetNextWindowViewport(ImGui::GetMainViewport()->ID);
+			ImGui::SetNextWindowPos(ImVec2(ImMax(0.0f, w.dropX - 220.0f), ImMax(0.0f, w.dropY - 10.0f)), ImGuiCond_Always);
+		}
+		else if (!NukeUI::NativeViewportsActive())
+		{
+			// PIN to the main viewport (D3D fallback only): imgui remembers a previously-
+			// detached screen position and would silently auto-spawn an OS window again —
+			// the fallback must never leave the main window on its own. With NATIVE
+			// viewports leaving the main window is exactly what windows are ALLOWED to do.
+			ImGui::SetNextWindowViewport(ImGui::GetMainViewport()->ID);
+			ImVec2 wp = ImGui::GetMainViewport()->WorkPos;
+			ImGui::SetNextWindowPos(ImVec2(wp.x + 80.0f, wp.y + 80.0f), ImGuiCond_Appearing);
+		}
 		const bool isSlicer = (w.ext == ".nutex");   // 2D Sprite Slicer — no 3D scene, but not audio either
 		const bool isInput  = (w.ext == ".nuinput"); // gameplay input map — pure data CRUD, no scene
 		const bool isAudio = !w.pv && !isSlicer && !isInput;   // audio previews are the only OTHER sceneless editors
@@ -1046,7 +1175,80 @@ void EditorUI::winAssetEditors()
 		ImGuiWindowFlags wf = window_flags | (w.dirty ? ImGuiWindowFlags_UnsavedDocument : 0)
 		                    | (isInput ? 0 : (ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse));
 		if (ImGui::Begin(title.c_str(), &w.open, wf))
+			DrawAssetEditorBody(i);
+		ImGui::End();
+		if (!w.open && w.dirty)
 		{
+			w.open = true;               // keep the window until the user answers
+			aeCloseConfirm = i;
+		}
+	}
+
+	// Discard-changes modal for a closing dirty editor.
+	if (aeCloseConfirm >= 0) ImGui::OpenPopup("Unsaved changes##asseted");
+	if (ImGui::BeginPopupModal("Unsaved changes##asseted", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+	{
+		if (aeCloseConfirm >= 0 && aeCloseConfirm < (int)assetEds.size())
+		{
+			AssetEditorWin& w = assetEds[aeCloseConfirm];
+			ImGui::Text("'%s' has unsaved changes.", bfs::path(w.path).filename().string().c_str());
+			ImGui::Spacing();
+			if (ImGui::Button("Save & Close"))
+			{
+				if      (w.ext == ".numat"    && w.mat)        w.mat->SaveToFile(w.path);
+				else if (w.ext == ".nuprefab" && w.prefabRoot) nuke::SavePrefab(w.prefabRoot, w.path);
+				else if (w.ext == ".nutex"    && w.tex)        { w.tex->SaveToFile(w.path); SlicerApplyLive(w.tex); }
+				else if (w.ext == ".nuinput")                  SaveInputAsset(w);
+				w.dirty = false; w.open = false; aeCloseConfirm = -1; ImGui::CloseCurrentPopup();
+			}
+			ImGui::SameLine();
+			if (ImGui::Button("Discard")) { w.dirty = false; w.open = false; aeCloseConfirm = -1; ImGui::CloseCurrentPopup(); }
+			ImGui::SameLine();
+			if (ImGui::Button("Cancel"))
+			{
+				if (w.host) NukeUI::HostCancelClose(w.host);   // un-stick the OS close request
+				aeCloseConfirm = -1; ImGui::CloseCurrentPopup();
+			}
+		}
+		else { aeCloseConfirm = -1; ImGui::CloseCurrentPopup(); }
+		ImGui::EndPopup();
+	}
+
+	// Tear down closed editors (scene goes back to the pool; audio voices stop).
+	for (int i = (int)assetEds.size() - 1; i >= 0; --i)
+		if (!assetEds[i].open)
+		{
+			AssetEditorWin& w = assetEds[i];
+			if (w.audioVoice) { nuke::Audio::Stop((double)w.audioVoice); w.audioVoice = 0; }
+			if (w.prefabRoot && w.pv) w.pv->world->RemoveAtomById((long)w.prefabRoot->id.id);
+			if (w.mat) delete w.mat;
+			delete w.idleM;
+			for (Material* m : w.undoM) delete m;
+			for (Material* m : w.redoM) delete m;
+			if (w.texPreview)   // destruction is deferred INSIDE the renderer (centralized GPU trash)
+			{
+				if (iRender* r = AppInstance::GetSingleton()->render) r->destroyTexture2D(w.texPreview);
+				w.texPreview = 0;
+			}
+			if (w.tex) delete w.tex;
+			if (w.pv) ReleasePreview(w.pv);
+			if (w.host) { NukeUI::HostDestroy(w.host); w.host = nullptr; }
+			assetEds.erase(assetEds.begin() + i);
+		}
+}
+
+// The full content of ONE asset editor (everything the old inline Begin..End body did).
+// Shared by both hosts: the docked/floating imgui window in the MAIN context, and the
+// EDITOR-OWNED OS window (NukeUI host, detached mode) whose content callback calls this
+// inside its own ImGui context.
+void EditorUI::DrawAssetEditorBody(int i)
+{
+	AssetEditorWin& w = assetEds[i];
+	// Type flags (recomputed; the docked path also computes them for sizing).
+	const bool isSlicer = (w.ext == ".nutex");
+	const bool isInput  = (w.ext == ".nuinput");
+	const bool isAudio  = !w.pv && !isSlicer && !isInput;
+	(void)isAudio;
 			const bool focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
 			if (focused) aeFocused = i;   // Ctrl+Z/Ctrl+Y route to THIS window's history
 			bool wantSave = false;
@@ -1404,59 +1606,4 @@ void EditorUI::winAssetEditors()
 				else if (w.ext == ".nuinput")                  w.idleI = InputMapJson(w);
 			}
 			w.editedNow = false;
-		}
-		ImGui::End();
-		if (!w.open && w.dirty)
-		{
-			w.open = true;               // keep the window until the user answers
-			aeCloseConfirm = i;
-		}
-	}
-
-	// Discard-changes modal for a closing dirty editor.
-	if (aeCloseConfirm >= 0) ImGui::OpenPopup("Unsaved changes##asseted");
-	if (ImGui::BeginPopupModal("Unsaved changes##asseted", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
-	{
-		if (aeCloseConfirm >= 0 && aeCloseConfirm < (int)assetEds.size())
-		{
-			AssetEditorWin& w = assetEds[aeCloseConfirm];
-			ImGui::Text("'%s' has unsaved changes.", bfs::path(w.path).filename().string().c_str());
-			ImGui::Spacing();
-			if (ImGui::Button("Save & Close"))
-			{
-				if      (w.ext == ".numat"    && w.mat)        w.mat->SaveToFile(w.path);
-				else if (w.ext == ".nuprefab" && w.prefabRoot) nuke::SavePrefab(w.prefabRoot, w.path);
-				else if (w.ext == ".nutex"    && w.tex)        { w.tex->SaveToFile(w.path); SlicerApplyLive(w.tex); }
-				else if (w.ext == ".nuinput")                  SaveInputAsset(w);
-				w.dirty = false; w.open = false; aeCloseConfirm = -1; ImGui::CloseCurrentPopup();
-			}
-			ImGui::SameLine();
-			if (ImGui::Button("Discard")) { w.dirty = false; w.open = false; aeCloseConfirm = -1; ImGui::CloseCurrentPopup(); }
-			ImGui::SameLine();
-			if (ImGui::Button("Cancel"))  { aeCloseConfirm = -1; ImGui::CloseCurrentPopup(); }
-		}
-		else { aeCloseConfirm = -1; ImGui::CloseCurrentPopup(); }
-		ImGui::EndPopup();
-	}
-
-	// Tear down closed editors (scene goes back to the pool; audio voices stop).
-	for (int i = (int)assetEds.size() - 1; i >= 0; --i)
-		if (!assetEds[i].open)
-		{
-			AssetEditorWin& w = assetEds[i];
-			if (w.audioVoice) { nuke::Audio::Stop((double)w.audioVoice); w.audioVoice = 0; }
-			if (w.prefabRoot && w.pv) w.pv->world->RemoveAtomById((long)w.prefabRoot->id.id);
-			if (w.mat) delete w.mat;
-			delete w.idleM;
-			for (Material* m : w.undoM) delete m;
-			for (Material* m : w.redoM) delete m;
-			if (w.texPreview)   // destruction is deferred INSIDE the renderer (centralized GPU trash)
-			{
-				if (iRender* r = AppInstance::GetSingleton()->render) r->destroyTexture2D(w.texPreview);
-				w.texPreview = 0;
-			}
-			if (w.tex) delete w.tex;
-			if (w.pv) ReleasePreview(w.pv);
-			assetEds.erase(assetEds.begin() + i);
-		}
 }

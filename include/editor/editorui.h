@@ -232,6 +232,14 @@ private:
 	std::vector<ExtEditor> extEditors;             // detected external editors + "Custom"
 	std::string extEditorName;                     // the chosen one (persisted by name; "" = built-in)
 	std::string extCustomExe, extCustomArgs;       // the "Custom" entry ({file}/{line} template)
+	// Asset editors as SEPARATE OS windows (experimental: detached-window DXGI races —
+	// see memory 'nukeengine-detached-windows'). Default false = docked/floating inside
+	// the main window, the Godot single-window fallback.
+	bool detachAssetEditors = false;
+	// EDITOR render backend (engine-wide preference, %APPDATA%): 0=D3D11, 1=D3D12, 2=Vulkan
+	// (default). The RUNTIME backend is a PROJECT setting (config/main.json window.backend).
+	int editorBackend = 2;
+	void DrawAssetEditorBody(int i);   // one editor's content (docked window OR host window)
 	void LoadPreferences();
 	void SavePreferences();
 	void winPreferences();
@@ -463,6 +471,12 @@ public:
 	struct AssetEditorWin
 	{
 		std::string path, ext;              // full path + lowercase extension
+		void* host = nullptr;               // detached mode: the editor-owned OS window (NukeUI host)
+		bool detached = false;              // PER-WINDOW mode (drag-driven); pref = default for new editors
+		bool wantDock = false;              // host dropped onto the main window — processed by winAssetEditors next frame
+		bool dragOut = false;               // torn off mid-drag: the new host must pick the drag up (HostBeginDrag)
+		bool hasDrop = false;               // re-dock placement pending: float the window at dropX/dropY
+		float dropX = 0, dropY = 0;         // drop point in main-window client coords
 		PreviewWorld* pv = nullptr;
 		Material* mat = nullptr;            // .numat: owned editing copy (saved to the file)
 		// .nutex Sprite Slicer: owned editing copy + GPU preview (downsampled) + 2D view state.

@@ -1,5 +1,6 @@
 // settings panel — hotkeys, world (level) commands, Project Settings window. EditorUI methods.
 #include <editor/editorui.h>
+#include "nukeui.h"   // DocWindow: detachable panels (task #137)
 #include <API/Model/Layers.h>   // render-layer names (Project Settings > Layers)
 #include <boost/filesystem.hpp>
 #include <boost/filesystem/fstream.hpp>
@@ -222,8 +223,7 @@ void EditorUI::ApplyProjectSettings(const ProjectSettings& ps)
 void EditorUI::winSettings()
 {
 	if (!settingsOpen) return;
-	ImGui::SetNextWindowSize(ImVec2(460, 420), ImGuiCond_FirstUseEver);
-	if (ImGui::Begin("Project Settings", &settingsOpen))
+	NukeUI::DocPanel("panel:settings", "Project Settings", &settingsOpen, 0, 460, 420, [this]()
 	{
 		// Snapshot helpers for the undoable project settings (rendering + RTX + disk sync).
 		auto capturePS = [this]() -> ProjectSettings {
@@ -337,8 +337,8 @@ void EditorUI::winSettings()
 		{
 			nuke::Config* cfg = nuke::Config::getSingleton();
 			int be = cfg ? cfg->window.backend : 0;
-			const char* beModes[] = { "Direct3D 11", "Direct3D 12 (ray tracing)" };
-			if (cfg && ImGui::Combo("Render Backend", &be, beModes, IM_ARRAYSIZE(beModes)) && be != cfg->window.backend)
+			const char* beModes[] = { "Direct3D 11", "Direct3D 12 (ray tracing)", "Vulkan" };
+			if (cfg && ImGui::Combo("Runtime Render Backend", &be, beModes, IM_ARRAYSIZE(beModes)) && be != cfg->window.backend)
 			{
 				cfg->window.backend = be;
 				try   // read-modify-write config/main.json (JSON comments are not preserved on rewrite)
@@ -354,7 +354,9 @@ void EditorUI::winSettings()
 				catch (...) {}
 			}
 			ImGui::SameLine(); ImGui::TextDisabled("(?)");
-			if (ImGui::IsItemHovered()) ImGui::SetTooltip("D3D12 enables hardware ray tracing (RTX).\nApplied on the next editor restart.");
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Backend of the PACKAGED GAME (Player) — ships with the project.\n"
+			                                              "D3D12 enables ray tracing, window transparency and HDR10.\n"
+			                                              "The EDITOR's own backend is in Preferences (default Vulkan).");
 		}
 
 		// Ray Tracing (RTX) — GLOBAL reflection quality. The per-camera "rtreflect" post effect is the on/off
@@ -801,8 +803,7 @@ void EditorUI::winSettings()
 				}
 			}
 		}
-	}
-	ImGui::End();
+	});
 }
 
 // World Settings window — world-level render settings (saved in the .nuworld). Currently global shadows;
@@ -810,14 +811,12 @@ void EditorUI::winSettings()
 void EditorUI::winWorldSettings()
 {
 	if (!worldSettingsOpen) return;
-	if (worldSettingsFocus) { ImGui::SetNextWindowFocus(); worldSettingsFocus = false; }   // only when opened via menu
-	ImGui::SetNextWindowSize(ImVec2(440, 0), ImGuiCond_FirstUseEver);
-	// NoFocusOnAppearing: restored-open on load it must NOT steal the dock's active tab (explicit menu-open
-	// focuses it via SetNextWindowFocus above).
-	if (ImGui::Begin("World Settings", &worldSettingsOpen, ImGuiWindowFlags_NoFocusOnAppearing))
+	if (worldSettingsFocus) { NukeUI::DocFocus("panel:worldsettings"); worldSettingsFocus = false; }   // only when opened via menu
+	// NoFocusOnAppearing: restored-open on load must NOT steal the dock's active tab.
+	NukeUI::DocPanel("panel:worldsettings", "World Settings", &worldSettingsOpen, ImGuiWindowFlags_NoFocusOnAppearing, 440, 560, [this]()
 	{
 		World* w = AppInstance::GetSingleton()->currentWorld;
-		if (!w) { ImGui::TextDisabled("No world loaded."); ImGui::End(); return; }
+		if (!w) { ImGui::TextDisabled("No world loaded."); return; }
 		World::Settings& s = w->settings;
 		auto apply = [this](const World::Settings& st) {
 			World* ww = AppInstance::GetSingleton()->currentWorld; if (!ww) return;
@@ -872,6 +871,5 @@ void EditorUI::winWorldSettings()
 			}
 		}
 		if (!active) wsBefore = s;   // refresh the idle baseline for the next edit
-	}
-	ImGui::End();
+	});
 }
