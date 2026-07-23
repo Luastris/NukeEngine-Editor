@@ -295,6 +295,18 @@ void EditorUI::Draw()
 		if (swDelay > 0 && --swDelay == 0) RequestProjectSwitch(swPath);
 	}
 
+	// PROJECT HUB (booted with no project): the hub IS the whole UI — no menu, no toolbar,
+	// no panels, no world logic. Its popups (New Project, unsaved-switch guard) draw here
+	// because the normal frame body below never runs.
+	if (projectHubMode)
+	{
+		ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport(), ImGuiDockNodeFlags_PassthruCentralNode);
+		DrawProjectHub();
+		DrawNewProjectPopup();
+		DrawSwitchConfirmPopup();
+		return;
+	}
+
 	// Hot-reload shaders + materials/textures edited on disk (~twice a second; cheap mtime checks).
 	if ((++hotReloadTick % 30) == 0)
 	{

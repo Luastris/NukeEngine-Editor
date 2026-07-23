@@ -28,6 +28,16 @@ void EditorUI::SetUp()
 
 	InitMenu();
 
+	// PROJECT HUB boot (no project chosen): none of the project machinery runs — no panels,
+	// no .nuproj load, no content scan, no world. Draw() renders only the hub window
+	// (recent / open / create); picking a project relaunches the editor on it.
+	if (projectHubMode)
+	{
+		LoadPreferences();   // recent-projects list + machine prefs (backend, detach, ...)
+		cout << "[editorui]\t\t" << "Project hub: no project loaded." << endl;
+		return;
+	}
+
 	AppInstance* editor = AppInstance::GetSingleton();
 	editor->PushWindow("nukeeditor-about", boost::bind(&EditorUI::winAbout, this));
 	editor->PushWindow("nukeeditor-browser", boost::bind(&EditorUI::winBrowser, this));
@@ -51,8 +61,10 @@ void EditorUI::SetUp()
 	RegisterInspectorOverrides();   // per-type custom inspector drawing (e.g. MeshRenderer material panel)
 	RegisterHotkeys();              // editor's built-in hotkeys (plugins add their own on load)
 
+	LoadPreferences();   // engine-wide (%APPDATA%) FIRST: recent-projects list must be in
+	                     // memory before LoadProject records this project into it
 	LoadProject();   // .nuproj: content dir, startup world, plugin load list, hotkey bindings (default if missing)
-	LoadPreferences();   // engine-wide (%APPDATA%): external editor choice + detection scan
+	PushRecentProject(projectFile);   // machine-wide recent list ("open last project" startup)
 
 	// Project-local C++ GAME modules (<project>/modules, Phase 6.0) join the shared pool
 	// BEFORE the plugin list applies — their types must register before the world loads.

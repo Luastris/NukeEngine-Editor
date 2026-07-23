@@ -219,6 +219,11 @@ void EditorUI::LoadPreferences()
 			extCustomArgs  = j.value("customEditorArgs", std::string());
 			detachAssetEditors = j.value("detachAssetEditors", false);
 			editorBackend      = j.value("editorBackend", 2);   // editor default = Vulkan
+			startupProjectMode = j.value("startupProject", 0);  // 0 = open last, 1 = always ask (hub)
+			recentProjects.clear();
+			if (j.contains("recentProjects") && j["recentProjects"].is_array())
+				for (auto& r : j["recentProjects"])
+					if (r.is_string()) recentProjects.push_back(r.get<std::string>());
 		}
 	}
 	// Doc windows (text editor, module editors) must know the default BEFORE their first
@@ -239,6 +244,8 @@ void EditorUI::SavePreferences()
 	j["customEditorArgs"] = extCustomArgs;
 	j["detachAssetEditors"] = detachAssetEditors;
 	j["editorBackend"]      = editorBackend;
+	j["startupProject"]     = startupProjectMode;   // 0 = open last project, 1 = always ask (hub)
+	j["recentProjects"]     = recentProjects;       // newest-first absolute .nuproj paths
 	bfs::ofstream f(PreferencesPath(), std::ios::trunc);
 	if (f) f << j.dump(2);
 }
@@ -266,6 +273,20 @@ void EditorUI::winPreferences()
 				ImGui::SetTooltip("Vulkan: native detachable windows (default).\n"
 				                  "D3D12: RT reflections in the editor viewport.\n"
 				                  "Applied on the next editor restart.");
+			// Startup project behavior. Explicit opens (CLI arg, double-clicked .nuproj,
+			// file association) always win over this.
+			const char* spModes[] = { "Open last project", "Show project window" };
+			int sp = startupProjectMode;
+			if (ImGui::Combo("On startup", &sp, spModes, IM_ARRAYSIZE(spModes)) && sp != startupProjectMode)
+			{
+				startupProjectMode = sp;
+				SavePreferences();
+			}
+			ImGui::SameLine(); ImGui::TextDisabled("(?)");
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("Open last project: boots straight into the most recent project.\n"
+				                  "Show project window: always asks (create / open / recent).\n"
+				                  "Opening a .nuproj explicitly (argument, double-click) skips both.");
 		}
 		ImGui::SeparatorText("Windows");
 		if (ImGui::Checkbox("Open asset editors detached by default", &detachAssetEditors))

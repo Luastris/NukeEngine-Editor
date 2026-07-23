@@ -486,6 +486,56 @@ int main(int argc, char** argv)
 		cout << "[main]\t\t\t" << "Opening project: " << projectArg << endl;
 		EditorUI::getSingleton()->SetProjectFile(projectArg);
 	}
+	else
+	{
+		// No explicit project: the startup choice is a MACHINE preference (%APPDATA%) —
+		// "open the last project" (default) or "always ask". Nothing is auto-created:
+		// with no last project on disk the editor boots into the PROJECT HUB (recent
+		// list / open / create) and the picked project relaunches the editor on itself.
+		int startupMode = 0;
+		std::string lastProject;
+		if (const char* appdata = std::getenv("APPDATA"))
+		{
+			try
+			{
+				bfs::ifstream pf(bfs::path(appdata) / "NukeEngine" / "preferences.json");
+				if (pf)
+				{
+					std::stringstream ss; ss << pf.rdbuf();
+					nlohmann::json pj = nlohmann::json::parse(ss.str(), nullptr, false, true);
+					if (pj.is_object())
+					{
+						startupMode = pj.value("startupProject", 0);
+						if (pj.contains("recentProjects") && pj["recentProjects"].is_array())
+							for (auto& r : pj["recentProjects"])   // newest existing entry wins
+							{
+								boost::system::error_code ec;
+								if (r.is_string() && bfs::exists(bfs::path(r.get<std::string>()), ec))
+									{ lastProject = r.get<std::string>(); break; }
+							}
+					}
+				}
+			}
+			catch (...) {}
+		}
+		boost::system::error_code ec;
+		if (startupMode == 0 && !lastProject.empty())
+		{
+			cout << "[main]\t\t\t" << "Opening last project: " << lastProject << endl;
+			EditorUI::getSingleton()->SetProjectFile(lastProject);
+		}
+		else if (startupMode == 0 && bfs::exists(bfs::path("project/game.nuproj"), ec))
+		{
+			// Legacy layout: a root project/ from before the hub existed keeps opening
+			// (and gets recorded into the recent list once loaded).
+			cout << "[main]\t\t\t" << "Opening legacy root project." << endl;
+		}
+		else
+		{
+			cout << "[main]\t\t\t" << "No project chosen - starting the project hub." << endl;
+			EditorUI::getSingleton()->projectHubMode = true;
+		}
+	}
 
 	// Two-phase startup, phase 1 (PHASE_BOOT). Discover the shared plugin pool first —
 	// metadata only, nothing activated — then enable the project's chosen render provider

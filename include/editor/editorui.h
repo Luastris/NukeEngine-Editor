@@ -185,7 +185,22 @@ private:
 	bool openNewProjectPopup = false;
 	char newProjName[128] = "MyGame";
 	std::string newProjDir;
+	// Module choice for the scaffold: plugins list (non-boot modules, checkbox each) +
+	// the render provider (PHASE_BOOT, single combo choice -> "services.render").
+	std::map<std::string, bool> newProjMods;       // moduleFile -> load in this project?
+	bool        newProjModsInit = false;           // lazily filled from the discovered pool
+	std::string newProjRender;                     // chosen render provider moduleFile
 	void DrawNewProjectPopup();
+	// PROJECT HUB: the editor booted with NO project (nothing auto-created). Only the hub
+	// window runs (recent list / open / create); picking a project relaunches the editor
+	// on it — the same lifecycle every other route uses (CLI arg, association, File menu).
+public:
+	bool projectHubMode = false;   // set by main.cpp before any UI exists
+private:
+	int  startupProjectMode = 0;                   // pref: 0 = open last project, 1 = always show the hub
+	std::vector<std::string> recentProjects;       // pref: most-recent-first absolute .nuproj paths
+	void PushRecentProject(const std::string& path);   // record an opened project (dedup, cap, persist)
+	void DrawProjectHub();
 	void OpenProjectCmd();                         // File -> Open Project... (raw or packed)
 	void RequestProjectSwitch(const std::string& path);   // confirm unsaved world, then switch
 	void DrawSwitchConfirmPopup();

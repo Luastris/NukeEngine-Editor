@@ -387,15 +387,99 @@ void EditorUI::DrawNewProjectPopup()
 	}
 	if (ImGui::BeginPopupModal("New Project", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
 	{
-		ImGui::SetNextItemWidth(300);
+		ImGui::SetNextItemWidth(480);
 		ImGui::InputText("Name", newProjName, sizeof(newProjName));
 		std::string locShown = newProjDir.empty() ? std::string("(pick a folder)") : newProjDir;
-		if (ImGui::Button((locShown + "##nploc").c_str(), ImVec2(300, 0)))
+		if (ImGui::Button((locShown + "##nploc").c_str(), ImVec2(480, 0)))
 		{
 			std::string d = EditorPickFolder();
 			if (!d.empty()) newProjDir = d;
 		}
 		ImGui::SameLine(0, 6); ImGui::TextUnformatted("Location");
+
+		// Module choice for the new project — the SHARED pool only (metadata is there even
+		// when nothing is enabled, e.g. in the hub). PROJECT-LOCAL modules (another project's
+		// <project>/modules C++ game code, e.g. an open project's Game.dll) are excluded —
+		// they belong to their project, not to a fresh one. Render providers (PHASE_BOOT)
+		// are a single choice ("services.render"); everything else is a plugin checkbox.
+		boost::system::error_code mec;
+		const std::string poolPrefix = bfs::absolute(bfs::path("modules"), mec).generic_string();
+		auto inSharedPool = [&](NUKEModule* m)
+		{
+			boost::system::error_code ec2;
+			const std::string mp = bfs::absolute(bfs::path(m->modulePath), ec2).generic_string();
+			return mp.rfind(poolPrefix, 0) == 0;
+		};
+		if (!newProjModsInit)
+		{
+			newProjMods.clear(); newProjRender.clear();
+			for (auto& m : nuke::GetModules())
+			{
+				if (!m || !inSharedPool(m.get())) continue;
+				if (m->phase() == nuke::PHASE_BOOT)
+				{
+					// default = the renderer this session runs on (else the first provider)
+					if (std::string(m->provides()) == "render" && (newProjRender.empty() || m->loaded))
+						newProjRender = m->moduleFile;
+				}
+				else newProjMods[m->moduleFile] = true;   // default: everything on (matches first-run behavior)
+			}
+			newProjModsInit = true;
+		}
+		ImGui::SeparatorText("Modules");
+		// Fixed-height scrollable table — the pool can grow arbitrarily large without
+		// stretching the modal. Row: checkbox + title | dimmed description (tooltip = full).
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(4, 4));
+		ImGui::BeginChild("np_mods", ImVec2(560, 240), ImGuiChildFlags_Borders);
+		ImGui::PopStyleVar();
+		ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(8, 3));
+		if (ImGui::BeginTable("np_mods_tbl", 2,
+		                      ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp |
+		                      ImGuiTableFlags_ScrollY | ImGuiTableFlags_PadOuterX))
+		{
+			ImGui::TableSetupColumn("Module", ImGuiTableColumnFlags_WidthFixed, 210.0f);
+			ImGui::TableSetupColumn("Description", ImGuiTableColumnFlags_WidthStretch);
+			for (auto& m : nuke::GetModules())
+			{
+				if (!m || m->phase() == nuke::PHASE_BOOT) continue;
+				auto it = newProjMods.find(m->moduleFile);
+				if (it == newProjMods.end()) continue;
+				ImGui::TableNextRow();
+				ImGui::TableSetColumnIndex(0);
+				ImGui::Checkbox((std::string(m->title) + "##npm" + m->moduleFile).c_str(), &it->second);
+				ImGui::TableSetColumnIndex(1);
+				// First line of the module's self-description; the full text on hover.
+				std::string d = m->description;
+				const size_t nl = d.find('\n');
+				ImGui::TextDisabled("%s", (nl == std::string::npos ? d : d.substr(0, nl)).c_str());
+				if (!d.empty() && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
+					ImGui::SetTooltip("%s", d.c_str());
+			}
+			ImGui::EndTable();
+		}
+		ImGui::PopStyleVar();
+		ImGui::EndChild();
+		// Renderer combo (only if there is more than one shared provider to choose from).
+		{
+			std::vector<NUKEModule*> renders;
+			for (auto& m : nuke::GetModules())
+				if (m && m->phase() == nuke::PHASE_BOOT && std::string(m->provides()) == "render"
+				    && inSharedPool(m.get()))
+					renders.push_back(m.get());
+			if (renders.size() > 1)
+			{
+				const char* cur = "?";
+				for (auto* r : renders) if (newProjRender == r->moduleFile) cur = r->title;
+				ImGui::SetNextItemWidth(300);
+				if (ImGui::BeginCombo("Renderer", cur))
+				{
+					for (auto* r : renders)
+						if (ImGui::Selectable(r->title, newProjRender == r->moduleFile))
+							newProjRender = r->moduleFile;
+					ImGui::EndCombo();
+				}
+			}
+		}
 
 		// Validate: a clean name + a picked folder; refuse to hijack an existing project.
 		std::string name = newProjName;
@@ -417,27 +501,119 @@ void EditorUI::DrawNewProjectPopup()
 			j["name"] = name;
 			j["engine"] = "NukeEngine";
 			j["content"] = "content";
+			// The chosen module set: a real plugin list (so the first LoadProject does NOT
+			// default everything on) + the render provider choice.
+			nlohmann::json plugins = nlohmann::json::array();
+			for (auto& kv : newProjMods) if (kv.second) plugins.push_back(kv.first);
+			j["plugins"] = plugins;
+			if (!newProjRender.empty()) j["services"] = { { "render", newProjRender } };
 			bfs::ofstream f{target / "game.nuproj"};
 			if (f)
 			{
 				f << j.dump(2);
 				f.close();
 				ImGui::CloseCurrentPopup();
+				newProjModsInit = false;   // fresh defaults next time
 				RequestProjectSwitch((target / "game.nuproj").string());
 			}
 			else std::cout << "[editor]	can't create " << (target / "game.nuproj").string() << std::endl;
 		}
 		ImGui::EndDisabled();
 		ImGui::SameLine();
-		if (ImGui::Button("Cancel", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
+		if (ImGui::Button("Cancel", ImVec2(120, 0))) { newProjModsInit = false; ImGui::CloseCurrentPopup(); }
 		ImGui::EndPopup();
 	}
+}
+
+// Machine-wide recent-projects list (preferences): newest first, deduped by path
+// (case-insensitive — Windows), capped. Feeds "open last project" and the hub's list.
+void EditorUI::PushRecentProject(const std::string& path)
+{
+	if (path.empty()) return;
+	std::string key = bfs::absolute(bfs::path(path)).string();
+	auto low = [](std::string s) { for (auto& c : s) c = (char)std::tolower((unsigned char)c); return s; };
+	const std::string keyLow = low(key);
+	recentProjects.erase(std::remove_if(recentProjects.begin(), recentProjects.end(),
+		[&](const std::string& r) { return low(r) == keyLow; }), recentProjects.end());
+	recentProjects.insert(recentProjects.begin(), key);
+	if (recentProjects.size() > 10) recentProjects.resize(10);
+	SavePreferences();
+}
+
+// PROJECT HUB — the whole UI when the editor booted with no project (startup pref "always
+// ask", or no last project on disk). Recent list + Open + New; a pick relaunches the
+// editor on the chosen .nuproj (the same lifecycle as every other open route).
+void EditorUI::DrawProjectHub()
+{
+	ImGuiViewport* vp = ImGui::GetMainViewport();
+	ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x * 0.5f,
+	                               vp->WorkPos.y + vp->WorkSize.y * 0.5f),
+	                        ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+	ImGui::SetNextWindowSize(ImVec2(640, 460), ImGuiCond_Once);
+	ImGui::SetNextWindowViewport(vp->ID);   // pin: NoAutoMerge must not float it into its own OS window
+	// The theme's 15px WindowPadding stacks (window + bordered child) — too airy for a
+	// launcher. Tighten the hub only; the pushes cover Begin AND the child below.
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10, 10));
+	ImGui::Begin("Projects##hub", nullptr, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDocking);
+	ImGui::TextUnformatted("NukeEngine");
+	ImGui::TextDisabled("Choose a project to open, or create a new one.");
+	ImGui::Separator();
+	ImGui::TextDisabled("Recent");
+	const float footer = ImGui::GetFrameHeightWithSpacing() + ImGui::GetStyle().ItemSpacing.y;
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(4, 4));   // inner child: table has its own cell padding
+	ImGui::BeginChild("hub_recent", ImVec2(0, -footer), ImGuiChildFlags_Borders);
+	ImGui::PopStyleVar();
+	if (recentProjects.empty()) ImGui::TextDisabled("(no recent projects)");
+	else
+	{
+		ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(8, 4));
+		if (ImGui::BeginTable("hub_recent_tbl", 2,
+		                      ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH |
+		                      ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_ScrollY |
+		                      ImGuiTableFlags_PadOuterX))   // no outer V borders -> imgui drops edge padding by default
+		{
+			ImGui::TableSetupColumn("Project", ImGuiTableColumnFlags_WidthFixed, 170.0f);
+			ImGui::TableSetupColumn("Path", ImGuiTableColumnFlags_WidthStretch);
+			ImGui::TableHeadersRow();
+			int idx = 0;
+			for (auto& p : recentProjects)
+			{
+				boost::system::error_code ec;
+				const bool exists = bfs::exists(bfs::path(p), ec);
+				bfs::path pp(p);
+				std::string name = pp.parent_path().filename().string();
+				if (name.empty()) name = pp.stem().string();
+				ImGui::TableNextRow();
+				ImGui::TableSetColumnIndex(0);
+				ImGui::BeginDisabled(!exists);
+				// Full-row click target (spans both columns); the path renders over it in col 1.
+				if (ImGui::Selectable((name + "##rec" + std::to_string(idx++)).c_str(), false,
+				                      ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap))
+					RequestProjectSwitch(p);
+				ImGui::EndDisabled();
+				ImGui::TableSetColumnIndex(1);
+				ImGui::TextDisabled("%s%s", p.c_str(), exists ? "" : "  (missing)");
+			}
+			ImGui::EndTable();
+		}
+		ImGui::PopStyleVar();
+	}
+	ImGui::EndChild();
+	if (ImGui::Button("New Project...", ImVec2(140, 0))) openNewProjectPopup = true;
+	ImGui::SameLine();
+	if (ImGui::Button("Open Project...", ImVec2(140, 0))) OpenProjectCmd();
+	ImGui::SameLine();
+	if (ImGui::Button("Exit", ImVec2(100, 0)) && AppInstance::GetSingleton()->render)
+		AppInstance::GetSingleton()->render->requestClose();
+	ImGui::End();
+	ImGui::PopStyleVar();   // hub WindowPadding
 }
 
 // Editor state (NOT world state) -> project/editor_state.json: camera, selection, which
 // inspector headers are expanded, the browser view/path/filters, and which panels are open.
 void EditorUI::SaveEditorState()
 {
+	if (projectHubMode) return;   // no project open — nothing to persist, nowhere to write
 	nlohmann::json j;
 	if (editorCam && editorCam->transform)
 	{
