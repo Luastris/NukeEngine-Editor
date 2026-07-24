@@ -194,7 +194,12 @@ void EditorUI::Toolbar()
 		ImGui::SameLine();
 		if (ToolBtn(ICON_LC_SQUARE, "Stop", app->playState == 0, bw))
 		{
-			if (app->playState != 0 && !pieSnapshot.empty())
+			const bool wasPlaying = app->playState != 0;
+			// Leave play mode BEFORE the restore: LoadFromString's teardown carries persistent
+			// atoms only while playing — PIE-born persistent atoms must NOT leak into the
+			// restored EDIT scene (Ctrl+S would write them into the world file).
+			app->playState = 0;
+			if (wasPlaying && !pieSnapshot.empty())
 			{
 				// Remember the selection by id — LoadFromString recreates every atom (the old
 				// pointer dies), so re-resolve it by its stable id on the restored scene.
@@ -205,7 +210,6 @@ void EditorUI::Toolbar()
 				                                                  // Game.LoadWorld must not leak past Stop)
 				if (selId) app->selectedInHieararchy = app->currentWorld->GetById(selId);
 			}
-			app->playState = 0;
 			// A game script may have locked/hidden the cursor (Input.SetCursorMode) —
 			// stopping play must hand the editor a normal cursor back, always.
 			if (app->render) app->render->setCursorMode(0);

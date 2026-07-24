@@ -1008,6 +1008,14 @@ void EditorUI::winInspector()
 				ImGui::EndCombo();
 			}
 			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Render channel (named in Project Settings > Layers); cameras pick what they draw via Layer Mask");
+			// Persistent (DontDestroyOnLoad): a ROOT atom flagged here survives GAME world
+			// switches during play — subtree, components and live script state carry over.
+			ImGui::SameLine();
+			bool prs = sltd->persistent;
+			if (ImGui::Checkbox("Persistent", &prs)) sltd->persistent = prs;
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Survive game world switches (Game.LoadWorld / async activation).\n"
+			                                              "Applies to ROOT atoms while PLAYING; children ride with their root.\n"
+			                                              "Editor world opens and savegame loads never carry atoms.");
 		}
 
 		// Prefab instance bar: this atom IS an instance (a prefab with individual params). Manual sync only.
