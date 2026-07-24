@@ -209,6 +209,9 @@ void EditorUI::Toolbar()
 			// A game script may have locked/hidden the cursor (Input.SetCursorMode) —
 			// stopping play must hand the editor a normal cursor back, always.
 			if (app->render) app->render->setCursorMode(0);
+			// ...and an in-flight Game.LoadWorldAsync must not survive into edit mode
+			// (activating a staged game world over the restored edit scene).
+			app->CancelWorldLoadAsync();
 		}
 		// PIE possess switch (UE-style): Game Camera = play through World::GetMainCamera (the one
 		// flagged Main, else the world's first camera); Editor Camera = keep the free-fly view.
