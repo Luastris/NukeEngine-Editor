@@ -2,6 +2,8 @@
 #include <editor/editorui.h>
 #include "nukeui.h"   // DocWindow: detachable panels (task #137)
 #include <API/Model/Camera.h>   // restrict the PostProcess component to camera atoms
+#include <API/Model/CharacterController.h>   // Fit To Mesh inspector button
+#include <API/Model/StatusBar.h>
 #include <API/Model/Package.h>  // packed session: pickers list pak/mod content too (3.2)
 #include <interface/Services.h> // csclass picker: enumerate scripting providers
 #include <service/iScript.h>    // csclass picker: the C# backend lists its Electron classes
@@ -348,6 +350,18 @@ void EditorUI::RegisterInspectorOverrides()
 	inspectorOverrides["Animator"] = [this](nuke::Component* c) {
 		DrawAnimatorInspector(static_cast<nuke::Animator*>(c));
 	};
+	inspectorOverrides["CharacterController"] = [this](nuke::Component* c) {
+		auto* cc = static_cast<nuke::CharacterController*>(c);
+		// One click sizes + places the capsule from the sibling mesh's bounds (pivot,
+		// offset, height, radius) — no manual aligning against the visual.
+		if (ImGui::Button("Fit To Mesh", ImVec2(-FLT_MIN, 0)))
+		{
+			if (cc->FitToMesh()) worldDirty = true;
+			else StatusBar::Set("cc.fit", "Fit To Mesh: no MeshRenderer with a mesh on this atom");
+		}
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("Set Pivot/Capsule Offset/Height/Radius from the sibling mesh's bounds.");
+	};
 }
 
 // Animator: the serialized state machine, editable in place (states table + transitions +
@@ -573,7 +587,7 @@ void EditorUI::DrawPostProcessInspector(nuke::PostProcess* pp)
 		});
 
 	ImGui::Separator();
-	if (ImGui::Button(ICON_LC_PLUS " Add Effect"))
+	if (ImGui::Button(ICON_LC_PLUS " Add Effect", ImVec2(-FLT_MIN, 0)))
 		recordStructural("Add effect", [&] { pp->effects.push_back(nuke::PostEffect{}); pp->Commit(); });
 }
 
@@ -846,6 +860,43 @@ void EditorUI::DrawDynamicProps(nuke::Component* cmp)
 			if (ImGui::InputText(p.name.c_str(), buf, sizeof(buf))) { nv.str = buf; edited = true; }
 			break;
 		}
+		case nuke::NukeVar::Kind::AtomRef:
+		{
+			// A REFERENCE to a live atom by STABLE id — the picker (combo over the world +
+			// hierarchy drag-drop), same as reflected Atom* props. Never a text box.
+			World* w = AppInstance::GetSingleton()->currentWorld;
+			Atom* cur = (w && p.value.refId) ? w->GetById((long)p.value.refId) : nullptr;
+			const std::string curLabel = cur ? cur->name
+			                          : p.value.refId ? ("<missing #" + std::to_string(p.value.refId) + ">")
+			                                          : "<none>";
+			if (ImGui::BeginCombo(p.name.c_str(), curLabel.c_str()))
+			{
+				if (ImGui::Selectable("<none>", p.value.refId == 0)) { nv.refId = 0; edited = true; }
+				std::function<void(bc::list<Atom*>&)> walk = [&](bc::list<Atom*>& gos)
+				{
+					for (Atom* at : gos)
+					{
+						if (!at) continue;
+						ImGui::PushID((void*)at);
+						if (ImGui::Selectable(at->name.c_str(), at == cur)) { nv.refId = (long long)at->id.id; edited = true; }
+						ImGui::PopID();
+						walk(at->children);
+					}
+				};
+				if (w) walk(w->GetHierarchy());
+				ImGui::EndCombo();
+			}
+			if (ImGui::BeginDragDropTarget())   // drop an atom from the hierarchy panel
+			{
+				if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("NUKE_ATOM"))
+				{
+					Atom* dropped = *(Atom**)pl->Data;
+					if (dropped) { nv.refId = (long long)dropped->id.id; edited = true; }
+				}
+				ImGui::EndDragDropTarget();
+			}
+			break;
+		}
 		default: continue;
 		}
 		ImGui::SameLine();
@@ -966,10 +1017,10 @@ void EditorUI::winInspector()
 			if (!ppath.empty())
 			{
 				ImGui::Text(ICON_LC_BOX " Prefab: %s", bfs::path(ppath).stem().string().c_str());
-				if (ImGui::Button("Apply to prefab")) ApplyToPrefab(sltd);
+				if (ImGui::Button("Apply to prefab", ImVec2(ImGui::GetContentRegionAvail().x * 0.5f - ImGui::GetStyle().ItemSpacing.x * 0.5f, 0))) ApplyToPrefab(sltd);
 				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Overwrite the prefab file with this instance's values");
 				ImGui::SameLine();
-				if (ImGui::Button("Reset to prefab")) { ResetToPrefab(sltd); ImGui::End(); return; }   // sltd is replaced
+				if (ImGui::Button("Reset to prefab", ImVec2(-FLT_MIN, 0))) { ResetToPrefab(sltd); ImGui::End(); return; }   // sltd is replaced
 				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Discard this instance's overrides; reload from the prefab");
 			}
 		}
@@ -1142,7 +1193,7 @@ void EditorUI::winInspector()
 
 		// Add any registered, create-able Component type (incl. ones added by plugins).
 		ImGui::Separator();
-		if (ImGui::Button("Add Component"))
+		if (ImGui::Button("Add Component", ImVec2(-FLT_MIN, 0)))
 			ImGui::OpenPopup("addcomp");
 		if (ImGui::BeginPopup("addcomp"))
 		{
@@ -1322,7 +1373,7 @@ void EditorUI::DrawAssetInspector(const std::string& path)
 		// BC1 halves the size but is blocky. Applied immediately (decode -> re-encode) + live in the renderer.
 		if (inspTex->usage == nuke::Texture::UsageSprite)   // grid/margin/spacing/9-slice live in the dedicated slicer
 		{
-			if (ImGui::Button(ICON_LC_GRID_2X2 " Open Sprite Slicer")) OpenAssetEditor(path);
+			if (ImGui::Button(ICON_LC_GRID_2X2 " Open Sprite Slicer", ImVec2(-FLT_MIN, 0))) OpenAssetEditor(path);
 			ImGui::TextDisabled("Grid %dx%d  ·  margin %d/%d/%d/%d  ·  spacing %d,%d", inspTex->spriteColumns, inspTex->spriteRows,
 				inspTex->spriteMarginLeft, inspTex->spriteMarginRight, inspTex->spriteMarginTop, inspTex->spriteMarginBottom,
 				inspTex->spriteSpacingX, inspTex->spriteSpacingY);
@@ -1431,16 +1482,16 @@ void EditorUI::DrawAssetInspector(const std::string& path)
 		boost::system::error_code ec;
 		uintmax_t sz = bfs::file_size(bfs::path(path), ec);
 		if (!ec) ImGui::Text("Size: %.1f KB", (double)sz / 1024.0);
-		if (ext == ".nuworld")  { if (ImGui::Button(ICON_LC_GLOBE " Open World"))  OpenWorldFromBrowser(path); }
+		if (ext == ".nuworld")  { if (ImGui::Button(ICON_LC_GLOBE " Open World", ImVec2(-FLT_MIN, 0)))  OpenWorldFromBrowser(path); }
 		else if (ext == ".nuprefab")
 		{
 			ImGui::TextDisabled("Prefab — drag into the world to instantiate.");
-			if (ImGui::Button(ICON_LC_PACKAGE_PLUS " Instantiate")) SpawnPrefab(path);
+			if (ImGui::Button(ICON_LC_PACKAGE_PLUS " Instantiate", ImVec2(-FLT_MIN, 0))) SpawnPrefab(path);
 		}
 		else if (ext == ".nuproj")
 		{
 			ImGui::TextDisabled("Project descriptor.");
-			if (ImGui::Button(ICON_LC_SETTINGS " Open Project Settings")) settingsOpen = true;
+			if (ImGui::Button(ICON_LC_SETTINGS " Open Project Settings", ImVec2(-FLT_MIN, 0))) settingsOpen = true;
 		}
 		else if (!IsTextFile(ext)) ImGui::TextDisabled("No editable properties.");
 	}

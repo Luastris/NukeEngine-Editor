@@ -1,6 +1,7 @@
 // toolbar panel — EditorUI method definitions (translation unit).
 #include <editor/editorui.h>
 #include <API/Model/Light.h>
+#include <API/Model/Collider.h>   // primitives spawn with a matching collider by default
 #include <API/Model/Environment.h>
 #include <API/Model/ReflectionProbe.h>
 #include <API/Model/Sprite.h>
@@ -62,6 +63,16 @@ void EditorUI::SpawnPrimitive(const char* atomName, const char* guid)
 	atom->AddComponent(mr);
 	mr->meshGuid = guid;
 	mr->mesh = ResDB::getSingleton()->GetMesh(guid);
+	// Every primitive ships with a MATCHING collider by default — a spawned floor/wall/
+	// prop must just work with physics, characters and camera probes (remove if unwanted).
+	nuke::Collider* col = new nuke::Collider();
+	const std::string g = guid;
+	if      (g == "builtin:sphere")   col->shape = nuke::Collider::S_Sphere;    // r 0.5 = the mesh
+	else if (g == "builtin:capsule")  col->shape = nuke::Collider::S_Capsule;   // r 0.5 / hh 0.5 = the mesh
+	else if (g == "builtin:cylinder") { col->shape = nuke::Collider::S_Mesh; col->convex = true; }   // exact hull
+	else if (g == "builtin:plane")    col->halfExtents = Vector3(0.5, 0.01, 0.5);   // flat box
+	// cube: the Box default (0.5)^3 matches exactly
+	atom->AddComponent(col);
 	FinishSpawn(atom);
 }
 void EditorUI::SpawnCube() { SpawnPrimitive("Cube", "builtin:cube"); }
@@ -195,6 +206,9 @@ void EditorUI::Toolbar()
 				if (selId) app->selectedInHieararchy = app->currentWorld->GetById(selId);
 			}
 			app->playState = 0;
+			// A game script may have locked/hidden the cursor (Input.SetCursorMode) —
+			// stopping play must hand the editor a normal cursor back, always.
+			if (app->render) app->render->setCursorMode(0);
 		}
 		// PIE possess switch (UE-style): Game Camera = play through World::GetMainCamera (the one
 		// flagged Main, else the world's first camera); Editor Camera = keep the free-fly view.

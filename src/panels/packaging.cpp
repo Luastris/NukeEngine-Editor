@@ -625,13 +625,19 @@ void EditorUI::PackageProjectNow()
 		for (auto& fp : all)
 		{
 			if (used.count(DiskKey(bfs::path(fp.second)))) { files.push_back(fp); continue; }
-			// Project SHADERS always ship, referenced or not: scripts bind them BY NAME at
-			// runtime (Shader.Find("unlit") / nuke.Shader.Find) — invisible to the reference
-			// walk — and they are code-sized, not content-sized. Without this a shader no
-			// world material happens to use silently vanishes from the build.
+			// AUTO-LOADED asset types always ship, referenced or not — they are invisible
+			// to the reference walk BY DESIGN and code-sized:
+			//  * shaders (.hlsl): scripts bind them BY NAME (Shader.Find) at runtime;
+			//  * input maps (.nuinput): ResDB auto-loads every one from content — nothing
+			//    references them, but without them the PACKAGED game has NO bindings
+			//    (actions dead, the character never moves).
 			std::string low = fp.first;
 			for (char& c : low) c = (char)tolower((unsigned char)c);
-			if (low.size() > 5 && low.compare(low.size() - 5, 5, ".hlsl") == 0)
+			auto ends = [&](const char* ext) {
+				const size_t n = strlen(ext);
+				return low.size() > n && low.compare(low.size() - n, n, ext) == 0;
+			};
+			if (ends(".hlsl") || ends(".nuinput"))
 			{
 				files.push_back(fp);
 				++forcedShaders;
