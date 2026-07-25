@@ -8,10 +8,12 @@
 #include "API/Model/Environment.h"
 #include "API/Model/Screen.h"    // editor feeds the "game screen" size (the viewport panel)
 #include "API/Model/Canvas.h"    // canvas 2D resize gizmo (corner/edge handles)
+#include <interface/ComponentIcons.h>   // registered entity icons (modules bring their own)
 #include <functional>
 #include <cmath>
 #include <algorithm>
 #include <cctype>
+#include <cstring>   // strcmp: module-component icon match by type name
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/gtx/matrix_decompose.hpp>   // gizmo: decompose the manipulated world matrix
 #include <glm/gtc/type_ptr.hpp>
@@ -115,6 +117,26 @@ void EditorUI::DrawEntityIcons(ImVec2 rmin, ImVec2 sz)
 			}
 			else if (atom->GetComponent<ReflectionProbe>()) { glyph = ICON_LC_APERTURE;  col = IM_COL32(200, 140, 255, 235); }
 			else if (atom->GetComponent<Environment>())     { glyph = ICON_LC_CLOUD_SUN; col = IM_COL32(150, 200, 255, 235); }
+			else
+			{
+				// REGISTERED component icons (interface/ComponentIcons.h): engine systems and
+				// MODULES register their own — no editor hardcode, no editor<->module linkage.
+				// Match by TYPE NAME content (Component::name is char*; == would compare
+				// pointers across DLLs and never hit).
+				for (nuke::Component* mc : atom->components)
+				{
+					if (!mc || !mc->name) continue;
+					for (const nuke::ComponentIcon& ci : nuke::ComponentIcons())
+						if (!strcmp(mc->name, ci.component.c_str()))
+						{
+							glyph = ci.glyph.c_str();
+							col = IM_COL32((int)(ci.color[0] * 255.f), (int)(ci.color[1] * 255.f),
+							               (int)(ci.color[2] * 255.f), (int)(ci.color[3] * 255.f));
+							break;
+						}
+					if (glyph) break;
+				}
+			}
 			if (glyph)
 			{
 				Vector3 p = atom->GetTransform().globalPosition();

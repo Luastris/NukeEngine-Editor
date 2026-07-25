@@ -5,6 +5,8 @@
 #include <editor/editorui.h>
 #include <input/DesktopInput.h>   // gameplay input provider (keyboard/mouse)
 #include <interface/AssetCreators.h>   // register the .nuinput asset type
+#include <interface/AtomCreators.h>    // register engine atom templates for the "+" menu
+#include <interface/ComponentIcons.h>  // register engine component icons for the viewport
 #include <input/keyboard.h>
 #include <config.h>
 #include <interface/Modular.h>
@@ -647,6 +649,13 @@ int main(int argc, char** argv)
 			"      { \"action\": \"Fire\", \"controls\": [\"Mouse.Left\"], \"phase\": 1 }\n    ] }\n  ]\n}\n";
 		nuke::RegisterAssetCreator(ic);
 	}
+
+	// ENGINE atom templates for the "+" create menu (interface/AtomCreators.h). Modules
+	// register their own from OnLoad — same registry, no editor linkage.
+	nuke::RegisterAtomCreator({ "Effects", "Wind Zone", "\xee\x86\xb0" /* ICON_LC_WIND */, { "WindZone" } });
+	// ENGINE component icons for the viewport overlay (interface/ComponentIcons.h) — same
+	// registry the modules use; the viewport draws only from it, zero per-type hardcode.
+	nuke::RegisterComponentIcon({ "WindZone", "\xee\x86\xb0" /* ICON_LC_WIND */, { 0.63f, 0.9f, 0.78f, 0.92f } });
 
 	editorinit();                       // SetUp: loads the project + activates its chosen plugins
 	instance->StartFixedThread();       // fixed-frequency update thread (idles until PIE plays)

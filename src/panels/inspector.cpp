@@ -9,6 +9,7 @@
 #include <service/iScript.h>    // csclass picker: the C# backend lists its Electron classes
 #include <set>
 #include <memory>                // chroma-key undo snapshots (shared_ptr pixel blobs)
+#include <cmath>                 // curve widget: tangent handle geometry (sqrtf/fabsf)
 #include <API/Model/Texture.h>  // asset inspector: .nutex usage/info
 #include <API/Model/Material.h> // asset inspector: .numat fields
 #include <API/Model/Light.h>       // asset preview world: sun
@@ -782,6 +783,339 @@ bool EditorUI::DrawFields(void* obj, nuke::TypeInfo* ti)
 			// The FIELD NAME scopes the ID stack: row ids are per-index, and two list fields
 			// side by side would otherwise collide (row 0 of one == row 0 of the next).
 			ImGui::PushID(f.name.c_str());
+			// [[prop(widget="curve")]] on a float list: a BEZIER curve editor over
+			// (t, value, inTangent, outTangent) keys — the exact format/math the VFX runtime
+			// evaluates (cubic Hermite; tangents are dv/dt slopes the user shapes by hand).
+			// Click a key = select it + show its tangent HANDLES (drag them to bend the curve),
+			// drag a key to move it, double-click empty = add a key (auto tangent preserving
+			// the local shape), right-click a key = delete. Legacy (t,v)-pair data (odd
+			// stride) upgrades in place with smooth auto tangents, same as the runtime.
+			if (f.type == nuke::FT::FloatList && f.widget == "curve")
+			{
+				std::vector<float>* c = (std::vector<float>*)a;
+				if (!c->empty() && c->size() % 4 != 0 && c->size() % 2 == 0)   // legacy pairs -> keys
+				{
+					const size_t n = c->size() / 2;
+					std::vector<float> up; up.reserve(n * 4);
+					for (size_t k = 0; k < n; ++k)
+					{
+						size_t qa = k == 0 ? 0 : k - 1, qb = k == n - 1 ? n - 1 : k + 1;
+						float dt = (*c)[qb * 2] - (*c)[qa * 2];
+						float m = dt > 1e-6f ? ((*c)[qb * 2 + 1] - (*c)[qa * 2 + 1]) / dt : 0.f;
+						up.insert(up.end(), { (*c)[k * 2], (*c)[k * 2 + 1], m, m });
+					}
+					c->swap(up); changed = true;
+				}
+				// keep keys sorted by t BEFORE anything evaluates/draws. Runs every frame except
+				// mid-drag of a key (indices must stay stable under the mouse) — the old
+				// "sort when changed after release" gate never fired (changed is per-frame and
+				// the release frame has no change), leaving fresh keys appended out of order.
+				{
+					ImGuiStorage* sst = ImGui::GetStateStorage();
+					const bool keyDragging = sst->GetInt(ImGui::GetID("##curvedrag"), -1) >= 0 && ImGui::IsMouseDown(0);
+					if (!keyDragging && c->size() >= 8)
+					{
+						int selK = sst->GetInt(ImGui::GetID("##curvesel"), -1);
+						float selT = selK >= 0 && selK < (int)(c->size() / 4) ? (*c)[selK * 4] : -1.f;
+						float selV = selK >= 0 && selK < (int)(c->size() / 4) ? (*c)[selK * 4 + 1] : 0.f;
+						bool reordered = false;
+						for (size_t k = 4; k + 3 < c->size(); k += 4)
+							for (size_t j = k; j >= 4 && (*c)[j] < (*c)[j - 4]; j -= 4, reordered = true)
+								for (int q = 0; q < 4; ++q) std::swap((*c)[j + q], (*c)[j - 4 + q]);
+						if (reordered)
+						{
+							changed = true;   // the sorted order must reach the component/undo
+							if (selT >= 0.f)   // selection is BY INDEX — re-find the key
+								for (int k = 0; k < (int)(c->size() / 4); ++k)
+									if ((*c)[k * 4] == selT && (*c)[k * 4 + 1] == selV)
+									{ sst->SetInt(ImGui::GetID("##curvesel"), k); break; }
+						}
+					}
+				}
+				const size_t nk = c->size() / 4;
+				auto eval = [&](float t) -> float {
+					const size_t nn = c->size() / 4; if (!nn) return 1.f;
+					if (nn == 1 || t <= (*c)[0]) return (*c)[1];
+					if (t >= (*c)[(nn - 1) * 4]) return (*c)[(nn - 1) * 4 + 1];
+					size_t k = 1; while (k < nn && t > (*c)[k * 4]) ++k;
+					const float t0 = (*c)[(k - 1) * 4], v0 = (*c)[(k - 1) * 4 + 1];
+					const float t1 = (*c)[k * 4],       v1 = (*c)[k * 4 + 1];
+					const float hh = t1 - t0; if (hh < 1e-6f) return v1;
+					const float m0 = (*c)[(k - 1) * 4 + 3] * hh, m1 = (*c)[k * 4 + 2] * hh;
+					const float x = (t - t0) / hh, x2 = x * x, x3 = x2 * x;
+					return (2 * x3 - 3 * x2 + 1) * v0 + (x3 - 2 * x2 + x) * m0 + (-2 * x3 + 3 * x2) * v1 + (x3 - x2) * m1;
+				};
+				// view range: fit the keys AND the curve itself (tangent bulges overshoot keys)
+				float vmax = 1.0f;
+				for (size_t k = 0; k < nk; ++k) vmax = std::max(vmax, (*c)[k * 4 + 1]);
+				for (int sN = 0; sN <= 32; ++sN) vmax = std::max(vmax, eval(sN / 32.0f));
+				vmax *= 1.15f;
+				// While ANYTHING is being dragged the view scale FREEZES: a live-fitting vmax fed
+				// the growing value back through the mouse mapping — exponential runaway that
+				// dragged a key into the MILLIONS in one hold (poisoned a world's alpha curve).
+				{
+					ImGuiStorage* stv = ImGui::GetStateStorage();
+					const ImGuiID vmaxId = ImGui::GetID("##curvevmax");
+					const bool anyDrag = (stv->GetInt(ImGui::GetID("##curvedrag"), -1) >= 0
+					                   || stv->GetInt(ImGui::GetID("##curvehdl"), 0) != 0) && ImGui::IsMouseDown(0);
+					if (anyDrag) vmax = stv->GetFloat(vmaxId, vmax);
+					else         stv->SetFloat(vmaxId, vmax);
+				}
+				// value clamp from the prop's min=/max= hints (e.g. alpha curves are 0..1)
+				const float vLo = f.fmax > f.fmin ? f.fmin : 0.0f;
+				const float vHi = f.fmax > f.fmin ? f.fmax : 1e30f;
+				const float wpx = ImGui::CalcItemWidth(), hpx = 110.0f;
+				ImVec2 p0 = ImGui::GetCursorScreenPos();
+				ImGui::InvisibleButton("##curvecanvas", ImVec2(wpx, hpx));
+				const bool hov = ImGui::IsItemHovered();
+				ImDrawList* dl = ImGui::GetWindowDrawList();
+				dl->AddRectFilled(p0, ImVec2(p0.x + wpx, p0.y + hpx), IM_COL32(28, 28, 30, 255));
+				for (int gl = 1; gl < 4; ++gl)   // quarter grid
+				{
+					dl->AddLine(ImVec2(p0.x + wpx * gl / 4, p0.y), ImVec2(p0.x + wpx * gl / 4, p0.y + hpx), IM_COL32(55, 55, 58, 255));
+					dl->AddLine(ImVec2(p0.x, p0.y + hpx * gl / 4), ImVec2(p0.x + wpx, p0.y + hpx * gl / 4), IM_COL32(55, 55, 58, 255));
+				}
+				const float sy = hpx / vmax;   // px per value unit (x axis: wpx px per t unit)
+				auto toPx = [&](float t, float v) { return ImVec2(p0.x + t * wpx, p0.y + (1.0f - v / vmax) * hpx); };
+				ImVec2 prev = toPx(0.f, eval(0.f));
+				for (int sN = 1; sN <= 96; ++sN)
+				{
+					ImVec2 cur = toPx(sN / 96.0f, eval(sN / 96.0f));
+					dl->AddLine(prev, cur, IM_COL32(120, 190, 255, 255), 1.6f);
+					prev = cur;
+				}
+				// interaction state (per-widget, in ImGui's storage): dragged key, selected
+				// key, dragged tangent handle (0 none / 1 in / 2 out).
+				ImGuiStorage* st = ImGui::GetStateStorage();
+				const ImGuiID dragId = ImGui::GetID("##curvedrag");
+				const ImGuiID selId  = ImGui::GetID("##curvesel");
+				const ImGuiID hdlId  = ImGui::GetID("##curvehdl");
+				int dragKey = st->GetInt(dragId, -1);
+				int selKey  = st->GetInt(selId, -1);
+				int dragHdl = st->GetInt(hdlId, 0);
+				if (selKey >= (int)nk) { selKey = -1; st->SetInt(selId, -1); }
+				const ImVec2 mp = ImGui::GetMousePos();
+				const float hl = 28.0f;   // tangent handle arm length, px
+				auto hdlPos = [&](int k, bool inH) {
+					ImVec2 kp = toPx((*c)[k * 4], (*c)[k * 4 + 1]);
+					float m = (*c)[k * 4 + (inH ? 2 : 3)];
+					ImVec2 d(wpx, -m * sy);   // slope direction in pixel space
+					float len = sqrtf(d.x * d.x + d.y * d.y); if (len < 1e-4f) len = 1.f;
+					float s = (inH ? -hl : hl) / len;
+					return ImVec2(kp.x + d.x * s, kp.y + d.y * s);
+				};
+				// hover: the selected key's tangent handles take priority over key dots
+				int hotKey = -1, hotHdl = 0;
+				if (selKey >= 0 && selKey < (int)nk && hov)
+				{
+					if (selKey > 0)
+					{ ImVec2 hp = hdlPos(selKey, true);  float dx = mp.x - hp.x, dy = mp.y - hp.y; if (dx * dx + dy * dy < 49.f) hotHdl = 1; }
+					if (!hotHdl && selKey + 1 < (int)nk)
+					{ ImVec2 hp = hdlPos(selKey, false); float dx = mp.x - hp.x, dy = mp.y - hp.y; if (dx * dx + dy * dy < 49.f) hotHdl = 2; }
+				}
+				if (!hotHdl)
+					for (int k = 0; k < (int)nk; ++k)
+					{
+						ImVec2 kp = toPx((*c)[k * 4], (*c)[k * 4 + 1]);
+						float dx = mp.x - kp.x, dy = mp.y - kp.y;
+						if (hov && dx * dx + dy * dy < 64.0f) hotKey = k;
+					}
+				// tangent handles of the selected key (endpoints only show their inner arm)
+				if (selKey >= 0 && selKey < (int)nk)
+				{
+					ImVec2 kp = toPx((*c)[selKey * 4], (*c)[selKey * 4 + 1]);
+					if (selKey > 0)
+					{
+						ImVec2 hp = hdlPos(selKey, true);
+						dl->AddLine(kp, hp, IM_COL32(255, 200, 80, 160), 1.0f);
+						dl->AddCircleFilled(hp, hotHdl == 1 || dragHdl == 1 ? 4.5f : 3.5f, IM_COL32(255, 200, 80, 255));
+					}
+					if (selKey + 1 < (int)nk)
+					{
+						ImVec2 hp = hdlPos(selKey, false);
+						dl->AddLine(kp, hp, IM_COL32(255, 200, 80, 160), 1.0f);
+						dl->AddCircleFilled(hp, hotHdl == 2 || dragHdl == 2 ? 4.5f : 3.5f, IM_COL32(255, 200, 80, 255));
+					}
+				}
+				for (int k = 0; k < (int)nk; ++k)
+				{
+					ImVec2 kp = toPx((*c)[k * 4], (*c)[k * 4 + 1]);
+					dl->AddCircleFilled(kp, k == dragKey || k == hotKey ? 5.0f : 3.5f,
+					                    k == selKey ? IM_COL32(255, 200, 80, 255) : IM_COL32(230, 230, 235, 255));
+				}
+				// press priority: tangent handle > key (select + drag) > empty (deselect)
+				if (hov && ImGui::IsMouseClicked(0))
+				{
+					if (hotHdl)           { st->SetInt(hdlId, hotHdl); dragHdl = hotHdl; }
+					else if (hotKey >= 0) { st->SetInt(dragId, hotKey); dragKey = hotKey; st->SetInt(selId, hotKey); selKey = hotKey; }
+					else                  { st->SetInt(selId, -1); selKey = -1; }
+				}
+				if (dragHdl && selKey >= 0 && selKey < (int)nk && ImGui::IsMouseDown(0))
+				{
+					ImVec2 kp = toPx((*c)[selKey * 4], (*c)[selKey * 4 + 1]);
+					float dt = (mp.x - kp.x) / wpx, dv = -(mp.y - kp.y) / sy;
+					if (dragHdl == 1) dt = std::min(dt, -0.004f); else dt = std::max(dt, 0.004f);
+					(*c)[selKey * 4 + (dragHdl == 1 ? 2 : 3)] = dv / dt;
+					changed = true;
+				}
+				if (dragKey >= 0 && dragKey < (int)nk && ImGui::IsMouseDown(0))
+				{
+					(*c)[dragKey * 4]     = std::max(0.f, std::min(1.f, (mp.x - p0.x) / wpx));
+					(*c)[dragKey * 4 + 1] = std::max(vLo, std::min(vHi, (1.0f - (mp.y - p0.y) / hpx) * vmax));
+					changed = true;
+				}
+				if (!ImGui::IsMouseDown(0)) { if (dragKey >= 0) st->SetInt(dragId, -1); if (dragHdl) st->SetInt(hdlId, 0); }
+				if (hov && ImGui::IsMouseDoubleClicked(0) && hotKey < 0 && !hotHdl)   // add key
+				{
+					float t = std::max(0.f, std::min(1.f, (mp.x - p0.x) / wpx));
+					float v = std::max(vLo, std::min(vHi, (1.0f - (mp.y - p0.y) / hpx) * vmax));
+					// auto tangent = the curve's current slope at t: adding a key keeps the shape
+					float m = nk ? (eval(std::min(1.f, t + 0.01f)) - eval(std::max(0.f, t - 0.01f))) / 0.02f : 0.f;
+					c->insert(c->end(), { t, v, m, m });
+					changed = true;
+				}
+				if (hov && ImGui::IsMouseClicked(1) && hotKey >= 0)        // right-click a key = delete
+				{
+					c->erase(c->begin() + hotKey * 4, c->begin() + hotKey * 4 + 4);
+					st->SetInt(selId, -1); st->SetInt(dragId, -1); st->SetInt(hdlId, 0);
+					changed = true;
+				}
+				if (nk == 0)
+					dl->AddText(ImVec2(p0.x + 8, p0.y + hpx * 0.5f - 8), IM_COL32(140, 140, 145, 255),
+					            "constant 1  -  double-click to add keys");
+				else if (hov && hotKey < 0 && !hotHdl && dragKey < 0 && !dragHdl)
+					dl->AddText(ImVec2(p0.x + 6, p0.y + 3), IM_COL32(120, 120, 125, 200),
+					            "click key: tangents  |  dblclick: add  |  RMB key: delete");
+				ImGui::PopID();
+				break;
+			}
+			// [[prop(widget="gradient")]]: (t,r,g,b) stops as a PROPER gradient editor — the
+			// live bar with draggable stop MARKERS under it. Click an empty spot on the bar =
+			// add a stop with the color already there, drag a marker to move it, click a
+			// marker (no drag) = color picker popup, right-click a marker = delete.
+			if (f.type == nuke::FT::FloatList && f.widget == "gradient")
+			{
+				std::vector<float>* g4 = (std::vector<float>*)a;
+				size_t nStops = g4->size() / 4;
+				const float wpx = ImGui::CalcItemWidth(), bh = 22.0f, mh = 16.0f;
+				ImVec2 p0 = ImGui::GetCursorScreenPos();
+				ImGui::InvisibleButton("##gradbar", ImVec2(wpx, bh + mh));
+				const bool hov = ImGui::IsItemHovered();
+				ImDrawList* dl = ImGui::GetWindowDrawList();
+				auto stopCol = [&](size_t i) {
+					return IM_COL32((int)((*g4)[i * 4 + 1] * 255.f), (int)((*g4)[i * 4 + 2] * 255.f), (int)((*g4)[i * 4 + 3] * 255.f), 255);
+				};
+				// interpolated color at t — what a NEW stop inherits, so adding one is seamless
+				auto evalCol = [&](float t, float out[3]) {
+					out[0] = out[1] = out[2] = 1.f;
+					const size_t ns = g4->size() / 4; if (!ns) return;
+					if (t <= (*g4)[0]) { for (int q = 0; q < 3; ++q) out[q] = (*g4)[1 + q]; return; }
+					for (size_t i = 1; i < ns; ++i)
+						if (t <= (*g4)[i * 4])
+						{
+							float t0 = (*g4)[(i - 1) * 4], t1 = (*g4)[i * 4];
+							float fq = (t1 - t0) > 1e-6f ? (t - t0) / (t1 - t0) : 0.f;
+							for (int q = 0; q < 3; ++q) out[q] = (*g4)[(i - 1) * 4 + 1 + q] + ((*g4)[i * 4 + 1 + q] - (*g4)[(i - 1) * 4 + 1 + q]) * fq;
+							return;
+						}
+					for (int q = 0; q < 3; ++q) out[q] = (*g4)[(ns - 1) * 4 + 1 + q];
+				};
+				if (nStops == 0)
+					dl->AddRectFilled(p0, ImVec2(p0.x + wpx, p0.y + bh), IM_COL32(255, 255, 255, 255));
+				else
+				{
+					dl->AddRectFilled(p0, ImVec2(p0.x + (*g4)[0] * wpx, p0.y + bh), stopCol(0));
+					for (size_t k = 1; k < nStops; ++k)
+					{
+						float xa = p0.x + (*g4)[(k - 1) * 4] * wpx, xb = p0.x + (*g4)[k * 4] * wpx;
+						dl->AddRectFilledMultiColor(ImVec2(xa, p0.y), ImVec2(xb, p0.y + bh),
+						                            stopCol(k - 1), stopCol(k), stopCol(k), stopCol(k - 1));
+					}
+					dl->AddRectFilled(ImVec2(p0.x + (*g4)[(nStops - 1) * 4] * wpx, p0.y), ImVec2(p0.x + wpx, p0.y + bh), stopCol(nStops - 1));
+				}
+				dl->AddRect(p0, ImVec2(p0.x + wpx, p0.y + bh), IM_COL32(90, 90, 90, 255));
+				if (nStops == 0)
+					dl->AddText(ImVec2(p0.x + 8, p0.y + 4), IM_COL32(90, 90, 95, 255), "click to add a color stop");
+				// stop markers (triangle + swatch) below the bar
+				ImGuiStorage* st = ImGui::GetStateStorage();
+				const ImGuiID dragId  = ImGui::GetID("##graddrag");
+				const ImGuiID movedId = ImGui::GetID("##gradmoved");
+				const ImGuiID editId  = ImGui::GetID("##gradedit");
+				int dragStop = st->GetInt(dragId, -1);
+				const ImVec2 mp = ImGui::GetMousePos();
+				int hot = -1;
+				for (int k = 0; k < (int)nStops; ++k)
+					if (hov && fabsf(mp.x - (p0.x + (*g4)[k * 4] * wpx)) < 6.0f && mp.y > p0.y + bh - 4.0f) hot = k;
+				for (int k = 0; k < (int)nStops; ++k)
+				{
+					float mx = p0.x + (*g4)[k * 4] * wpx;
+					ImU32 oc = (k == hot || k == dragStop) ? IM_COL32(255, 200, 80, 255) : IM_COL32(210, 210, 215, 255);
+					dl->AddTriangleFilled(ImVec2(mx, p0.y + bh), ImVec2(mx - 5, p0.y + bh + 6), ImVec2(mx + 5, p0.y + bh + 6), oc);
+					dl->AddRectFilled(ImVec2(mx - 5, p0.y + bh + 6), ImVec2(mx + 5, p0.y + bh + mh - 1), stopCol(k));
+					dl->AddRect(ImVec2(mx - 5, p0.y + bh + 6), ImVec2(mx + 5, p0.y + bh + mh - 1), oc);
+				}
+				if (hov && ImGui::IsMouseClicked(0))
+				{
+					if (hot >= 0) { st->SetInt(dragId, hot); st->SetInt(movedId, 0); dragStop = hot; }
+					else if (mp.y < p0.y + bh)   // click the bar = add a stop with the color under it
+					{
+						float t = std::max(0.f, std::min(1.f, (mp.x - p0.x) / wpx));
+						float rgb[3]; evalCol(t, rgb);
+						g4->insert(g4->end(), { t, rgb[0], rgb[1], rgb[2] });
+						changed = true;
+					}
+				}
+				if (dragStop >= 0 && dragStop < (int)nStops && ImGui::IsMouseDown(0))
+				{
+					float t = std::max(0.f, std::min(1.f, (mp.x - p0.x) / wpx));
+					if (fabsf(t - (*g4)[dragStop * 4]) > 1e-4f) { st->SetInt(movedId, 1); (*g4)[dragStop * 4] = t; changed = true; }
+				}
+				if (ImGui::IsMouseReleased(0) && dragStop >= 0)
+				{
+					if (!st->GetInt(movedId, 0) && dragStop < (int)nStops)   // clean click = edit color
+					{ st->SetInt(editId, dragStop); ImGui::OpenPopup("##gradstop"); }
+					st->SetInt(dragId, -1); dragStop = -1;
+				}
+				if (hov && ImGui::IsMouseClicked(1) && hot >= 0)   // right-click a marker = delete
+				{
+					g4->erase(g4->begin() + hot * 4, g4->begin() + hot * 4 + 4);
+					nStops = g4->size() / 4;
+					st->SetInt(dragId, -1);
+					changed = true;
+				}
+				if (ImGui::BeginPopup("##gradstop"))
+				{
+					int es = st->GetInt(editId, -1);
+					if (es >= 0 && es < (int)(g4->size() / 4))
+					{
+						float rgb[3] = { (*g4)[es * 4 + 1], (*g4)[es * 4 + 2], (*g4)[es * 4 + 3] };
+						if (ImGui::ColorPicker3("##sc", rgb, ImGuiColorEditFlags_NoSidePreview))
+						{ for (int q = 0; q < 3; ++q) (*g4)[es * 4 + 1 + q] = rgb[q]; changed = true; }
+						ImGui::Text("t = %.2f", (*g4)[es * 4]);
+						ImGui::SameLine();
+						if (ImGui::SmallButton(ICON_LC_X " Delete"))
+						{
+							g4->erase(g4->begin() + es * 4, g4->begin() + es * 4 + 4);
+							changed = true; ImGui::CloseCurrentPopup();
+						}
+					}
+					else ImGui::CloseCurrentPopup();
+					ImGui::EndPopup();
+				}
+				// keep stops sorted by t EVERY frame nothing is being dragged (not just on
+				// changed — the release frame carries no change flag and would never sort);
+				// the color-edit popup only changes rgb, so indices stay stable while it is open
+				if (st->GetInt(dragId, -1) < 0)
+				{
+					bool reordered = false;
+					for (size_t k = 4; k + 3 < g4->size(); k += 4)
+						for (size_t j = k; j >= 4 && (*g4)[j] < (*g4)[j - 4]; j -= 4, reordered = true)
+							for (int q = 0; q < 4; ++q) std::swap((*g4)[j + q], (*g4)[j - 4 + q]);
+					if (reordered) changed = true;   // sorted order must reach the component/undo
+				}
+				ImGui::PopID();
+				break;
+			}
 			auto listUI = [&](auto* vec, auto drawElem)
 			{
 				ImGui::Text("%d", (int)vec->size());

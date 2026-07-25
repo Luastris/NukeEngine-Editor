@@ -2,6 +2,7 @@
 #include <editor/editorui.h>
 #include "nukeui.h"   // DocWindow: detachable panels (task #137)
 #include <API/Model/Layers.h>   // render-layer names (Project Settings > Layers)
+#include <API/Model/Wind.h>     // global wind field (World Settings > Wind, 7.2)
 #include <boost/filesystem.hpp>
 #include <boost/filesystem/fstream.hpp>
 #include <config.h>
@@ -954,6 +955,37 @@ void EditorUI::winWorldSettings()
 		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Fixed simulation step (seconds). 1/60 by default;\nsmaller = more precise, more CPU.");
 
 		if (changed) apply(s);   // live apply + mark dirty
+
+		// --- Wind (7.2): the world's GLOBAL wind field — saved in the .nuworld ("wind" block),
+		// sampled by scripts (Wind.Sample) and pushed to shaders every frame. Local volumes are
+		// WindZone COMPONENTS on atoms, not here.
+		ImGui::SeparatorText("Wind");
+		{
+			bool wch = false;
+			nuke::Vector3 d = nuke::Wind::Direction();
+			float yawDeg = atan2f((float)d.x, (float)d.z) * 57.29578f;
+			float pitchDeg = asinf(std::max(-1.f, std::min(1.f, (float)-d.y))) * 57.29578f;
+			if (ImGui::SliderFloat("Direction (yaw)", &yawDeg, -180.0f, 180.0f, "%.0f deg")) wch = true;
+			if (ImGui::SliderFloat("Direction (pitch)", &pitchDeg, -89.0f, 89.0f, "%.0f deg")) wch = true;
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Downward slope of the wind (0 = horizontal).");
+			if (wch)
+			{
+				const float cy = cosf(pitchDeg / 57.29578f);
+				nuke::Wind::SetDirection(nuke::Vector3(sinf(yawDeg / 57.29578f) * cy, -sinf(pitchDeg / 57.29578f), cosf(yawDeg / 57.29578f) * cy));
+			}
+			float str = (float)nuke::Wind::Strength();
+			if (ImGui::SliderFloat("Strength", &str, 0.0f, 40.0f, "%.1f m/s")) { nuke::Wind::SetStrength(str); wch = true; }
+			float ga = (float)nuke::Wind::GustAmount(), gf = (float)nuke::Wind::GustFrequency();
+			bool g = ImGui::SliderFloat("Gust Amount", &ga, 0.0f, 1.0f, "%.2f");
+			g     |= ImGui::SliderFloat("Gust Frequency", &gf, 0.0f, 4.0f, "%.2f");
+			if (g) { nuke::Wind::SetGusts(ga, gf); wch = true; }
+			float ta = (float)nuke::Wind::TurbulenceAmount(), ts = (float)nuke::Wind::TurbulenceScale();
+			bool t = ImGui::SliderFloat("Turbulence", &ta, 0.0f, 1.0f, "%.2f");
+			t     |= ImGui::SliderFloat("Turbulence Scale", &ts, 1.0f, 200.0f, "%.0f m");
+			if (t) { nuke::Wind::SetTurbulence(ta, ts); wch = true; }
+			ImGui::TextDisabled("Local volumes: add a WindZone component to an atom.");
+			if (wch) { worldDirty = true; UpdateWindowTitle(); }   // wind saves with the world
+		}
 
 		// Undo: snapshot while idle (true pre-edit value), push ONE command when an edit settles.
 		bool active = ImGui::IsAnyItemActive();

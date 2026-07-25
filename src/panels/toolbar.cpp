@@ -8,6 +8,10 @@
 #include <API/Model/Canvas.h>
 #include <API/Model/Decal.h>
 #include <API/Model/Jobs.h>   // PumpMain each editor frame (2.4)
+#include <interface/AtomCreators.h>   // registered atom templates ("+" menu, module types)
+#include <reflect/Reflect.h>          // Registry_All: creator components by TYPE NAME
+#include <iostream>                   // missing-type log line
+#include <algorithm>          // std::find (creator categories)
 #include <cstring>            // strcmp (NUKE_PACKAGE_MOD=<name> dev hook)
 
 // ---- toolbar ----
@@ -163,6 +167,46 @@ void EditorUI::Toolbar()
 			}
 			if (ImGui::MenuItem(ICON_LC_CLOUD_SUN " Environment")) SpawnEnvironment();
 			if (ImGui::MenuItem(ICON_LC_GLOBE " Reflection Probe")) SpawnReflectionProbe();
+
+			// REGISTERED atom templates (interface/AtomCreators.h): engine systems and MODULES
+			// add their own entries with NO editor linkage — components are created through
+			// reflection by TYPE NAME. Grouped by category, appended after the built-ins.
+			{
+				std::vector<std::string> cats;
+				for (const nuke::AtomCreator& ac : nuke::AtomCreators())
+					if (std::find(cats.begin(), cats.end(), ac.category) == cats.end()) cats.push_back(ac.category);
+				auto spawnFromCreator = [&](const nuke::AtomCreator& ac)
+				{
+					Atom* a = new Atom(ac.label.c_str());
+					for (const std::string& tn : ac.components)
+					{
+						bool found = false;
+						for (nuke::TypeInfo* ti : nuke::Registry_All())
+							if (ti->name == tn && ti->create && ti->base == "Component")
+							{ a->AddComponent((nuke::Component*)ti->create()); found = true; break; }
+						if (!found)
+							std::cout << "[editor]\t\tatom creator '" << ac.label << "': component type '"
+							          << tn << "' is not registered (module not loaded?)" << std::endl;
+					}
+					FinishSpawn(a);   // ray-place at SpawnPos + add to world + select + undo record
+				};
+				for (const std::string& cat : cats)
+				{
+					if (cat.empty())
+					{
+						for (const nuke::AtomCreator& ac : nuke::AtomCreators())
+							if (ac.category.empty() && ImGui::MenuItem((ac.icon + (ac.icon.empty() ? "" : " ") + ac.label).c_str()))
+								spawnFromCreator(ac);
+					}
+					else if (ImGui::BeginMenu(cat.c_str()))
+					{
+						for (const nuke::AtomCreator& ac : nuke::AtomCreators())
+							if (ac.category == cat && ImGui::MenuItem((ac.icon + (ac.icon.empty() ? "" : " ") + ac.label).c_str()))
+								spawnFromCreator(ac);
+						ImGui::EndMenu();
+					}
+				}
+			}
 			ImGui::EndPopup();
 		}
 		// World/Local space toggle for the gizmo (also hotkey X).
