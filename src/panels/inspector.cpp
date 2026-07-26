@@ -3,6 +3,7 @@
 #include "nukeui.h"   // DocWindow: detachable panels (task #137)
 #include <API/Model/Camera.h>   // restrict the PostProcess component to camera atoms
 #include <API/Model/CharacterController.h>   // Fit To Mesh inspector button
+#include <API/Model/Foliage.h>               // Foliage Fill/Clear + paint brush controls (7.4)
 #include <API/Model/StatusBar.h>
 #include <API/Model/Package.h>  // packed session: pickers list pak/mod content too (3.2)
 #include <interface/Services.h> // csclass picker: enumerate scripting providers
@@ -362,6 +363,33 @@ void EditorUI::RegisterInspectorOverrides()
 		}
 		if (ImGui::IsItemHovered())
 			ImGui::SetTooltip("Set Pivot/Capsule Offset/Height/Radius from the sibling mesh's bounds.");
+	};
+	inspectorOverrides["Foliage"] = [this](nuke::Component* c) {
+		auto* fol = static_cast<nuke::Foliage*>(c);
+		// Fill = full deterministic re-scatter by the rules; Clear wipes the layer.
+		const float half = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+		if (ImGui::Button("Fill", ImVec2(half, 0)))
+		{
+			fol->Rebuild();
+			worldDirty = true;
+			StatusBar::Set("foliage", std::string("Foliage: ") + std::to_string(fol->InstanceCount()) + " instances");
+		}
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Re-scatter the whole surface by the rules (density/seed/masks).");
+		ImGui::SameLine();
+		if (ImGui::Button("Clear", ImVec2(half, 0))) { fol->ClearInstances(); worldDirty = true; }
+		// Brush: paint/erase strokes in the viewport while this layer stays selected.
+		bool paint = foliageBrush == 1, erase = foliageBrush == 2;
+		if (ImGui::Checkbox("Paint", &paint)) foliageBrush = paint ? 1 : 0;
+		ImGui::SameLine();
+		if (ImGui::Checkbox("Erase", &erase)) foliageBrush = erase ? 2 : 0;
+		ImGui::SameLine();
+		ImGui::TextDisabled("(%d)", fol->InstanceCount());
+		if (foliageBrush != 0)
+		{
+			ImGui::SliderFloat("Brush Radius", &foliageBrushRadius, 0.25f, 20.0f, "%.2f m");
+			if (foliageBrush == 1) ImGui::SliderFloat("Brush Density", &foliageBrushDensity, 0.1f, 4.0f, "x%.2f");
+			ImGui::TextDisabled("LMB in the viewport: %s", foliageBrush == 1 ? "paint" : "erase");
+		}
 	};
 }
 
@@ -1534,20 +1562,76 @@ void EditorUI::winInspector()
 		if (pendingCompDel) { RemoveComponent(pendingCompAtom, pendingCompDel); pendingCompDel = nullptr; pendingCompAtom = nullptr; }
 
 		// Add any registered, create-able Component type (incl. ones added by plugins).
+		// The list keeps GROWING with modules — so: search box (Enter takes the top hit),
+		// CATEGORY tree (TypeInfo::category from NUKE_CLASS's 3rd arg; "" = Other), and a
+		// height-capped scroll area. Filter walks the whole reflected base CHAIN, so derived
+		// components (Foliage : InstancedMesh) are offered too.
 		ImGui::Separator();
 		if (ImGui::Button("Add Component", ImVec2(-FLT_MIN, 0)))
 			ImGui::OpenPopup("addcomp");
 		if (ImGui::BeginPopup("addcomp"))
 		{
+			static char compSearch[64] = "";
+			if (ImGui::IsWindowAppearing()) { compSearch[0] = 0; ImGui::SetKeyboardFocusHere(); }
+			ImGui::SetNextItemWidth(240.0f);
+			ImGui::InputTextWithHint("##compsearch", "Search components...", compSearch, sizeof(compSearch));
+
+			std::vector<nuke::TypeInfo*> comps;
 			for (nuke::TypeInfo* ti : nuke::Registry_All())
 			{
-				if (!ti->create || ti->base != "Component")
-					continue;
-				// PostProcess is a per-camera effect — only offer it on an atom that has a Camera component.
-				if (ti->name == "PostProcess" && !sltd->GetComponent<nuke::Camera>())
-					continue;
-				if (ImGui::MenuItem(ti->name.c_str()))
-					sltd->AddComponent((nuke::Component*)ti->create());
+				if (!ti->create || !nuke::Registry_IsComponentType(ti)) continue;
+				// PostProcess is a per-camera effect — only offer it on an atom that has a Camera.
+				if (ti->name == "PostProcess" && !sltd->GetComponent<nuke::Camera>()) continue;
+				comps.push_back(ti);
+			}
+			std::sort(comps.begin(), comps.end(),
+			          [](nuke::TypeInfo* a, nuke::TypeInfo* b) { return a->name < b->name; });
+			auto lc = [](std::string s) { for (char& c : s) c = (char)std::tolower((unsigned char)c); return s; };
+			const std::string needle = lc(compSearch);
+			auto matches = [&](nuke::TypeInfo* ti) { return needle.empty() || lc(ti->name).find(needle) != std::string::npos; };
+
+			nuke::TypeInfo* picked = nullptr;
+			if (!needle.empty())
+			{
+				// searching: a flat filtered list (height-capped scroll); Enter = first hit
+				const float listH = std::min(420.0f, ImGui::GetIO().DisplaySize.y * 0.5f);
+				ImGui::BeginChild("##complist", ImVec2(240.0f, listH), false);
+				nuke::TypeInfo* first = nullptr;
+				for (nuke::TypeInfo* ti : comps)
+				{
+					if (!matches(ti)) continue;
+					if (!first) first = ti;
+					if (ImGui::Selectable(ti->name.c_str())) picked = ti;
+				}
+				if (!picked && first && ImGui::IsKeyPressed(ImGuiKey_Enter)) picked = first;
+				ImGui::EndChild();
+			}
+			else
+			{
+				// browsing: CASCADING category submenus ("Other" always last), like the "+" menu
+				ImGui::Separator();
+				std::vector<std::string> cats;
+				for (nuke::TypeInfo* ti : comps)
+				{
+					std::string c = ti->category.empty() ? "Other" : ti->category;
+					if (std::find(cats.begin(), cats.end(), c) == cats.end()) cats.push_back(c);
+				}
+				std::sort(cats.begin(), cats.end());
+				auto other = std::find(cats.begin(), cats.end(), "Other");
+				if (other != cats.end()) { cats.erase(other); cats.push_back("Other"); }
+				for (const std::string& cat : cats)
+				{
+					if (!ImGui::BeginMenu(cat.c_str())) continue;
+					for (nuke::TypeInfo* ti : comps)
+						if ((ti->category.empty() ? std::string("Other") : ti->category) == cat)
+							if (ImGui::MenuItem(ti->name.c_str())) picked = ti;
+					ImGui::EndMenu();
+				}
+			}
+			if (picked)
+			{
+				sltd->AddComponent((nuke::Component*)picked->create());
+				ImGui::CloseCurrentPopup();
 			}
 			ImGui::EndPopup();
 		}

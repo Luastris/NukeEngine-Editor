@@ -1,4 +1,10 @@
 // viewport panel — EditorUI method definitions (translation unit).
+
+// INFINITE camera look/pan (editor viewport): while an RMB/MMB drag is live the cursor is
+// CAPTURED (hidden + unbounded virtual deltas) so the rotation never dies at the screen
+// edge; on release the OS cursor pops back where the drag began.
+static bool s_camLookWant = false;      // set by the drag handlers each frame they apply
+static bool s_camLookCapture = false;   // capture currently engaged
 #include <editor/editorui.h>
 #include "nukeui.h"   // DocWindow: detachable panels (task #137)
 #include "API/Model/Math.h"
@@ -9,6 +15,8 @@
 #include "API/Model/Screen.h"    // editor feeds the "game screen" size (the viewport panel)
 #include "API/Model/Canvas.h"    // canvas 2D resize gizmo (corner/edge handles)
 #include <interface/ComponentIcons.h>   // registered entity icons (modules bring their own)
+#include <API/Model/Foliage.h>          // foliage paint brush (7.4)
+#include <API/Model/DebugDraw.h>        // brush circle preview
 #include <functional>
 #include <cmath>
 #include <algorithm>
@@ -576,9 +584,81 @@ void EditorUI::winRender()
 			Transform* t = editorCam->transform;
 			const float rotSpeed = 0.005f, panSpeed = 0.01f, zoomSpeed = 0.5f;
 
+			// Foliage paint brush (7.4): armed from the Foliage inspector while a Foliage layer
+			// is selected. Hover previews the brush circle on the surface under the cursor;
+			// LMB (held) paints/erases along the stroke, stepped by half the brush radius so
+			// holding still doesn't stack instances. Consumes the click — no deselect.
+			bool foliagePainting = false;
+			if (foliageBrush != 0)
+			{
+				Atom* selA = AppInstance::GetSingleton()->selectedInHieararchy;
+				nuke::Foliage* fol = selA ? selA->GetComponent<nuke::Foliage>() : nullptr;
+				if (!fol) foliageBrush = 0;   // selection left the layer: disarm
+				else if (ImGui::IsItemHovered() && !ImGuizmo::IsUsing())
+				{
+					foliagePainting = true;
+					ImVec2 rmin = ImGui::GetItemRectMin(), szv = ImGui::GetItemRectSize(), mp = io.MousePos;
+					float ndcx = ((mp.x - rmin.x) / szv.x) * 2.0f - 1.0f;
+					float ndcy = 1.0f - ((mp.y - rmin.y) / szv.y) * 2.0f;
+					Vector3 o = t->globalPosition();
+					Vector3 f = t->direction(), rr = t->right(), uu = t->up();
+					float aspect = (szv.y > 0.0f) ? szv.x / szv.y : 1.0f;
+					float thf = tanf((float)editorCam->fov * 0.5f * 0.01745329252f);
+					Vector3 dir(f.x + ndcx * thf * aspect * rr.x + ndcy * thf * uu.x,
+					            f.y + ndcx * thf * aspect * rr.y + ndcy * thf * uu.y,
+					            f.z + ndcx * thf * aspect * rr.z + ndcy * thf * uu.z);
+					double L = std::sqrt(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
+					if (L > 1e-9) { dir.x /= L; dir.y /= L; dir.z /= L; }
+					float dist = 0.0f;
+					Atom* hit = AppInstance::GetSingleton()->currentWorld->PickDist(o, dir, dist);
+					static Vector3 lastApply(1e9, 1e9, 1e9);
+					if (hit && dist > 0.0f && dist < 1e29f)
+					{
+						Vector3 hp(o.x + dir.x * dist, o.y + dir.y * dist, o.z + dir.z * dist);
+						// Brush preview PROJECTED onto the surface: sample the terrain height
+						// under each point of the circle (short vertical rays) and connect —
+						// the ring hugs slopes and steps instead of floating as a flat disc.
+						{
+							const Color bc = foliageBrush == 1 ? Color(0.4, 1.0, 0.5, 1.0) : Color(1.0, 0.45, 0.35, 1.0);
+							const int kSeg = 32;
+							const float rr2 = foliageBrushRadius;
+							const double castUp = rr2 + 2.0;
+							Vector3 prev(0, 0, 0); bool hasPrev = false; Vector3 firstPt(0, 0, 0);
+							World* wld = AppInstance::GetSingleton()->currentWorld;
+							for (int s2 = 0; s2 <= kSeg; ++s2)
+							{
+								const float a2 = (float)s2 / kSeg * 6.2831853f;
+								Vector3 p(hp.x + cosf(a2) * rr2, hp.y, hp.z + sinf(a2) * rr2);
+								float d2 = 0.0f;
+								Vector3 ro(p.x, p.y + castUp, p.z);
+								Atom* h2 = wld->PickDist(ro, Vector3(0, -1, 0), d2);
+								if (h2 && d2 > 0.0f && d2 < castUp * 2.0 + 50.0)
+									p.y = ro.y - d2 + 0.02;
+								if (hasPrev) DebugDraw::Line(prev, p, bc);
+								else firstPt = p;
+								prev = p; hasPrev = true;
+							}
+						}
+						if (ImGui::IsMouseDown(ImGuiMouseButton_Left))
+						{
+							double dx = hp.x - lastApply.x, dy = hp.y - lastApply.y, dz = hp.z - lastApply.z;
+							const double step = foliageBrushRadius * 0.5;
+							if (dx * dx + dy * dy + dz * dz > step * step)
+							{
+								if (foliageBrush == 1) fol->PaintAt(hp, foliageBrushRadius, foliageBrushDensity);
+								else                   fol->EraseAt(hp, foliageBrushRadius);
+								lastApply = hp;
+								worldDirty = true;
+							}
+						}
+						else lastApply = Vector3(1e9, 1e9, 1e9);   // stroke ended: next press applies at once
+					}
+				}
+			}
+
 			// Left-click: pick the object under the cursor (null = deselect).
 			// Skip if the gizmo is being interacted with, so dragging it doesn't deselect.
-			if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGuizmo::IsUsing() && !ImGuizmo::IsOver() && !s_canvasGizmoHot)
+			if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGuizmo::IsUsing() && !ImGuizmo::IsOver() && !s_canvasGizmoHot && !foliagePainting)
 			{
 				ImVec2 rmin = ImGui::GetItemRectMin();
 				ImVec2 sz   = ImGui::GetItemRectSize();
@@ -624,6 +704,7 @@ void EditorUI::winRender()
 			}
 			if (ImGui::IsMouseDragging(ImGuiMouseButton_Right))
 			{
+				s_camLookWant = true;   // infinite-look capture (manager below)
 				camYaw   += io.MouseDelta.x * rotSpeed;
 				camPitch += io.MouseDelta.y * rotSpeed;
 				const float lim = 1.55f; // ~89deg pitch clamp
@@ -633,6 +714,7 @@ void EditorUI::winRender()
 			}
 			if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle))
 			{
+				s_camLookWant = true;
 				t->position += t->right() * (double)(-io.MouseDelta.x * panSpeed)
 				             + t->up()    * (double)( io.MouseDelta.y * panSpeed);
 			}
@@ -652,6 +734,27 @@ void EditorUI::winRender()
 				if (ImGui::IsKeyDown(ImGuiKey_Q)) t->position += t->up()        * (double)-fly;
 			}
 		}
+	}
+
+	// Infinite-look capture manager: runs EVERY viewport frame (outside the hover gates), so a
+	// release is never missed. NoMouseCursorChange stops the imgui backend from re-arming the
+	// OS cursor every frame while the renderer holds it in the captured (disabled) mode.
+	{
+		AppInstance* app = AppInstance::GetSingleton();
+		const bool down = ImGui::IsMouseDown(ImGuiMouseButton_Right) || ImGui::IsMouseDown(ImGuiMouseButton_Middle);
+		if (s_camLookWant && !s_camLookCapture && app && app->render)
+		{
+			app->render->setCursorMode(2);   // hidden + unbounded deltas (GLFW disabled mode)
+			ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
+			s_camLookCapture = true;
+		}
+		else if (s_camLookCapture && !down && app && app->render)
+		{
+			app->render->setCursorMode(0);
+			ImGui::GetIO().ConfigFlags &= ~ImGuiConfigFlags_NoMouseCursorChange;
+			s_camLookCapture = false;
+		}
+		s_camLookWant = false;
 	}
 	});
 }

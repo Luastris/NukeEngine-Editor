@@ -128,6 +128,11 @@ private:
 	bool        wasWindowFocused = true;            // disk re-check fires on focus-gain (avoids mid-write triggers)
 	Vector3     camFocusTarget;                      // smooth "focus selected": target editor-cam position
 	bool        camFocusing = false;
+	// Foliage paint brush (7.4): armed from the Foliage inspector, applied in the viewport
+	// while a Foliage layer is selected. 0 = off, 1 = paint, 2 = erase.
+	int   foliageBrush = 0;
+	float foliageBrushRadius = 2.0f;
+	float foliageBrushDensity = 1.0f;   // density multiplier per stroke step
 	bool        mergeOpen = false;                  // merge/resolve window visible
 	std::shared_ptr<void> mergeState;               // opaque diff tree (built in panels/merge.cpp)
 	std::string renamePath;                        // browser: full path being renamed ("" = none)
@@ -215,6 +220,17 @@ private:
 	bool openPackageModPopup = false;
 	char packModName[128] = "";
 	std::string modName;                           // last packaged mod name (from the .nuproj)
+	// Game Build modal (File -> Package Project): the game's boot settings, tweaked in a
+	// dialog BEFORE packaging. Nothing is stored anywhere else — the dist config/main.json
+	// is FORMED at packaging (editor's current config + these overrides); a repack pre-fills
+	// from the previous dist config.
+	bool openPackageProjectPopup = false;
+	bool gbWinSet = false;                         // dialog confirmed: worker overrides the window block
+	nuke::NukeWindow gbWin{};                      // dialog model (game window settings for the dist)
+	bool gbLog   = false;                          // dist logToConsole — ships OFF by default
+	bool gbDebug = false;                          // dist gpuValidation (debug layer) — ships OFF by default
+	void PackageProjectCmd();                      // pre-fill (editor config + prev dist) -> open the modal
+	void DrawPackageProjectPopup();
 	// Mods panel (Project Settings, mounted-pak session): the game's mod list — enable/
 	// disable + order writes config/mods.json; mounts happen at boot -> apply reloads the
 	// session. Rows come from the config (order = load order) + disabled files in mods/.
@@ -254,6 +270,7 @@ private:
 	// EDITOR render backend (engine-wide preference, %APPDATA%): 0=D3D11, 1=D3D12, 2=Vulkan
 	// (default). The RUNTIME backend is a PROJECT setting (config/main.json window.backend).
 	int editorBackend = 2;
+	bool editorRayTracing = true;   // false = raster path (shadow maps/SSR) in the editor; restart to apply
 	void DrawAssetEditorBody(int i);   // one editor's content (docked window OR host window)
 	void LoadPreferences();
 	void SavePreferences();

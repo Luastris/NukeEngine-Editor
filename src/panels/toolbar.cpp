@@ -182,7 +182,7 @@ void EditorUI::Toolbar()
 					{
 						bool found = false;
 						for (nuke::TypeInfo* ti : nuke::Registry_All())
-							if (ti->name == tn && ti->create && ti->base == "Component")
+							if (ti->name == tn && ti->create && nuke::Registry_IsComponentType(ti))
 							{ a->AddComponent((nuke::Component*)ti->create()); found = true; break; }
 						if (!found)
 							std::cout << "[editor]\t\tatom creator '" << ac.label << "': component type '"
@@ -412,6 +412,7 @@ void EditorUI::Draw()
 	DrawSaveAsPopup();    // "Save World As" modal
 	DrawNewProjectPopup();      // "New Project" modal (File menu)
 	DrawPackageModPopup();      // "Package Mod" modal (pick the mod's name)
+	DrawPackageProjectPopup();  // "Game Build" modal (game boot settings, then pack)
 	DrawSwitchConfirmPopup();   // unsaved-world guard before a project switch
 	TrackUndo();          // capture a selected-atom edit for undo when the UI settles
 	TrackDirty();         // refresh the dirty "*" marker

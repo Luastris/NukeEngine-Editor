@@ -219,6 +219,7 @@ void EditorUI::LoadPreferences()
 			extCustomArgs  = j.value("customEditorArgs", std::string());
 			detachAssetEditors = j.value("detachAssetEditors", false);
 			editorBackend      = j.value("editorBackend", 2);   // editor default = Vulkan
+			editorRayTracing   = j.value("editorRayTracing", true);
 			startupProjectMode = j.value("startupProject", 0);  // 0 = open last, 1 = always ask (hub)
 			recentProjects.clear();
 			if (j.contains("recentProjects") && j["recentProjects"].is_array())
@@ -244,6 +245,7 @@ void EditorUI::SavePreferences()
 	j["customEditorArgs"] = extCustomArgs;
 	j["detachAssetEditors"] = detachAssetEditors;
 	j["editorBackend"]      = editorBackend;
+	j["editorRayTracing"]   = editorRayTracing;
 	j["startupProject"]     = startupProjectMode;   // 0 = open last project, 1 = always ask (hub)
 	j["recentProjects"]     = recentProjects;       // newest-first absolute .nuproj paths
 	bfs::ofstream f(PreferencesPath(), std::ios::trunc);
@@ -272,6 +274,20 @@ void EditorUI::winPreferences()
 			if (ImGui::IsItemHovered())
 				ImGui::SetTooltip("Vulkan: native detachable windows (default).\n"
 				                  "D3D12: RT reflections in the editor viewport.\n"
+				                  "Applied on the next editor restart.");
+			// RT master switch for the EDITOR: off = shaders compile for the raster path
+			// (shadow maps + SSR); shadows/reflections stop ray-querying entirely.
+			bool ert = editorRayTracing;
+			if (ImGui::Checkbox("Ray Tracing (editor)", &ert) && ert != editorRayTracing)
+			{
+				editorRayTracing = ert;
+				SavePreferences();
+			}
+			ImGui::SameLine(); ImGui::TextDisabled("(?)");
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("Off: the editor renders with shadow maps + SSR even on an\n"
+				                  "RT-capable GPU (cheaper; matches non-RT players).\n"
+				                  "The game's own switch is window.rayTracing in config.\n"
 				                  "Applied on the next editor restart.");
 			// Startup project behavior. Explicit opens (CLI arg, double-clicked .nuproj,
 			// file association) always win over this.

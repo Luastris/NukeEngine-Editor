@@ -594,7 +594,7 @@ int main(int argc, char** argv)
     // EDITOR backend comes from the engine-wide PREFERENCES (%APPDATA%), NOT the project
     // config: config/main.json window.backend is the RUNTIME (Player) backend and ships
     // with the packaged game. Editor default = Vulkan (native detachable windows).
-    int editorBackend = 2;
+    int editorBackend = 2; bool editorRT = true;
     if (const char* appdata = std::getenv("APPDATA"))
     {
         try
@@ -604,12 +604,17 @@ int main(int argc, char** argv)
             {
                 std::stringstream ss; ss << pf.rdbuf();
                 nlohmann::json pj = nlohmann::json::parse(ss.str(), nullptr, false, true);
-                if (pj.is_object()) editorBackend = pj.value("editorBackend", 2);
+                if (pj.is_object())
+                {
+                    editorBackend = pj.value("editorBackend", 2);
+                    editorRT      = pj.value("editorRayTracing", true);   // false = raster path in the editor
+                }
             }
         }
         catch (...) {}
     }
     wd.backend     = editorBackend;
+    wd.rayTracing  = editorRT;
     wd.gpuValidation = config->gpuValidation;   // Debug GPU validation opt-in (config, works for double-click)
     LoadBuiltinShaders(render, "shaders");   // engine loads built-in shaders + feeds the renderer
     render->init(wd);

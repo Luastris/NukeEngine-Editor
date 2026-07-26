@@ -298,7 +298,7 @@ void EditorUI::EditorMenu()
 			// only — repackaging someone's shipped game into a full second game is forbidden.
 			if (basePakPath.empty())
 			{
-				if (ImGui::MenuItem(ICON_LC_PACKAGE " Package Project (dist)")) PackageProject();
+				if (ImGui::MenuItem(ICON_LC_PACKAGE " Package Project (dist)...")) PackageProjectCmd();   // Game Build dialog first
 			}
 			else if (ImGui::MenuItem(ICON_LC_PUZZLE " Package Mod (.numod)..."))   PackageModCmd();
 			ImGui::Separator();
@@ -313,7 +313,11 @@ void EditorUI::EditorMenu()
 			if (ImGui::MenuItem(ICON_LC_FILE_PLUS_2 " New C++ Game Module...")) gmNamePopup = true;
 			if (ImGui::MenuItem(ICON_LC_HAMMER " Build & Reload Game Modules")) BuildGameModules();
 			ImGui::Separator();
-			if (ImGui::MenuItem("Quit", "Alt+F4")) {}
+			// Same path as closing the window with X/Alt+F4: the render loop ends and the
+			// normal shutdown (unsaved-changes handling included) runs in main().
+			if (ImGui::MenuItem("Quit", "Alt+F4"))
+				if (AppInstance* app = AppInstance::GetSingleton(); app && app->render)
+					app->render->requestClose();
 			ImGui::EndMenu();
 		}
 		if (ImGui::BeginMenu("Edit"))

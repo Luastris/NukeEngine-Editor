@@ -540,6 +540,12 @@ void EditorUI::PackageProjectNow()
 	const std::string projDir = projectDir;
 	const std::string projFile = projectFile;
 	const std::string content = contentDir;
+	const bool             gbSet = gbWinSet;   // Game Build dialog ran -> its window tweaks ship
+	const nuke::NukeWindow gbCfg = gbWin;
+	// Game defaults are OFF for both — the dialog's choice ships; without the dialog
+	// (NUKE_PACKAGE hook) they ship off too, never the editor's own values.
+	const bool gbLogS = gbSet && gbLog;
+	const bool gbDbgS = gbSet && gbDebug;
 	const std::string gameName = projectName.empty() ? std::string("NukeGame") : projectName;
 	const std::string icon = gameIcon.empty() ? std::string()
 	                        : AppInstance::GetSingleton()->ResolveContent(gameIcon);
@@ -586,7 +592,7 @@ void EditorUI::PackageProjectNow()
 
 	StatusBar::Set("package", "Packaging project...", StatusBar::kIndeterminate);
 	nuke::Jobs::Schedule([projDir, projFile, content, gameName, icon, method, level, modules, distStr, guidFiles,
-	                      extraPak, extraDist]()
+	                      extraPak, extraDist, gbSet, gbCfg, gbLogS, gbDbgS]()
 	{
 		boost::system::error_code ec;
 		const bfs::path dist = distStr;
@@ -706,30 +712,48 @@ void EditorUI::PackageProjectNow()
 				if (n == "NukeImGui.dll") continue;              // editor-only UI dll
 				CopyOne(it->path(), dist / n);
 			}
-			CopyOne(rt / "config" / "main.json", dist / "config" / "main.json");
+			// The game's config is FORMED HERE: base = the EDITOR's own CURRENT config (the file
+			// the editor itself maintains — the two configs are near-identical), then the window
+			// block is overridden with the Game Build dialog's tweaks. Every window key is
+			// written explicitly so the shipped file is complete and hand-editable. No title
+			// key: the Player titles its window from game.nuproj "name".
 			try
 			{
 				nlohmann::json cj;
-				bfs::ifstream in(dist / "config" / "main.json");
-				if (in) { std::stringstream ss; ss << in.rdbuf(); cj = nlohmann::json::parse(ss.str(), nullptr, false, true); }
-				if (!cj.is_object()) cj = nlohmann::json::object();
-				// The GAME's window settings live in the PROJECT (<project>/window.json — written by
-				// Game.Set* from PIE scripts; the editor's own config is never touched by them). Merge
-				// that block over the shipped defaults, then stamp the game's title.
 				{
-					bfs::ifstream pw(bfs::path(projDir) / "window.json");
-					if (pw)
-					{
-						std::stringstream ps; ps << pw.rdbuf();
-						nlohmann::json pj = nlohmann::json::parse(ps.str(), nullptr, false, true);
-						if (pj.is_object() && pj.contains("window") && pj["window"].is_object())
-							for (auto& kv : pj["window"].items()) cj["window"][kv.key()] = kv.value();
-					}
+					bfs::ifstream in(nuke::Config::baseDir() / "config" / "main.json");
+					if (in) { std::stringstream ss; ss << in.rdbuf(); cj = nlohmann::json::parse(ss.str(), nullptr, false, true); }
 				}
-				// (No title stamp: the Player titles its window from game.nuproj "name" — packed
-				// in the pak — so the game's name binds at packaging without a config field.)
-				if (cj.contains("window") && cj["window"].is_object())
-					cj["window"].erase("title");   // drop the legacy key if the shipped defaults had it
+				if (!cj.is_object()) cj = nlohmann::json::object();
+				{
+					// Window block: the dialog's values when it ran (gbSet), else the editor's
+					// live window config as-is. Keys not in the dialog keep engine defaults.
+					const nuke::NukeWindow w = gbSet ? gbCfg : nuke::Config::getSingleton()->window;
+					nlohmann::json& jw = cj["window"];
+					if (!jw.is_object()) jw = nlohmann::json::object();
+					jw["width"]       = w.w;
+					jw["height"]      = w.h;
+					if (!w.mainFont.empty()) jw["mainFont"] = w.mainFont;
+					jw["decorated"]   = w.decorated;
+					jw["resizable"]   = w.resizable;
+					jw["floating"]    = w.floating;
+					jw["maximized"]   = w.maximized;
+					// Human-readable display mode; the legacy `fullscreen` bool never ships.
+					jw["mode"]        = w.mode == 1 ? "borderless" : w.mode == 2 ? "exclusive" : "windowed";
+					jw.erase("fullscreen");
+					jw["transparent"] = w.transparent;
+					jw["opacity"]     = w.opacity;
+					jw["backend"]     = w.backend;
+					jw["rayTracing"]  = w.rayTracing;
+					jw["showFps"]     = w.showFps;
+					jw["vsync"]       = w.vsync;
+					jw["showConsole"] = w.showConsole;
+					jw.erase("title");
+				}
+				// Log/debug ship as the dialog set them — game defaults are OFF (the editor's
+				// own logToConsole/gpuValidation never leak into the dist).
+				cj["logToConsole"]  = gbLogS;
+				cj["gpuValidation"] = gbDbgS;
 				bfs::ofstream outc(dist / "config" / "main.json");
 				if (outc) outc << cj.dump(2);
 			}
@@ -1201,6 +1225,144 @@ void EditorUI::DrawPackageModPopup()
 		if (ImGui::Button("Cancel", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
 		ImGui::EndPopup();
 	}
+}
+
+// --- Game Build dialog (File -> Package Project) ---------------------------------------------
+// The game's config is FORMED AT PACKAGING TIME: the dist config/main.json = the editor's own
+// CURRENT config (they are near-identical) with a few game-specific knobs tweaked in this
+// dialog. Nothing is stored in the project — the dialog updates ONLY the shipped config; a
+// repack pre-fills from the previous dist config so the tweaks carry over.
+
+void EditorUI::PackageProjectCmd()
+{
+	// Archive sessions can't package a project — reuse the standard refusal message.
+	if (!basePakPath.empty()) { PackageProjectNow(); return; }
+
+	// Dialog model: the editor's live config (current by definition), overlaid with the
+	// previous dist config when one exists (keeps the game's tweaks across repacks).
+	// Log/debug are GAME defaults (off) — not the editor's values.
+	nuke::NukeWindow w = nuke::Config::getSingleton()->window;
+	gbLog = false; gbDebug = false;
+	{
+		bfs::path dist = distPath.empty() ? (bfs::path(projectDir) / "dist")
+		               : (bfs::path(distPath).is_absolute() ? bfs::path(distPath)
+		                                                    : bfs::path(projectDir) / distPath);
+		try
+		{
+			bfs::ifstream in(dist / "config" / "main.json");
+			if (in)
+			{
+				std::stringstream ss; ss << in.rdbuf();
+				nlohmann::json p = nlohmann::json::parse(ss.str(), nullptr, false, true);
+				if (p.is_object())
+				{
+					gbLog   = p.value("logToConsole",  false);
+					gbDebug = p.value("gpuValidation", false);
+				}
+				if (p.is_object() && p.contains("window") && p["window"].is_object())
+				{
+					const nlohmann::json& j = p["window"];
+					w.w           = j.value("width",       w.w);
+					w.h           = j.value("height",      w.h);
+					w.resizable   = j.value("resizable",   w.resizable);
+					// mode: the human-readable word ("windowed"/"borderless"/"exclusive"),
+					// with legacy number/bool configs still accepted.
+					if (j.contains("mode") && j["mode"].is_string())
+					{
+						const std::string m = j["mode"].get<std::string>();
+						w.mode = (m == "borderless") ? 1 : (m == "exclusive") ? 2 : 0;
+					}
+					else if (j.contains("mode") && j["mode"].is_number())
+						w.mode = j["mode"].get<int>();
+					else
+						w.mode = j.value("fullscreen", false) ? 2 : 0;
+					w.fullscreen  = w.mode != 0;
+					w.transparent = j.value("transparent", w.transparent);
+					w.opacity     = j.value("opacity",     w.opacity);
+					w.backend     = j.value("backend",     w.backend);
+					w.rayTracing  = j.value("rayTracing",  w.rayTracing);
+					w.showFps     = j.value("showFps",     w.showFps);
+					w.vsync       = j.value("vsync",       w.vsync);
+					w.showConsole = j.value("showConsole", w.showConsole);
+				}
+			}
+		}
+		catch (...) {}
+	}
+	gbWin = w;
+	openPackageProjectPopup = true;
+}
+
+void EditorUI::DrawPackageProjectPopup()
+{
+	if (openPackageProjectPopup)
+	{
+		ImGui::OpenPopup("Game Build");
+		openPackageProjectPopup = false;
+	}
+	if (!ImGui::BeginPopupModal("Game Build", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
+
+	{
+		const char* beModes[] = { "Direct3D 11", "Direct3D 12 (ray tracing)", "Vulkan" };
+		ImGui::Combo("Render Backend", &gbWin.backend, beModes, IM_ARRAYSIZE(beModes));
+		ImGui::SameLine(); ImGui::TextDisabled("(?)");
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Backend of the PACKAGED game.\n"
+		                                              "D3D12 enables ray tracing, window transparency and HDR10.\n"
+		                                              "The EDITOR's own backend is in Preferences.");
+	}
+	ImGui::Checkbox("Ray Tracing", &gbWin.rayTracing);
+	ImGui::SameLine(); ImGui::TextDisabled("(?)");
+	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Off = force the raster path (shadow maps/SSR) even on RT-capable GPUs.");
+	{
+		ImGui::SetNextItemWidth(110.0f);
+		ImGui::InputInt("##gb_w", &gbWin.w, 0);
+		ImGui::SameLine(); ImGui::TextUnformatted("x"); ImGui::SameLine();
+		ImGui::SetNextItemWidth(110.0f);
+		ImGui::InputInt("Resolution##gb_h", &gbWin.h, 0);
+	}
+	{
+		const char* wModes[] = { "Windowed", "Borderless Fullscreen", "Exclusive Fullscreen" };
+		ImGui::Combo("Display Mode", &gbWin.mode, wModes, IM_ARRAYSIZE(wModes));
+	}
+	ImGui::Checkbox("Resizable", &gbWin.resizable);
+	ImGui::Checkbox("VSync", &gbWin.vsync);
+	ImGui::Checkbox("Show OS Console", &gbWin.showConsole);
+	ImGui::SameLine(); ImGui::TextDisabled("(?)");
+	if (ImGui::IsItemHovered()) ImGui::SetTooltip("The process's own log window. Off for a shipped game.");
+	ImGui::Checkbox("Show FPS", &gbWin.showFps);
+	ImGui::SameLine(); ImGui::TextDisabled("(?)");
+	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Append an FPS readout to the game window's title.");
+	ImGui::Checkbox("Log", &gbLog);
+	ImGui::SameLine(); ImGui::TextDisabled("(?)");
+	if (ImGui::IsItemHovered()) ImGui::SetTooltip("logToConsole: echo the game's log to its OS console.\n"
+	                                              "Costs frame time under heavy logging — off for a shipped game.");
+	ImGui::Checkbox("Debug", &gbDebug);
+	ImGui::SameLine(); ImGui::TextDisabled("(?)");
+	if (ImGui::IsItemHovered()) ImGui::SetTooltip("gpuValidation: the GPU debug/validation layer (Debug builds only;\n"
+	                                              "can more than halve FPS). Only for diagnosing renderer crashes.");
+	ImGui::Checkbox("Transparent Window", &gbWin.transparent);
+	ImGui::SameLine(); ImGui::TextDisabled("(?)");
+	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Per-pixel window alpha (needs D3D12; creation-time property).");
+	ImGui::SliderFloat("Window Opacity", &gbWin.opacity, 0.1f, 1.0f, "%.2f");
+
+	ImGui::TextDisabled("Written into the dist's config/main.json at packaging.");
+	ImGui::Separator();
+	if (ImGui::Button("Package", ImVec2(140, 0)))
+	{
+		if (gbWin.w < 64) gbWin.w = 64;
+		if (gbWin.h < 64) gbWin.h = 64;
+		if (gbWin.opacity < 0.1f) gbWin.opacity = 0.1f;
+		if (gbWin.opacity > 1.0f) gbWin.opacity = 1.0f;
+		gbWin.fullscreen = gbWin.mode != 0;
+		gbWinSet = true;   // the packaging worker overrides the shipped window block with gbWin
+		ImGui::CloseCurrentPopup();
+		ImGui::EndPopup();
+		PackageProject();   // Release build first, then pack (dist config formed there)
+		return;
+	}
+	ImGui::SameLine();
+	if (ImGui::Button("Cancel", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
+	ImGui::EndPopup();
 }
 
 // Open-with for a PACKED PROJECT (.nupak): no extraction — the pak stays the only copy of

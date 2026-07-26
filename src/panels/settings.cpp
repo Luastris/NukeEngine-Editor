@@ -182,6 +182,28 @@ void EditorUI::ApplyPendingWorldOpen()
 	SyncWorldBaseline();
 }
 
+// Persist the RTX quality block into the editor's config json (read-modify-write, other
+// sections kept). The dist config is formed FROM this file at packaging, so the game
+// inherits the knobs automatically.
+static void WriteRTBlock(const boost::filesystem::path& cfg, float inten, float maxDist, int bounces, float rough)
+{
+	try
+	{
+		nlohmann::json j;
+		{
+			boost::filesystem::ifstream in(cfg);
+			if (in) { std::stringstream ss; ss << in.rdbuf(); j = nlohmann::json::parse(ss.str(), nullptr, false, true); }
+		}
+		if (!j.is_object()) j = nlohmann::json::object();
+		j["raytracing"] = { {"intensity", inten}, {"maxDist", maxDist}, {"bounces", bounces}, {"roughCutoff", rough} };
+		boost::system::error_code ec;
+		if (cfg.has_parent_path()) boost::filesystem::create_directories(cfg.parent_path(), ec);
+		boost::filesystem::ofstream out(cfg, std::ios::trunc);
+		if (out) out << j.dump(2);
+	}
+	catch (...) {}
+}
+
 // Apply a full project-settings snapshot: update editor members + engine config, push everything to the renderer
 // (live), and persist (game.nuproj via SaveProject + config/main.json for RTX). Used by the undo/redo closures and
 // "Reset to Defaults" so a single call fully restores a state.
@@ -208,17 +230,9 @@ void EditorUI::ApplyProjectSettings(const ProjectSettings& ps)
 		r->setRTReflection(ps.rtIntensity, ps.rtMaxDist, ps.rtBounces, ps.rtRoughCutoff);
 	}
 	SaveProject();   // msaa/hdr/nits/disk-modes live in game.nuproj
-	try              // RTX lives in config/main.json ["raytracing"] (read-modify-write; comments not preserved)
-	{
-		nlohmann::json j;
-		boost::filesystem::ifstream in("config/main.json");
-		if (in) { std::stringstream ss; ss << in.rdbuf(); j = nlohmann::json::parse(ss.str(), nullptr, false, true); }
-		if (!j.is_object()) j = nlohmann::json::object();
-		j["raytracing"] = { {"intensity", ps.rtIntensity}, {"maxDist", ps.rtMaxDist}, {"bounces", ps.rtBounces}, {"roughCutoff", ps.rtRoughCutoff} };
-		boost::filesystem::ofstream out("config/main.json");
-		if (out) out << j.dump(2);
-	}
-	catch (...) {}
+	// RTX lives in the editor's config/main.json ["raytracing"] — the dist config is formed
+	// from this same file at packaging, so the game inherits it automatically.
+	WriteRTBlock(nuke::Config::baseDir() / "config" / "main.json", ps.rtIntensity, ps.rtMaxDist, ps.rtBounces, ps.rtRoughCutoff);
 }
 
 void EditorUI::winSettings()
@@ -353,146 +367,14 @@ void EditorUI::winSettings()
 				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Global RT reflection quality. Add the 'rtreflect' post effect to a camera to enable RT there (needs D3D12).");
 				if (ch && AppInstance::GetSingleton()->render)   // live preview
 					AppInstance::GetSingleton()->render->setRTReflection(rt.intensity, rt.maxDist, rt.bounces, rt.roughCutoff);
-				if (done)   // persist to config/main.json on edit-end (read-modify-write; comments not preserved)
-					try
-					{
-						nlohmann::json j;
-						boost::filesystem::ifstream in("config/main.json");
-						if (in) { std::stringstream ss; ss << in.rdbuf(); j = nlohmann::json::parse(ss.str(), nullptr, false, true); }
-						if (!j.is_object()) j = nlohmann::json::object();
-						j["raytracing"] = { {"intensity", rt.intensity}, {"maxDist", rt.maxDist}, {"bounces", rt.bounces}, {"roughCutoff", rt.roughCutoff} };
-						boost::filesystem::ofstream out("config/main.json");
-						if (out) out << j.dump(2);
-					}
-					catch (...) {}
+				if (done)   // persist on edit-end (the dist config inherits this file at packaging)
+					WriteRTBlock(nuke::Config::baseDir() / "config" / "main.json", rt.intensity, rt.maxDist, rt.bounces, rt.roughCutoff);
 			}
 		}
 
-		// --- Game Build: the boot defaults of the PACKAGED game. Single source of truth is
-		// <project>/window.json — the same file PIE scripts write through Game.Set* and the one
-		// Package Project merges over the shipped config, so nothing here is invented: values
-		// shown are the project's window.json where present, else the current runtime defaults.
-		ImGui::SeparatorText("Game Build");
-		{
-			nuke::Config* cfg = nuke::Config::getSingleton();
-			const nuke::NukeWindow defW = cfg ? cfg->window : nuke::NukeWindow();
-
-			// window.json "window" block, cached per project. Edits go read-modify-write to the
-			// file (one key at a time — the rest of window.json is untouched).
-			static std::string bwProj; static nlohmann::json bw;
-			if (bwProj != projectDir)
-			{
-				bwProj = projectDir; bw = nlohmann::json::object();
-				try
-				{
-					bfs::ifstream in(bfs::path(projectDir) / "window.json");
-					if (in)
-					{
-						std::stringstream ss; ss << in.rdbuf();
-						nlohmann::json j = nlohmann::json::parse(ss.str(), nullptr, false, true);
-						if (j.is_object() && j.contains("window") && j["window"].is_object()) bw = j["window"];
-					}
-				}
-				catch (...) {}
-			}
-			auto bwNum  = [&](const char* k, double def) -> double { return bw.contains(k) && bw[k].is_number()  ? bw[k].get<double>() : def; };
-			auto bwBool = [&](const char* k, bool def)   -> bool   { return bw.contains(k) && bw[k].is_boolean() ? bw[k].get<bool>()   : def; };
-			auto bwSet  = [&](const char* k, nlohmann::json v)
-			{
-				bw[k] = v;
-				try
-				{
-					nlohmann::json j;
-					bfs::ifstream in(bfs::path(projectDir) / "window.json");
-					if (in) { std::stringstream ss; ss << in.rdbuf(); j = nlohmann::json::parse(ss.str(), nullptr, false, true); }
-					if (!j.is_object()) j = nlohmann::json::object();
-					j["window"][k] = std::move(v);
-					bfs::ofstream out(bfs::path(projectDir) / "window.json");
-					if (out) out << j.dump(2);
-				}
-				catch (...) {}
-			};
-
-			// Render backend (device is created at launch — applies on the game's next start).
-			// Dual-write: window.json "backend" (per-project, merged at packaging) + the runtime
-			// config/main.json window.backend (what a raw NukePlayer run reads directly).
-			{
-				int be = (int)bwNum("backend", defW.backend);
-				const char* beModes[] = { "Direct3D 11", "Direct3D 12 (ray tracing)", "Vulkan" };
-				if (ImGui::Combo("Render Backend", &be, beModes, IM_ARRAYSIZE(beModes)))
-				{
-					bwSet("backend", be);
-					if (cfg) cfg->window.backend = be;
-					try
-					{
-						nlohmann::json j;
-						boost::filesystem::ifstream in("config/main.json");
-						if (in) { std::stringstream ss; ss << in.rdbuf(); j = nlohmann::json::parse(ss.str(), nullptr, false, true); }
-						if (!j.is_object()) j = nlohmann::json::object();
-						j["window"]["backend"] = be;
-						boost::filesystem::ofstream out("config/main.json");
-						if (out) out << j.dump(2);
-					}
-					catch (...) {}
-				}
-				ImGui::SameLine(); ImGui::TextDisabled("(?)");
-				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Backend of the PACKAGED GAME (Player) — ships with the project.\n"
-				                                              "D3D12 enables ray tracing, window transparency and HDR10.\n"
-				                                              "The EDITOR's own backend is in Preferences (default Vulkan).");
-			}
-
-			// Resolution: stage in the cached block while typing, persist when the field is left.
-			{
-				int bwW = (int)bwNum("width", defW.w), bwH = (int)bwNum("height", defW.h);
-				bool fin = false;
-				ImGui::SetNextItemWidth(110.0f);
-				if (ImGui::InputInt("##bw_w", &bwW, 0)) bw["width"] = bwW;
-				fin |= ImGui::IsItemDeactivatedAfterEdit();
-				ImGui::SameLine(); ImGui::TextUnformatted("x"); ImGui::SameLine();
-				ImGui::SetNextItemWidth(110.0f);
-				if (ImGui::InputInt("Resolution##bw_h", &bwH, 0)) bw["height"] = bwH;
-				fin |= ImGui::IsItemDeactivatedAfterEdit();
-				if (fin)
-				{
-					if (bwW < 64) bwW = 64; if (bwH < 64) bwH = 64;
-					bwSet("width", bwW); bwSet("height", bwH);
-				}
-			}
-
-			{
-				int mode = (int)bwNum("mode", defW.mode);
-				const char* wModes[] = { "Windowed", "Borderless Fullscreen", "Exclusive Fullscreen" };
-				if (ImGui::Combo("Display Mode", &mode, wModes, IM_ARRAYSIZE(wModes))) bwSet("mode", mode);
-			}
-
-			{
-				bool tr = bwBool("transparent", defW.transparent);
-				if (ImGui::Checkbox("Transparent Window", &tr)) bwSet("transparent", tr);
-				ImGui::SameLine(); ImGui::TextDisabled("(?)");
-				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Per-pixel window alpha (needs D3D12; creation-time property).\n"
-				                                              "PIE scripts calling Game.SetWindowTransparent write this same value.");
-			}
-			{
-				float op = (float)bwNum("opacity", defW.opacity);
-				if (ImGui::SliderFloat("Window Opacity", &op, 0.1f, 1.0f, "%.2f")) bw["opacity"] = op;
-				if (ImGui::IsItemDeactivatedAfterEdit()) bwSet("opacity", op);
-			}
-			{
-				bool vs = bwBool("vsync", defW.vsync);
-				if (ImGui::Checkbox("VSync", &vs)) bwSet("vsync", vs);
-			}
-			{
-				bool rz = bwBool("resizable", defW.resizable);
-				if (ImGui::Checkbox("Resizable", &rz)) bwSet("resizable", rz);
-			}
-			{
-				bool sc = bwBool("showConsole", defW.showConsole);
-				if (ImGui::Checkbox("Show OS Console", &sc)) bwSet("showConsole", sc);
-				ImGui::SameLine(); ImGui::TextDisabled("(?)");
-				if (ImGui::IsItemHovered()) ImGui::SetTooltip("The process's own log window. Off for a shipped game.");
-			}
-			ImGui::TextDisabled("Stored in <project>/window.json; merged into the dist config by Package Project.");
-		}
+		// (Game Build — the packaged game's boot settings — moved to the packaging dialog:
+		// File -> Package Project opens the "Game Build" modal; the dist config/main.json is
+		// formed at packaging from the editor's current config + the dialog's tweaks.)
 
 		// --- Packaging (3.2): the project pak is the immutable release artifact (max
 		// compression); mod paks are editable overlays (store by default). File menu:
