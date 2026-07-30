@@ -911,7 +911,8 @@ void EditorUI::DrawPrefabTree(AssetEditorWin& w, Atom* a)
 	bool openNode = ImGui::TreeNodeEx(a->GetName().c_str(), tf);
 	if (ImGui::IsItemClicked()) w.prefabSelId = (long)a->id.id;
 
-	// Drag to reparent (within THIS prefab window; global pose is kept by Reparent).
+	// Drag to reparent (within THIS prefab window; world pose is preserved below — core Reparent
+	// is pure link surgery and never touches transforms).
 	if (a != w.prefabRoot && ImGui::BeginDragDropSource())
 	{
 		long id = (long)a->id.id;
@@ -929,7 +930,11 @@ void EditorUI::DrawPrefabTree(AssetEditorWin& w, Atom* a)
 			bool insideDragged = dragged && FindInSubtree(dragged, (long)a->id.id) != nullptr;
 			if (dragged && dragged != a && !insideDragged)
 			{
+				// Keep the WORLD pose across the parent change (same behaviour as the main hierarchy).
+				Transform& mt = dragged->GetTransform();
+				Vector3 wp = mt.globalPosition(); Quaternion wr = mt.globalRotation(); Vector3 ws = mt.globalScale();
 				w.pv->world->Reparent(dragged, a);
+				mt.SetGlobal(wp, wr, ws);
 				w.dirty = true; w.editedNow = true;
 			}
 		}

@@ -98,7 +98,12 @@ void EditorUI::DrawAtomNode(Atom* atom)
 	// Non-native atoms carry their MOD's badge (world-merge provenance).
 	std::string rowLabel = std::string(AtomIcon(atom)) + " " + atom->GetName();
 	if (!atom->modOrigin.empty()) rowLabel += "  [" + atom->modOrigin + "]";
+	// Disabled atoms (own flag or any ancestor's) draw dimmed — same visual as disabled widgets.
+	bool dim = !atom->enabled;
+	for (Atom* p = atom->parent; !dim && p; p = p->parent) dim = !p->enabled;
+	if (dim) ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
 	bool open = ImGui::TreeNodeEx(rowLabel.c_str(), fl);
+	if (dim) ImGui::PopStyleColor();
 	if (!atom->modOrigin.empty() && ImGui::IsItemHovered())
 		ImGui::SetTooltip("Added by mod: %s", atom->modOrigin.c_str());
 	// Select on mouse RELEASE, not press: selecting on press instantly switches the inspector to
@@ -125,6 +130,18 @@ void EditorUI::DrawAtomNode(Atom* atom)
 		if (ImGui::MenuItem(ICON_LC_CLIPBOARD_PASTE " Paste", nullptr, false, AtomClipboardAvailable())) PasteAtom();
 		if (ImGui::MenuItem(ICON_LC_COPY_PLUS " Duplicate"))  DuplicateSelectedAtom();
 		ImGui::Separator();
+		// Whole-atom switch (mirrors the inspector checkbox); undoable by id — ApplyAtomState
+		// re-creates atoms, so closures must never capture the pointer.
+		if (ImGui::MenuItem("Enabled", nullptr, atom->enabled))
+		{
+			const long aid = atom->id.id; const bool nv = !atom->enabled;
+			atom->enabled = nv;
+			editing = false; editAtomId = 0;   // this is its own command — suppress the auto edit-detector
+			PushUndo(nv ? "Enable atom" : "Disable atom",
+				[aid, nv]{ if (Atom* a = AppInstance::GetSingleton()->currentWorld->GetById(aid)) a->enabled = !nv; },
+				[aid, nv]{ if (Atom* a = AppInstance::GetSingleton()->currentWorld->GetById(aid)) a->enabled = nv; });
+		}
+		ImGui::Separator();
 		if (ImGui::MenuItem(ICON_LC_TRASH_2 " Delete"))       DeleteSelectedAtom();
 		ImGui::EndPopup();
 	}
@@ -146,6 +163,11 @@ void EditorUI::DrawAtomNode(Atom* atom)
 		{
 			dndAsset = std::string((const char*)p->Data); dndAssetParent = atom;   // deferred
 		}
+		if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("NUKE_COMPONENT"))
+		{
+			auto* cp = (const CompDragPayload*)p->Data;                               // deferred
+			dndCompAtomId = cp->atomId; dndCompId = cp->compId; dndCompDst = atom;
+		}
 		ImGui::EndDragDropTarget();
 	}
 
@@ -164,6 +186,9 @@ void EditorUI::winHierarchy()
 	if (!win->hierarchy) return;
 	NukeUI::DocPanel("panel:hierarchy", "Hierarchy", &win->hierarchy, window_flags, 300, 620, [this]()
 	{
+	// Boot load in progress: the world is still streaming in — locked placeholder (status bar
+	// carries the step-by-step report).
+	if (bootLoading) { ImGui::TextDisabled("Loading project..."); return; }
 	AppInstance* app = AppInstance::GetSingleton();
 
 	ImGui::SetNextItemWidth(-1);
@@ -226,25 +251,37 @@ void EditorUI::winHierarchy()
 	// Apply deferred DnD now that the whole tree is drawn (mutating the lists mid-iteration corrupts it).
 	if (dndPending && dndAtom)
 	{
-		// Capture the old placement first so the move is undoable.
+		// Capture the old placement + a pre-move snapshot first so the move is undoable: the undo
+		// JSON must carry the OLD-parent-relative local transform (a post-move snapshot would restore
+		// the new-parent locals under the old parent and shift the world pose on Ctrl+Z).
 		long oldParent = dndAtom->parent ? dndAtom->parent->id.id : 0;
 		int  oldIndex  = 0;
 		{ auto& lst = dndAtom->parent ? dndAtom->parent->children : app->currentWorld->GetHierarchy();
 		  int i = 0; for (Atom* s : lst) { if (s == dndAtom) { oldIndex = i; break; } ++i; } }
 		Atom* moved = dndAtom;
-		if (dndBefore) app->currentWorld->ReparentBefore(dndAtom, dndBefore);   // reorder: same parent, world unchanged
-		else
-		{
-			// Reparent under a new parent: keep the atom's WORLD pose (standard editor behaviour — the
-			// object stays put on screen instead of jumping into the parent's local space).
-			Transform& mt = moved->GetTransform();
-			Vector3 wp = mt.globalPosition(); Quaternion wr = mt.globalRotation(); Vector3 ws = mt.globalScale();
-			app->currentWorld->Reparent(dndAtom, dndParent);
-			mt.SetGlobal(wp, wr, ws);
-		}
-		RecordReparent(moved, oldParent, oldIndex);
+		std::string beforeJson = SaveAtomToString(moved);
+		// Keep the atom's WORLD pose across any parent change (standard editor behaviour — the object
+		// stays put on screen instead of jumping into the new parent's local space). Gap-drops change
+		// the parent too (a gap between roots unparents), so both paths share the capture; a pure
+		// same-parent reorder leaves the local floats untouched.
+		Atom* wasParent = moved->parent;
+		Transform& mt = moved->GetTransform();
+		Vector3 wp = mt.globalPosition(); Quaternion wr = mt.globalRotation(); Vector3 ws = mt.globalScale();
+		if (dndBefore) app->currentWorld->ReparentBefore(dndAtom, dndBefore);
+		else           app->currentWorld->Reparent(dndAtom, dndParent);
+		if (moved->parent != wasParent) mt.SetGlobal(wp, wr, ws);
+		RecordReparent(moved, oldParent, oldIndex, beforeJson);
 	}
 	dndPending = false; dndAtom = dndBefore = dndParent = nullptr;
+	// Apply a deferred component move (an inspector component header dropped on a row).
+	if (dndCompDst)
+	{
+		Atom* srcA = app->currentWorld->GetById(dndCompAtomId);
+		Component* c = nullptr;
+		if (srcA) for (Component* cc : srcA->components) if (cc && (long)cc->id.id == dndCompId) { c = cc; break; }
+		if (srcA && c) MoveComponent(srcA, c, dndCompDst);
+		dndCompAtomId = 0; dndCompId = 0; dndCompDst = nullptr;
+	}
 	if (!dndAsset.empty())
 	{
 		if (Atom* a = DropAsset(dndAsset)) { if (dndAssetParent) app->currentWorld->Reparent(a, dndAssetParent); }

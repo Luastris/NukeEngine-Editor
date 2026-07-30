@@ -64,8 +64,19 @@ void EditorUI::SaveProject()
 	for (auto& kv : nuke::Hotkeys::Get()->ExportBindings()) hk[kv.first] = kv.second;
 	j["hotkeys"] = hk;
 	j["layers"] = nuke::Layers::All();   // render-layer slot names (32; see nuke::Layers)
+	// Serialize BEFORE opening the file: the ofstream truncates on open, so a dump() throw
+	// used to leave a ZERO-BYTE .nuproj (the project silently wiped — seen in the wild).
+	// error_handler replace: a stray non-UTF-8 byte (e.g. an ANSI path) becomes U+FFFD in the
+	// saved file instead of killing the editor mid-save.
+	std::string out;
+	try { out = j.dump(2, ' ', false, nlohmann::json::error_handler_t::replace); }
+	catch (const std::exception& e)
+	{
+		std::cout << "[editor]\tSaveProject: serialize FAILED (" << e.what() << ") — .nuproj left untouched" << std::endl;
+		return;
+	}
 	bfs::ofstream f{bfs::path(projectFile)};
-	if (f) f << j.dump(2);
+	if (f) f << out;
 }
 void EditorUI::LoadProject()
 {

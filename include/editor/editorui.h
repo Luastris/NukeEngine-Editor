@@ -69,6 +69,18 @@ class TextEditor;   // vendored ImGuiColorTextEdit (src/textedit), compiled into
 // this editor. User-scope + reversible; defined in main.cpp (isolates <windows.h>). Returns success.
 bool RegisterProjectFileAssociation();
 
+// "Box (2)" -> "Box"; names without a trailing " (N)" counter come back unchanged. Shared by every
+// uniquifier (atom names, file paths) so counters increment instead of stacking: never "Box (2) (2)".
+static inline std::string StripNameCounter(const std::string& s)
+{
+	if (s.size() < 4 || s.back() != ')') return s;
+	size_t open = s.rfind(" (");
+	if (open == std::string::npos || open + 2 >= s.size() - 1) return s;   // need >= 1 digit inside
+	for (size_t i = open + 2; i + 1 < s.size(); ++i)
+		if (!isdigit((unsigned char)s[i])) return s;
+	return s.substr(0, open);
+}
+
 // Row-major (renderer) -> column-major (ImGuizmo) 4x4 matrix layout.
 static inline void Transpose4(const float* s, float* d)
 {
@@ -146,6 +158,10 @@ private:
 	// Deferred reparent (applied AFTER the tree is drawn — mutating the lists mid-iteration corrupts it).
 	Atom* dndAtom = nullptr; Atom* dndBefore = nullptr; Atom* dndParent = nullptr; bool dndPending = false;
 	std::string dndAsset; Atom* dndAssetParent = nullptr;   // deferred: instantiate a browser asset (then parent)
+	// Deferred component move ("NUKE_COMPONENT" payload: a component header dragged from the
+	// inspector onto a hierarchy row). Ids, not pointers — the payload survives frames safely.
+	struct CompDragPayload { long atomId = 0; long compId = 0; };
+	long dndCompAtomId = 0; long dndCompId = 0; Atom* dndCompDst = nullptr;
 	// Undo/redo: a GENERIC command stack. Each undoable action pushes its OWN inverse closures, so it
 	// covers anything that changes — atom edits, spawns, reparenting, project/editor settings, paths —
 	// not just atoms. Atom edits are captured as a delta (the affected atom subtree's before/after
@@ -220,6 +236,16 @@ private:
 	bool openPackageModPopup = false;
 	char packModName[128] = "";
 	std::string modName;                           // last packaged mod name (from the .nuproj)
+	// Package Mod split: 0 = single .numod, 1 = side parts by content type (textures/audio/
+	// meshes), 2 = greedy parts under a raw-size cap. Parts carry {"part_of": <mod>} and are
+	// mounted with (and hidden behind) their main mod.
+	int modSplitMode = 0;
+	int modSplitCapMB = 512;
+	// Package DLC (developer-only, raw project): name + the shipped base game.nupak to diff
+	// against; the result lands in the base's content/dlc/.
+	bool openPackageDlcPopup = false;
+	char packDlcName[128] = "";
+	char packDlcBase[512] = "";
 	// Game Build modal (File -> Package Project): the game's boot settings, tweaked in a
 	// dialog BEFORE packaging. Nothing is stored anywhere else — the dist config/main.json
 	// is FORMED at packaging (editor's current config + these overrides); a repack pre-fills
@@ -345,6 +371,9 @@ public:
 	void PackageMod(const std::string& name = "");   // "" -> last used / project name (dev hook)
 	void PackageModCmd();            // open the "Package Mod" modal (prefills the name)
 	void DrawPackageModPopup();      // the modal itself (drawn each frame)
+	void PackageDlc(const std::string& name, const std::string& basePak);   // cooked crc-diff vs the base pak
+	void PackageDlcCmd();            // open the "Package DLC" modal (prefills name + base path)
+	void DrawPackageDlcPopup();      // the modal itself (drawn each frame)
 	// Open-with support (3.2). A .nupak NEVER extracts (the packed project is read-only —
 	// an unpacked tree would be an unprotected copy anyone could repackage): it is MOUNTED
 	// at runtime, Bethesda-style, and edits land in a "<stem>_mod" OVERLAY dir beside it
@@ -660,6 +689,17 @@ public:
 	void SpawnLight(int type, const char* atomName);   // type 0=dir 1=point 2=spot
 	void SpawnEnvironment();                           // atom + Environment (sky/ambient)
 	void SpawnReflectionProbe();                       // atom + ReflectionProbe (scene-captured reflections)
+	// Boot-time background project load (fast editor UI, content later): SetUp() defers the
+	// heavy tail — content scan, shader loads, pipeline compiles, the boot world — to a worker
+	// plus a per-frame pump. While bootLoading != 0 the Hierarchy/Inspector/Viewport/Browser
+	// panels draw a locked placeholder and the status bar reports each step.
+	// 0 = idle/done, 1 = content+shaders on a worker, 2 = pipelines/world staged+activating,
+	// 3 = warm-up frame (the first real world frame compiles lazy shaders, e.g. water).
+	int bootLoading = 0;
+	std::string bootWorldRel;          // boot world (lastWorld|startupWorld), picked after editor_state loads
+	double bootPrevActBudget = 0.0;    // activation budget restored once the boot finishes
+	void StartBootLoad();
+	void PumpBootLoad();
 	void Toolbar();
 	void Draw();
 	// undo/redo (generic command stack)
@@ -673,7 +713,9 @@ public:
 	void ResetUndo();                  // clear history (on world load / new)
 	void ApplyAtomState(long id, long parentId, int index, const std::string& json);   // undo primitive
 	void RecordAdd(Atom* a);                                       // an atom was created
-	void RecordReparent(Atom* a, long oldParent, int oldIndex);   // an atom moved in the hierarchy
+	void RecordReparent(Atom* a, long oldParent, int oldIndex,
+	                    const std::string& beforeJson);           // an atom moved in the hierarchy
+	                                                              // (beforeJson = pre-move snapshot)
 	void RecordDelete(Atom* a);                                   // an atom was deleted
 	void DeleteSelectedAtom();                                    // hierarchy: delete the selected atom (undoable)
 	// Atom clipboard (Edit menu / hierarchy / viewport). Copy puts the serialized subtree on the
@@ -686,6 +728,7 @@ public:
 	void DuplicateSelectedAtom();
 	bool AtomClipboardAvailable();                                // clipboard holds an atom envelope
 	void RemoveComponent(Atom* a, Component* c);                  // inspector: remove a component (undoable)
+	void MoveComponent(Atom* src, Component* c, Atom* dst);       // DnD: move a component to another atom (undoable)
 	void RecordFileMove(const std::string& from, const std::string& to);   // a file/folder was renamed or moved
 	// Generic value edit (settings, paths, flags…): records before/after of any comparable value.
 	template<class T> void RecordChange(const std::string& label, T* slot, const T& before, const T& after)

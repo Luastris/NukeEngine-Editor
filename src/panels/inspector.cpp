@@ -1342,11 +1342,53 @@ void EditorUI::RemoveComponent(Atom* a, Component* c)
 		[this, id, parent, index, after ]{ ApplyAtomState(id, parent, index, after ); });
 }
 
+// Move a component to another atom (inspector header dragged onto a hierarchy row). The component
+// travels as a LIVE pointer — reflected props, material instances and runtime state all ride
+// along — only the owner back-references are rewired (Init is NOT re-run: its side effects
+// already happened on the source atom). Undo restores both atoms' subtrees as one command.
+void EditorUI::MoveComponent(Atom* src, Component* c, Atom* dst)
+{
+	if (!src || !c || !dst || src == dst) return;
+	World* w = AppInstance::GetSingleton()->currentWorld;
+	auto place = [&](Atom* a, long& parent, int& index)
+	{
+		parent = a->parent ? a->parent->id.id : 0;
+		index = 0; auto& lst = a->parent ? a->parent->children : w->GetHierarchy();
+		int i = 0; for (Atom* s : lst) { if (s == a) { index = i; break; } ++i; }
+	};
+	long sid = src->id.id, did = dst->id.id, sPar = 0, dPar = 0; int sIdx = 0, dIdx = 0;
+	place(src, sPar, sIdx); place(dst, dPar, dIdx);
+	std::string sBefore = nuke::SaveAtomToString(src), dBefore = nuke::SaveAtomToString(dst);
+	src->components.remove(c);
+	dst->components.push_back(c);
+	c->transform = &dst->GetTransform();   // rewire the owner refs by hand: several Inits skip `atom`,
+	c->atom = dst;                         // so re-Init would leave it stale anyway
+	std::string sAfter = nuke::SaveAtomToString(src), dAfter = nuke::SaveAtomToString(dst);
+	editing = false; editAtomId = 0;   // suppress the auto edit-detector (this is its own command)
+	// ApplyAtomState re-creates a whole subtree by id, so when one atom contains the other the
+	// ANCESTOR must be re-applied first (the nested atom is then re-applied over its fresh copy).
+	bool srcFirst = true;
+	for (Atom* p = src->parent; p; p = p->parent) if (p == dst) { srcFirst = false; break; }
+	PushUndo("Move component",
+		[this, sid, sPar, sIdx, sBefore, did, dPar, dIdx, dBefore, srcFirst]
+		{
+			if (srcFirst) { ApplyAtomState(sid, sPar, sIdx, sBefore); ApplyAtomState(did, dPar, dIdx, dBefore); }
+			else          { ApplyAtomState(did, dPar, dIdx, dBefore); ApplyAtomState(sid, sPar, sIdx, sBefore); }
+		},
+		[this, sid, sPar, sIdx, sAfter, did, dPar, dIdx, dAfter, srcFirst]
+		{
+			if (srcFirst) { ApplyAtomState(sid, sPar, sIdx, sAfter); ApplyAtomState(did, dPar, dIdx, dAfter); }
+			else          { ApplyAtomState(did, dPar, dIdx, dAfter); ApplyAtomState(sid, sPar, sIdx, sAfter); }
+		});
+}
+
 void EditorUI::winInspector()
 {
 	if (!win->inspector) return;
 	NukeUI::DocPanel("panel:inspector", "Inspector", &win->inspector, window_flags, 380, 700, [this]()
 	{
+	// Boot load in progress: locked (a half-deserialized selection must not be edited).
+	if (bootLoading) { ImGui::TextDisabled("Loading project..."); return; }
 	if (auto sltd = AppInstance::GetSingleton()->selectedInHieararchy)
 	{
 		char name[128];
@@ -1378,6 +1420,13 @@ void EditorUI::winInspector()
 			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Survive game world switches (Game.LoadWorld / async activation).\n"
 			                                              "Applies to ROOT atoms while PLAYING; children ride with their root.\n"
 			                                              "Editor world opens and savegame loads never carry atoms.");
+			// Whole-atom switch (SetActive pattern): off = the subtree neither updates, renders,
+			// receives events nor keeps physics bodies. TrackUndo captures the edit like any other.
+			ImGui::SameLine();
+			bool ena = sltd->enabled;
+			if (ImGui::Checkbox("Enabled", &ena)) sltd->enabled = ena;
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Whole-atom switch: unticked disables this atom AND its subtree\n"
+			                                              "(updates, rendering, events, physics bodies).");
 		}
 
 		// Prefab instance bar: this atom IS an instance (a prefab with individual params). Manual sync only.
@@ -1505,6 +1554,14 @@ void EditorUI::winInspector()
 				st = ImGui::CollapsingHeader(hdr.c_str());
 				if (!cmp->modOrigin.empty() && ImGui::IsItemHovered())
 					ImGui::SetTooltip("Added by mod: %s", cmp->modOrigin.c_str());
+				// Drag the header onto a hierarchy row to MOVE this component to that atom.
+				if (ImGui::BeginDragDropSource())
+				{
+					CompDragPayload pay; pay.atomId = sltd->id.id; pay.compId = cmp->id.id;
+					ImGui::SetDragDropPayload("NUKE_COMPONENT", &pay, sizeof(pay));
+					ImGui::Text("%s  (drop on an atom)", label.c_str());
+					ImGui::EndDragDropSource();
+				}
 				ImGui::SameLine(ImGui::GetContentRegionMax().x - 22);   // remove (undoable)
 				if (ImGui::SmallButton(ICON_LC_X "##delcomp")) { pendingCompAtom = sltd; pendingCompDel = cmp; }
 				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remove component");

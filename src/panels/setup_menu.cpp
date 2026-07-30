@@ -2,6 +2,8 @@
 #include <editor/editorui.h>
 #include <import/assimporter.h>   // drag&drop import (ImportAny)
 #include <API/Model/Package.h>    // mounted-pak session (3.2)
+#include <API/Model/Jobs.h>       // background boot load (StartBootLoad)
+#include <API/Model/StatusBar.h>  // step-by-step boot reporting
 namespace bfs = boost::filesystem;
 
 void EditorUI::SetUp()
@@ -86,22 +88,6 @@ void EditorUI::SetUp()
 	// Content relative paths (scripts etc.) resolve against the project, not the exe root.
 	AppInstance::GetSingleton()->contentRoot = contentDir;
 
-	// Load native assets (.numesh) from content/ so meshGuid refs in saved worlds resolve.
-	ResDB::getSingleton()->LoadContentDir(contentDir);
-	// Opened from a .nupak (3.2): the base game is MOUNTED read-only (Bethesda-style, no
-	// extraction) — register its assets too; the raw dir above is the modder's overlay.
-	if (nuke::Package::MountedCount() > 0)
-	{
-		ResDB::getSingleton()->LoadContentPackaged();
-		ResDB::getSingleton()->LoadShadersPackaged();   // content shaders straight from pak bytes
-	}
-	// Shaders from two roots: engine built-in (shaders/) then project (content/). Engine wins
-	// on name clashes, so a project can't shadow the built-in "world" default by accident.
-	ResDB::getSingleton()->LoadShadersDir("shaders");
-	ResDB::getSingleton()->LoadShadersDir(contentDir);
-	// Build a renderer pipeline per shader (render is already init'd before editorinit()).
-	ResDB::getSingleton()->BuildShaderPipelines(AppInstance::GetSingleton()->render);
-	ResDB::getSingleton()->CreateRenderTextures(AppInstance::GetSingleton()->render);   // RTs for RenderTextures
 	if (iRender* r = AppInstance::GetSingleton()->render)   // push global RTX reflection settings (config/main.json)
 	{
 		nuke::NukeRT& rt = nuke::Config::getSingleton()->rt;
@@ -119,48 +105,127 @@ void EditorUI::SetUp()
 		});
 	});
 
-	// Editor state (project-tied): camera, selection, inspector + browser + panel state.
-	LoadEditorState();
-	// (The old "demo cube so the viewport shows something" seeded a stray Cube into every
-	// session — an EMPTY world must open empty. Removed 2026-07-11.)
+	// The heavy tail — content scan, shader loads, pipeline compiles, the boot world — runs in
+	// the BACKGROUND from here (roadmap: fast editor boot). The window and panels are already
+	// up; Hierarchy/Inspector/Viewport/Browser stay locked and the status bar reports each step
+	// until PumpBootLoad() (called every frame from Draw) flips bootLoading back to 0.
+	StartBootLoad();
 
-	// Open the last world the editor had open (editor_state.json); fall back to the project's
-	// default world if none was recorded or its file is gone (renamed/deleted outside). Plugins
-	// are already active, so its components deserialize correctly.
+	cout << "[editorui]\t\t" << "EditorUI up — project content loading in background." << endl;
+}
+
+// Background tail of SetUp(): scan content and load shader sources on a worker, then hop back
+// to the game thread for GPU-facing steps and stage the boot world asynchronously. Split off
+// so the editor window appears immediately instead of after the whole project load.
+void EditorUI::StartBootLoad()
+{
+	bootLoading = 1;
+	nuke::StatusBar::Set("boot", "Loading content...", nuke::StatusBar::kIndeterminate);
+	const bool mounted = nuke::Package::MountedCount() > 0;
+	const std::string cdir = contentDir;
+	nuke::Jobs::Schedule([this, mounted, cdir]()
 	{
-		boost::system::error_code ec;
-		std::string bootWorld = (!lastWorld.empty() && bfs::exists(bfs::path(editor->WorldFullPath(lastWorld)), ec))
-		                      ? lastWorld : startupWorld;
-		if (editor->OpenWorld(bootWorld))
-			cout << "[editorui]\t\t" << "Opened " << (bootWorld == startupWorld ? "default" : "last")
-			     << " world '" << bootWorld << "'." << endl;
-	}
-
-	SyncWorldBaseline();   // baseline = the world we just opened; title "NukeEngine Editor - <project> - <world>"
-
-	// Dev hook (NUKE_OPEN_ASSET=<content-relative path>): open the file's asset editor right
-	// after boot — lets test harnesses exercise asset-editor windows without a hand on the
-	// mouse (same family as NUKE_GM_NEW/NUKE_GM_BUILD).
-	if (const char* oa = std::getenv("NUKE_OPEN_ASSET"))
-		if (oa[0])
+		// Worker-safe half: pure disk + CPU. Panels that read ResDB are locked while this runs.
+		// Checkpoints between the steps (and inside the scans themselves): closing the editor
+		// mid-boot must exit promptly — Jobs::Shutdown JOINS this job.
+		ResDB::getSingleton()->LoadContentDir(cdir);
+		if (nuke::Jobs::Stopping()) return;
+		if (mounted)
 		{
-			// ';'-separated list: the harness can open several editors at once
-			// (multi-window render path testing).
-			std::string all = oa;
-			for (size_t p = 0; p < all.size(); )
-			{
-				size_t q = all.find(';', p);
-				if (q == std::string::npos) q = all.size();
-				const std::string one = all.substr(p, q - p);
-				p = q + 1;
-				if (one.empty()) continue;
-				const std::string full = AppInstance::GetSingleton()->ResolveContent(one);
-				cout << "[editorui]\t\t" << "NUKE_OPEN_ASSET -> " << full << endl;
-				OpenAssetEditor(full);
-			}
+			// Opened from a .nupak (3.2): the base game is MOUNTED read-only (Bethesda-style,
+			// no extraction) — register its assets too; the raw dir is the modder's overlay.
+			nuke::StatusBar::Set("boot", "Loading packaged content...", nuke::StatusBar::kIndeterminate);
+			ResDB::getSingleton()->LoadContentPackaged();
+			ResDB::getSingleton()->LoadShadersPackaged();   // content shaders straight from pak bytes
+			if (nuke::Jobs::Stopping()) return;
 		}
+		// Shaders from two roots: engine built-in (shaders/) then project (content/). Engine wins
+		// on name clashes, so a project can't shadow the built-in "world" default by accident.
+		nuke::StatusBar::Set("boot", "Loading shaders...", nuke::StatusBar::kIndeterminate);
+		ResDB::getSingleton()->LoadShadersDir("shaders");
+		ResDB::getSingleton()->LoadShadersDir(cdir);
+		if (nuke::Jobs::Stopping()) return;
+		nuke::Jobs::RunOnMain([this]()
+		{
+			// Game-thread tail: GPU resources + editor state, then stage the world. Pipelines
+			// are NOT built here in one gulp — PumpBootLoad compiles a couple per frame.
+			AppInstance* editor = AppInstance::GetSingleton();
+			ResDB::getSingleton()->CreateRenderTextures(editor->render);   // RTs for RenderTextures
+			// Editor state (project-tied): camera, selection, browser + panel state, lastWorld.
+			LoadEditorState();
+			// Boot world = the last one open (editor_state.json), else the project default.
+			boost::system::error_code ec;
+			bootWorldRel = (!lastWorld.empty() && bfs::exists(bfs::path(editor->WorldFullPath(lastWorld)), ec))
+			             ? lastWorld : startupWorld;
+			bootPrevActBudget = editor->GetWorldActivationBudget();
+			editor->SetWorldActivationBudget(6.0);   // ms/frame: atoms stream in without hitching the UI
+			if (!bootWorldRel.empty())
+				editor->StartWorldLoadAsync(bootWorldRel);   // read+merge+parse on a worker
+			bootLoading = 2;
+		});
+	});
+}
 
-	cout << "[editorui]\t\t" << "EditorUI ready." << endl;
+// Per-frame boot pump (called from Draw): finishes material pipelines a couple per frame,
+// activates the staged world under the activation budget, then holds ONE more locked frame
+// (lazy shader bursts — water — land there) before unlocking the panels.
+void EditorUI::PumpBootLoad()
+{
+	AppInstance* app = AppInstance::GetSingleton();
+	// Outside PIE nothing pumps the async world machinery (World::Update is PIE-gated in the
+	// editor) — pump it here so background loads work in edit mode too, boot or not.
+	if (app->playState == 0)
+	{
+		app->ApplyAsyncWorldLoad();
+		app->ContinueWorldActivation();
+	}
+	if (!bootLoading || bootLoading == 1) return;   // phase 1 completes via RunOnMain
+	if (bootLoading == 2)
+	{
+		const int left = ResDB::getSingleton()->BuildShaderPipelinesStep(app->render, 2);
+		if (left > 0)
+		{
+			nuke::StatusBar::Set("boot", "Compiling pipelines... (" + std::to_string(left) + " left)",
+			                     nuke::StatusBar::kIndeterminate);
+			return;
+		}
+		if (app->WorldLoadReady())
+			app->ActivateLoadedWorld();   // swap happens in the pump above next frame
+		const double lp = app->WorldLoadProgress(), ap = app->WorldActivationProgress();
+		if      (ap >= 0) nuke::StatusBar::Set("boot", "Activating world...", (float)ap);
+		else if (lp >= 0) nuke::StatusBar::Set("boot", "Loading world '" + bootWorldRel + "'...", (float)lp);
+		else
+		{
+			// Both idle: the world finished (or was empty/missing — already logged). Housekeep.
+			app->SetWorldActivationBudget(bootPrevActBudget);
+			SyncWorldBaseline();   // baseline = the world we just opened (title, dirty "*")
+			// Dev hook (NUKE_OPEN_ASSET=<content-relative path>): open asset editors after the
+			// content is actually in — same family as NUKE_GM_NEW/NUKE_GM_BUILD.
+			if (const char* oa = std::getenv("NUKE_OPEN_ASSET"))
+				if (oa[0])
+				{
+					std::string all = oa;   // ';'-separated list
+					for (size_t p = 0; p < all.size(); )
+					{
+						size_t q = all.find(';', p);
+						if (q == std::string::npos) q = all.size();
+						const std::string one = all.substr(p, q - p);
+						p = q + 1;
+						if (one.empty()) continue;
+						const std::string full = AppInstance::GetSingleton()->ResolveContent(one);
+						cout << "[editorui]\t\t" << "NUKE_OPEN_ASSET -> " << full << endl;
+						OpenAssetEditor(full);
+					}
+				}
+			nuke::StatusBar::Set("boot", "Warming up...", nuke::StatusBar::kIndeterminate);
+			bootLoading = 3;   // one more locked frame: the first world frame compiles lazy shaders
+		}
+		return;
+	}
+	// bootLoading == 3: the warm-up frame rendered — unlock.
+	nuke::StatusBar::Remove("boot");
+	bootLoading = 0;
+	cout << "[editorui]\t\t" << "Project loaded — editor unlocked." << endl;
 }
 
 // NukeEngine dark theme (ported from the old gui.cpp to imgui 1.92 enums).
@@ -299,6 +364,9 @@ void EditorUI::EditorMenu()
 			if (basePakPath.empty())
 			{
 				if (ImGui::MenuItem(ICON_LC_PACKAGE " Package Project (dist)...")) PackageProjectCmd();   // Game Build dialog first
+				// DLC (developer-only): a crc diff of the cooked project vs a SHIPPED base pak —
+				// same container, mounts between the base and the mods, never editable itself.
+				if (ImGui::MenuItem(ICON_LC_PACKAGE " Package DLC (.nupak)..."))    PackageDlcCmd();
 			}
 			else if (ImGui::MenuItem(ICON_LC_PUZZLE " Package Mod (.numod)..."))   PackageModCmd();
 			ImGui::Separator();

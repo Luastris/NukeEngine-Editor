@@ -608,9 +608,19 @@ void EditorUI::PackageProjectNow()
 		bfs::path modsKeep = bfs::path(projDir) / ".dist_mods_keep";
 		bfs::remove_all(modsKeep, ec);
 		if (bfs::exists(dist / "mods", ec)) bfs::rename(dist / "mods", modsKeep, ec);
+		// Installed DLC paks survive a base repack the same way mods do — they are release
+		// artifacts of their own, not part of this build.
+		bfs::path dlcKeep = bfs::path(projDir) / ".dist_dlc_keep";
+		bfs::remove_all(dlcKeep, ec);
+		if (bfs::exists(dist / "content" / "dlc", ec)) bfs::rename(dist / "content" / "dlc", dlcKeep, ec);
 		bfs::remove_all(dist, ec);
 		bfs::create_directories(dist, ec);
 		if (bfs::exists(modsKeep, ec)) bfs::rename(modsKeep, dist / "mods", ec);
+		if (bfs::exists(dlcKeep, ec))
+		{
+			bfs::create_directories(dist / "content", ec);
+			bfs::rename(dlcKeep, dist / "content" / "dlc", ec);
+		}
 		if (!modsJson.empty())
 		{
 			bfs::create_directories(dist / "config", ec);
@@ -654,6 +664,18 @@ void EditorUI::PackageProjectNow()
 		          << (forcedShaders ? "; " + std::to_string(forcedShaders) + " shader file(s) force-shipped" : "")
 		          << ")" << std::endl;
 		files.push_back({ "game.nuproj", projFile });
+		// Pak identity manifest (reserved "pak.json" entry): kind/name/platforms. DLC packs
+		// record this name as their "base" — the runtime mounts a DLC only onto ITS game.
+		bfs::path pakManTmp = bfs::path(projDir) / ".pak.json.tmp";
+		{
+			nlohmann::json pj;
+			pj["kind"] = "base";
+			pj["name"] = gameName;
+			pj["platforms"] = nlohmann::json::array({ Package::CurrentPlatform() });
+			bfs::ofstream pf(pakManTmp, std::ios::binary | std::ios::trunc);
+			if (pf) pf << pj.dump(2);
+		}
+		files.push_back({ "pak.json", pakManTmp.string() });
 		// Module pak extras: project files the cooker can't reach by reference (compiled
 		// script assemblies — packed sessions read them straight from the pak).
 		for (const std::string& rel : extraPak)
@@ -847,9 +869,12 @@ void EditorUI::PackageMod(const std::string& modNameIn)
 	// mod when one is missing). Snapshot on the game thread.
 	std::vector<std::string> requires_;
 	for (const Package::ModInfo& mi : Package::Mods()) requires_.push_back(mi.name);
+	// Split settings from the Package Mod dialog (game-thread state).
+	const int splitMode = modSplitMode;      // 0 = one pak, 1 = by content type, 2 = size cap
+	const int splitCapMB = modSplitCapMB;
 
 	StatusBar::Set("packmod", "Packaging mod...", StatusBar::kIndeterminate);
-	nuke::Jobs::Schedule([projDir, base, name, method, level, distStr, requires_]()
+	nuke::Jobs::Schedule([projDir, base, name, method, level, distStr, requires_, splitMode, splitCapMB]()
 	{
 		boost::system::error_code ec;
 		auto all = CollectProject(projDir, true, DistPrefix(projDir, distStr));
@@ -959,12 +984,86 @@ void EditorUI::PackageMod(const std::string& modNameIn)
 			std::cout << "[Package]\tmod: nothing changed against the base — nothing to pack." << std::endl;
 		else
 		{
-			// The mod's manifest rides INSIDE it: its name + its dependencies. A repacked
-			// .numod keeps the requires recorded when it was authored (its session mounts
-			// nothing) — the extracted work tree carries the original mod.json.
+			auto lowRelOf = [](const std::string& rel)
+			{ std::string low = rel; for (char& c : low) c = (char)tolower((unsigned char)c); return low; };
+			auto endsWith = [](const std::string& s, const char* e)
+			{ const size_t n = strlen(e); return s.size() > n && s.compare(s.size() - n, n, e) == 0; };
+
+			// Platform tag: a mod is cross-platform ("any") unless it carries NATIVE binaries.
+			// The managed scripts assembly (managed/bin/Scripts_*.dll) is IL — cross-platform
+			// by design — and Lua is text; only a real native .dll/.so binds the platform.
+			bool hasNative = false;
+			for (auto& fp : files)
+			{
+				const std::string low = lowRelOf(fp.first);
+				if ((endsWith(low, ".dll") || endsWith(low, ".so")) && low.compare(0, 8, "managed/") != 0)
+				{ hasNative = true; break; }
+			}
+
+			// Split (optional): heavy content into PART paks beside the main one. Worlds, their
+			// recorded basis, the manifest and the scripts assembly ALWAYS stay in the MAIN pak —
+			// the loader reads "basis/<rel>" and "mod.json" from the pak that served the world.
+			auto mustStayMain = [&](const std::string& low)
+			{
+				return low.compare(0, 6, "basis/") == 0 || low.compare(0, 8, "managed/") == 0
+				    || endsWith(low, ".nuworld") || low == "mod.json" || low == "game.nuproj";
+			};
+			std::vector<std::pair<std::string, std::vector<std::pair<std::string, std::string>>>> partsOut;   // (suffix, files)
+			if (splitMode == 1)
+			{
+				// By content type: textures / audio / meshes get their own part each.
+				auto classOf = [&](const std::string& low) -> const char*
+				{
+					if (endsWith(low, ".nutex") || endsWith(low, ".png") || endsWith(low, ".jpg")
+					 || endsWith(low, ".jpeg") || endsWith(low, ".tga") || endsWith(low, ".dds")
+					 || endsWith(low, ".bmp")) return "textures";
+					if (endsWith(low, ".wav") || endsWith(low, ".ogg") || endsWith(low, ".mp3")
+					 || endsWith(low, ".flac")) return "audio";
+					if (endsWith(low, ".numesh") || endsWith(low, ".nuanim") || endsWith(low, ".nubonemap")) return "meshes";
+					return "";
+				};
+				std::map<std::string, std::vector<std::pair<std::string, std::string>>> byClass;
+				std::vector<std::pair<std::string, std::string>> mainFiles;
+				for (auto& fp : files)
+				{
+					const std::string low = lowRelOf(fp.first);
+					const char* cls = mustStayMain(low) ? "" : classOf(low);
+					if (cls[0]) byClass[cls].push_back(fp); else mainFiles.push_back(fp);
+				}
+				for (auto& kv : byClass) if (!kv.second.empty()) partsOut.push_back({ kv.first, kv.second });
+				files.swap(mainFiles);
+			}
+			else if (splitMode == 2 && splitCapMB > 0)
+			{
+				// Size cap: fill the main pak up to the cap, then greedy part2/part3/... by
+				// RAW size (compression varies per entry; raw is the stable, predictable bound).
+				const uint64_t cap = (uint64_t)splitCapMB << 20;
+				std::vector<std::pair<std::string, std::string>> mainFiles, cur;
+				uint64_t mainSz = 0, curSz = 0; int partN = 2;
+				for (auto& fp : files)
+				{
+					const std::string low = lowRelOf(fp.first);
+					boost::system::error_code fec;
+					const uint64_t sz = (uint64_t)bfs::file_size(bfs::path(fp.second), fec);
+					if (mustStayMain(low))                { mainFiles.push_back(fp); mainSz += sz; continue; }
+					if (mainSz + sz <= cap)               { mainFiles.push_back(fp); mainSz += sz; continue; }
+					if (!cur.empty() && curSz + sz > cap) { partsOut.push_back({ "part" + std::to_string(partN++), cur }); cur.clear(); curSz = 0; }
+					cur.push_back(fp); curSz += sz;
+				}
+				if (!cur.empty()) partsOut.push_back({ "part" + std::to_string(partN++), cur });
+				files.swap(mainFiles);
+			}
+			std::vector<std::string> partFiles;
+			for (auto& pr : partsOut) partFiles.push_back(name + "." + pr.first + ".numod");
+
+			// The mod's manifest rides INSIDE it: its name + its dependencies (+ platform and
+			// the split-part list). A repacked .numod keeps the requires recorded when it was
+			// authored (its session mounts nothing) — the work tree carries the original mod.json.
 			nlohmann::json man;
 			man["name"] = name;
 			man["requires"] = requires_;
+			man["platform"] = hasNative ? Package::CurrentPlatform() : "any";
+			if (!partFiles.empty()) man["parts"] = partFiles;
 			if (fromMod)
 			{
 				bfs::ifstream mf(bfs::path(projDir) / "mod.json");
@@ -986,6 +1085,28 @@ void EditorUI::PackageMod(const std::string& modNameIn)
 					StatusBar::Set("packmod", "Packaging mod... " + std::to_string(done) + "/" + std::to_string(total),
 					               total ? (float)done / total : 0.0f);
 				});
+			// Part paks land beside the main one, each carrying a tiny {"part_of": ...} manifest
+			// so the loader/UI never treats a part as a mod of its own.
+			for (size_t pi = 0; ok && pi < partsOut.size(); ++pi)
+			{
+				nlohmann::json pman;
+				pman["name"] = name + " (" + partsOut[pi].first + ")";
+				pman["part_of"] = name;
+				bfs::path pmanTmp = bfs::path(projDir) / (".mod.part" + std::to_string(pi) + ".json.tmp");
+				{ bfs::ofstream mo(pmanTmp, std::ios::trunc); if (mo) mo << pman.dump(2); }
+				auto pfiles = partsOut[pi].second;
+				pfiles.push_back({ "mod.json", pmanTmp.string() });
+				const std::string ppath = (bfs::path(outPath).parent_path() / partFiles[pi]).string();
+				ok = Package::Create(pfiles, ppath, method, level,
+					[](int done, int total)
+					{
+						StatusBar::Set("packmod", "Packaging mod part... " + std::to_string(done) + "/" + std::to_string(total),
+						               total ? (float)done / total : 0.0f);
+					}) && ok;
+				bfs::remove(pmanTmp, ec);
+				if (ok) std::cout << "[Package]\tmod part: " << ppath << " ("
+				                  << partsOut[pi].second.size() << " files)" << std::endl;
+			}
 			bfs::remove(manTmp, ec);   // the manifest is inside the pak now
 			bfs::remove_all(bfs::path(projDir) / ".modbasis.tmp", ec);   // basis copies are inside too
 		}
@@ -1048,7 +1169,7 @@ void EditorUI::ScanModsUi()
 	std::string root = GameRootFromBase();
 	if (root.empty()) return;
 	auto lower = [](std::string s) { for (char& c : s) c = (char)tolower((unsigned char)c); return s; };
-	auto manifest = [](ModRow& r) {
+	auto manifest = [](ModRow& r) -> bool {   // false = this pak is a split PART, not a mod
 		Package::File pf;
 		std::string man;
 		if (!r.path.empty() && pf.Open(r.path) && pf.Read("mod.json", man))
@@ -1056,6 +1177,7 @@ void EditorUI::ScanModsUi()
 			nlohmann::json j = nlohmann::json::parse(man, nullptr, false);
 			if (!j.is_discarded() && j.is_object())
 			{
+				if (!j.value("part_of", std::string()).empty()) return false;   // mounted by its main mod
 				r.name = j.value("name", r.name);
 				if (j.contains("requires") && j["requires"].is_array())
 					for (auto& q : j["requires"])
@@ -1066,6 +1188,7 @@ void EditorUI::ScanModsUi()
 						}
 			}
 		}
+		return true;
 	};
 	boost::system::error_code ec;
 	std::set<std::string> seen;   // lowercase file names already listed (config entries)
@@ -1089,7 +1212,7 @@ void EditorUI::ScanModsUi()
 			                     bfs::path(root) / "mods" / entry, bfs::path(root) / "mods" / r.file };
 			for (bfs::path& c : cand) if (bfs::exists(c, ec) && !bfs::is_directory(c, ec)) { r.path = c.string(); break; }
 			r.found = !r.path.empty();
-			manifest(r);
+			if (!manifest(r)) { seen.insert(lower(r.file)); continue; }   // split part: rides with its main mod
 			for (const std::string& mp : Package::MountedPaks())
 			{
 				boost::system::error_code ec2;
@@ -1099,7 +1222,8 @@ void EditorUI::ScanModsUi()
 			modsUi.push_back(std::move(r));
 		}
 
-	// Disabled mods: .numod files in mods/ that the config doesn't list.
+	// Disabled mods: .numod files in mods/ that the config doesn't list (split parts hidden —
+	// they ride with their main mod, never listed on their own).
 	for (bfs::directory_iterator it(bfs::path(root) / "mods", ec), end; it != end && !ec; it.increment(ec))
 	{
 		if (bfs::is_directory(it->path()) || it->path().extension() != ".numod") continue;
@@ -1108,7 +1232,7 @@ void EditorUI::ScanModsUi()
 		r.path = it->path().string();
 		r.file = it->path().filename().string();
 		r.name = it->path().stem().string();
-		manifest(r);
+		if (!manifest(r)) continue;
 		modsUi.push_back(std::move(r));
 	}
 
@@ -1144,6 +1268,11 @@ void EditorUI::SaveEditorMods()
 	if (out) out << ej.dump(2);
 	Package::UnmountAll();
 	Package::Mount(basePakPath, 0);
+	// The DLC layer is part of the game the modder targets — remount it too (base name from
+	// the base pak's own manifest; legacy bases carry none).
+	Package::PakInfo basePi;
+	Package::ReadPakInfo(basePakPath, basePi);
+	Package::MountDlcs(root, basePi.name);
 	int n = Package::MountModList(root, entries);   // empty list still clears the mod metadata
 	std::cout << "[editor]\t\teditor mods remounted (base + " << n << ") — reopen the world to apply" << std::endl;
 	modsUiTick = -1;   // rescan (mounted flags)
@@ -1211,6 +1340,16 @@ void EditorUI::DrawPackageModPopup()
 		else if (bfs::exists(target, ec))
 			ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1), "A mod with this name exists - it will be updated.");
 
+		// Split: ship one .numod, or side "part" paks — by heavy content class, or greedily
+		// capped by raw size. Worlds/basis/manifest/scripts always stay in the MAIN pak.
+		ImGui::SetNextItemWidth(300);
+		ImGui::Combo("Split", &modSplitMode, "None (single file)\0By content type (textures/audio/meshes)\0Size cap per file\0");
+		if (modSplitMode == 2)
+		{
+			ImGui::SetNextItemWidth(300);
+			if (ImGui::InputInt("Cap (MB)", &modSplitCapMB, 64, 256) && modSplitCapMB < 16) modSplitCapMB = 16;
+		}
+
 		ImGui::Separator();
 		ImGui::BeginDisabled(!nameOk);
 		if (ImGui::Button("Package", ImVec2(120, 0)))
@@ -1225,6 +1364,195 @@ void EditorUI::DrawPackageModPopup()
 		if (ImGui::Button("Cancel", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
 		ImGui::EndPopup();
 	}
+}
+
+// --- Package DLC (developer-only) --------------------------------------------------------------
+// A DLC is the SAME .nupak container as the base game, but it ships ONLY what is new or
+// changed against a shipped base pak (crc diff over the cooked project), carries a pak.json
+// {"kind":"dlc","name":...,"base":<base pak name>,"platforms":[...]} and lands in the base
+// game's content/dlc/ — mounted by the runtime between the base and the mods. Built from the
+// developer's RAW project only; DLC paks themselves are never editable (PrepareMountedProject
+// refuses them).
+void EditorUI::PackageDlcCmd()
+{
+	if (packDlcName[0] == 0)
+	{
+		strncpy(packDlcName, "DLC1", sizeof(packDlcName) - 1);
+		packDlcName[sizeof(packDlcName) - 1] = 0;
+	}
+	// Pre-fill the base pak path from this project's own dist, when one was built here.
+	if (packDlcBase[0] == 0)
+	{
+		bfs::path guess = (distPath.empty() ? bfs::path(projectDir) / "dist"
+		                  : (bfs::path(distPath).is_absolute() ? bfs::path(distPath)
+		                                                       : bfs::path(projectDir) / distPath))
+		                  / "content" / "game.nupak";
+		boost::system::error_code ec;
+		if (bfs::exists(guess, ec))
+		{
+			strncpy(packDlcBase, guess.string().c_str(), sizeof(packDlcBase) - 1);
+			packDlcBase[sizeof(packDlcBase) - 1] = 0;
+		}
+	}
+	openPackageDlcPopup = true;
+}
+
+void EditorUI::DrawPackageDlcPopup()
+{
+	if (openPackageDlcPopup)
+	{
+		ImGui::OpenPopup("Package DLC");
+		openPackageDlcPopup = false;
+	}
+	if (ImGui::BeginPopupModal("Package DLC", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+	{
+		ImGui::SetNextItemWidth(300);
+		ImGui::InputText("DLC name", packDlcName, sizeof(packDlcName));
+		ImGui::SetNextItemWidth(300);
+		ImGui::InputText("Base game.nupak", packDlcBase, sizeof(packDlcBase));
+		ImGui::SameLine();
+		if (ImGui::Button("Browse..."))
+		{
+			std::string p = EditorPickProjectFile();
+			if (!p.empty()) { strncpy(packDlcBase, p.c_str(), sizeof(packDlcBase) - 1); packDlcBase[sizeof(packDlcBase) - 1] = 0; }
+		}
+		std::string name = packDlcName;
+		bool nameOk = !name.empty();
+		for (char c : name) nameOk &= (std::isalnum((unsigned char)c) || c == '_' || c == '-' || c == ' ');
+		boost::system::error_code ec;
+		const bool baseOk = packDlcBase[0] != 0 && bfs::exists(bfs::path(packDlcBase), ec)
+		                 && bfs::path(packDlcBase).extension() == ".nupak";
+		if (!nameOk)      ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.2f, 1), "Name: letters, digits, space, _ and - only.");
+		else if (!baseOk) ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.2f, 1), "Pick the SHIPPED base game.nupak this DLC extends.");
+		else
+		{
+			bfs::path gameRoot = bfs::path(packDlcBase).parent_path();
+			if (gameRoot.filename() == "content") gameRoot = gameRoot.parent_path();
+			ImGui::TextDisabled("-> %s", (gameRoot / "content" / "dlc" / (name + ".nupak")).string().c_str());
+			ImGui::TextDisabled("Ships ONLY what's new/changed vs the base. Not editable by players/modders.");
+		}
+		ImGui::Separator();
+		ImGui::BeginDisabled(!nameOk || !baseOk);
+		if (ImGui::Button("Package", ImVec2(120, 0)))
+		{
+			PackageDlc(name, packDlcBase);
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::EndDisabled();
+		ImGui::SameLine();
+		if (ImGui::Button("Cancel", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
+		ImGui::EndPopup();
+	}
+}
+
+void EditorUI::PackageDlc(const std::string& dlcNameIn, const std::string& basePakIn)
+{
+	if (!basePakPath.empty())
+	{
+		std::cout << "[Package]\tDLC packs from the RAW developer project only." << std::endl;
+		return;
+	}
+	std::string name = dlcNameIn.empty() ? std::string("DLC") : dlcNameIn;
+	for (char& c : name) if (strchr("\\/:*?\"<>|", c)) c = '_';   // filename-safe
+	// Game-thread snapshots (same set the project pack takes): the cooker runs off-thread.
+	const std::string projDir = projectDir, projFile = projectFile, content = contentDir;
+	const std::string base = basePakIn;
+	const int method = pakMethod, level = pakLevel;   // a DLC is a release artifact like the base
+	std::string distStr = distPath.empty() ? (bfs::path(projectDir) / "dist").string()
+	                    : (bfs::path(distPath).is_absolute() ? distPath
+	                                                         : (bfs::path(projectDir) / distPath).string());
+	std::map<std::string, std::vector<std::string>> guidFiles;
+	{
+		ResDB* db = ResDB::getSingleton();
+		for (auto& kv : db->pathByGuid) guidFiles[kv.first].push_back(kv.second);
+		for (nuke::Shader* sh : db->shaders)
+			if (sh && !sh->vsPath.empty())
+			{
+				guidFiles[sh->guid].push_back(sh->vsPath);
+				if (!sh->psPath.empty()) guidFiles[sh->guid].push_back(sh->psPath);
+			}
+			else if (sh && sh->isPost && !sh->psPath.empty())
+				guidFiles[sh->guid].push_back(sh->psPath);
+	}
+	StatusBar::Set("packdlc", "Packaging DLC...", StatusBar::kIndeterminate);
+	nuke::Jobs::Schedule([projDir, projFile, content, base, name, method, level, distStr, guidFiles]()
+	{
+		boost::system::error_code ec;
+		Package::File bf;
+		if (!bf.Open(base))
+		{
+			std::cout << "[Package]\tDLC: base pak unreadable: " << base << std::endl;
+			nuke::Jobs::RunOnMain([]() { StatusBar::Remove("packdlc"); });
+			return;
+		}
+		Package::PakInfo basePi;
+		Package::ReadPakInfo(base, basePi);   // legacy base -> empty name (folder-bound DLC)
+
+		// Cook the project exactly like Package Project (dependency closure + force-shipped
+		// shader/input files + the canonical manifest), then keep ONLY what the base pak
+		// doesn't already carry byte-identically: new files and crc-changed files.
+		auto all = CollectProject(projDir, false, DistPrefix(projDir, distStr));
+		std::set<std::string> used = CookUsedFiles(projDir, content, projFile, guidFiles);
+		std::vector<std::pair<std::string, std::string>> cooked;
+		for (auto& fp : all)
+		{
+			if (used.count(DiskKey(bfs::path(fp.second)))) { cooked.push_back(fp); continue; }
+			std::string low = fp.first;
+			for (char& c : low) c = (char)tolower((unsigned char)c);
+			auto ends = [&](const char* ext) {
+				const size_t n = strlen(ext);
+				return low.size() > n && low.compare(low.size() - n, n, ext) == 0;
+			};
+			if (ends(".hlsl") || ends(".nuinput")) cooked.push_back(fp);
+		}
+		cooked.push_back({ "game.nuproj", projFile });   // manifest rides too (world lists grew)
+		std::vector<std::pair<std::string, std::string>> files;
+		for (auto& fp : cooked)
+		{
+			const Package::Entry* e = bf.Find(fp.first);
+			if (!e) { files.push_back(fp); continue; }   // new vs the base -> ship
+			bfs::ifstream f(bfs::path(fp.second), std::ios::binary);
+			std::string raw((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+			if (Package::Crc32(raw.data(), raw.size()) != e->crc) files.push_back(fp);   // changed -> ship
+		}
+
+		bool ok = false;
+		std::string outPath;
+		if (files.empty())
+			std::cout << "[Package]\tDLC: nothing new against the base — nothing to pack." << std::endl;
+		else
+		{
+			nlohmann::json pj;
+			pj["kind"] = "dlc";
+			pj["name"] = name;
+			pj["base"] = basePi.name;   // "" for a legacy base: folder placement is the binding
+			pj["platforms"] = nlohmann::json::array({ Package::CurrentPlatform() });
+			bfs::path manTmp = bfs::path(projDir) / ".dlc.json.tmp";
+			{
+				bfs::ofstream mo(manTmp, std::ios::binary | std::ios::trunc);
+				if (mo) mo << pj.dump(2);
+			}
+			files.push_back({ "pak.json", manTmp.string() });
+			bfs::path gameRoot = bfs::path(base).parent_path();
+			if (gameRoot.filename() == "content") gameRoot = gameRoot.parent_path();
+			bfs::path outDir = gameRoot / "content" / "dlc";
+			bfs::create_directories(outDir, ec);
+			outPath = (outDir / (name + ".nupak")).string();
+			ok = Package::Create(files, outPath, method, level,
+				[](int done, int total)
+				{
+					StatusBar::Set("packdlc", "Packaging DLC... " + std::to_string(done) + "/" + std::to_string(total),
+					               total ? (float)done / total : 0.0f);
+				});
+			bfs::remove(manTmp, ec);
+		}
+		nuke::Jobs::RunOnMain([ok, outPath, name]()
+		{
+			StatusBar::Remove("packdlc");
+			if (ok) std::cout << "[Package]\tDLC ready: " << outPath
+			                  << " — mounts automatically from content/dlc/ at game boot." << std::endl;
+		});
+	});
 }
 
 // --- Game Build dialog (File -> Package Project) ---------------------------------------------
@@ -1372,6 +1700,18 @@ void EditorUI::DrawPackageProjectPopup()
 // game content). Package Mod later packs exactly what the modder created.
 std::string EditorUI::PrepareMountedProject(const std::string& pakAbs)
 {
+	// DLC paks are developer-only artifacts: a point diff over a base game, never editable as
+	// a project — the developer rebuilds them from the RAW project instead.
+	{
+		Package::PakInfo pi;
+		if (Package::ReadPakInfo(pakAbs, pi) && pi.kind == "dlc")
+		{
+			std::cout << "[Package]\t'" << bfs::path(pakAbs).filename().string()
+			          << "' is a DLC pak — not editable. Open the base game's pak (modding) or "
+			          << "the developer's raw project instead." << std::endl;
+			return std::string();
+		}
+	}
 	if (!Package::Mount(pakAbs, 0))
 	{
 		std::cout << "[Package]\tcan't open archive: " << pakAbs << std::endl;
@@ -1387,6 +1727,13 @@ std::string EditorUI::PrepareMountedProject(const std::string& pakAbs)
 	{
 		bfs::path gameRoot = pak.parent_path();
 		if (gameRoot.filename() == "content") gameRoot = gameRoot.parent_path();
+		// The DLC layer is part of the game a modder authors against — mounted between the
+		// base (0) and the session's mods (1000+), same stack the player builds.
+		{
+			Package::PakInfo basePi;
+			Package::ReadPakInfo(pakAbs, basePi);
+			Package::MountDlcs(gameRoot.string(), basePi.name);
+		}
 		std::vector<std::string> em;
 		bfs::ifstream ef(work / "editor_mods.json");
 		if (ef)

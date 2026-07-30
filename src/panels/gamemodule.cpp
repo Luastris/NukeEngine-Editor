@@ -391,6 +391,11 @@ void EditorUI::DiscoverProjectModules()
 		const bool listed = std::find(enabledPlugins.begin(), enabledPlugins.end(), m->moduleFile) != enabledPlugins.end();
 		if (!listed && pluginListLoaded)
 		{
+			// Diagnostic: this is the only boot-time single push into the plugin list — name
+			// the module loudly (a corrupted pool entry once smuggled binary garbage into the
+			// saved .nuproj here).
+			std::cout << "[editor]\t\tproject module first sight: file='" << m->moduleFile
+			          << "' path='" << m->modulePath << "' title='" << m->title << "'" << std::endl;
 			enabledPlugins.push_back(m->moduleFile);   // first sight: wanted by definition
 			SaveProject();
 		}

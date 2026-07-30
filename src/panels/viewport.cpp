@@ -203,6 +203,9 @@ void EditorUI::winRender()
 	if (!win->render) return;
 	NukeUI::DocPanel("panel:render", "Render", &win->render, window_flags, 960, 620, [this]()
 	{
+	// Boot load in progress: locked — the world is still streaming in (gizmos/picking would
+	// operate on half a scene). The status bar reports progress.
+	if (bootLoading) { ImGui::TextDisabled("Loading project..."); return; }
 
 	// Smooth "focus selected": ease the editor camera toward the target each frame (orientation kept).
 	if (camFocusing && editorCam && editorCam->transform)

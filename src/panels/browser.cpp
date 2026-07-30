@@ -340,12 +340,13 @@ void EditorUI::BrowserForward()
 
 // Return `desired` if free, else append " (n)" before the extension until the name is unused —
 // so moving/creating never silently overwrites an existing file or folder of the same name.
+// An existing counter in the stem is stripped first: copying "Box (2).png" makes "Box (3).png".
 static bfs::path UniquePath(const bfs::path& desired)
 {
 	boost::system::error_code ec;
 	if (!bfs::exists(desired, ec)) return desired;
 	bfs::path dir = desired.parent_path();
-	std::string stem = desired.stem().string(), ext = desired.extension().string();
+	std::string stem = StripNameCounter(desired.stem().string()), ext = desired.extension().string();
 	for (int n = 2; ; ++n)
 	{
 		bfs::path cand = dir / (stem + " (" + std::to_string(n) + ")" + ext);
@@ -816,6 +817,9 @@ void EditorUI::winBrowser()
 	if (!win->browser) return;
 	NukeUI::DocPanel("panel:browser", "Browser", &win->browser, window_flags, 920, 380, [this]()
 	{
+	// Boot load in progress: locked — the content scan is still WRITING ResDB on a worker
+	// (previews/paths would race it).
+	if (bootLoading) { ImGui::TextDisabled("Loading project..."); return; }
 
 	// Back/Forward navigate the folder history while the browser is hovered. The chords come from the
 	// centralized hotkey pool (rebindable in Project Settings, conflict-aware); default M4/M5. They're

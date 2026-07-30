@@ -663,9 +663,11 @@ int main(int argc, char** argv)
 	// (Water creators/icons live in the NukeWater MODULE now — UE-style water plugin.)
 	nuke::RegisterComponentIcon({ "WindZone", "\xee\x86\xb0" /* ICON_LC_WIND */, { 0.63f, 0.9f, 0.78f, 0.92f } });
 
+	// Workers BEFORE SetUp: the project's heavy tail (content scan, shaders, the world) now
+	// loads in the background (EditorUI::StartBootLoad), so the pool must already exist.
+	nuke::Jobs::Init(Config::getSingleton()->jobWorkers, Config::getSingleton()->jobPinCores);   // worker pool (2.4)
 	editorinit();                       // SetUp: loads the project + activates its chosen plugins
 	instance->StartFixedThread();       // fixed-frequency update thread (idles until PIE plays)
-	nuke::Jobs::Init(Config::getSingleton()->jobWorkers, Config::getSingleton()->jobPinCores);   // worker pool (2.4)
 	NukeUI::AddDrawCallback(editorDraw); // editor draws via the UI module each frame
 	cout << "[main]\t\t\t" << "Editor UI initialized." << endl;
 
@@ -679,9 +681,11 @@ int main(int argc, char** argv)
     render->loop();
 
     cout << "[main]\t\t\t" << "shit down..." << endl;
+    // Persist editor state FIRST — before any teardown step that can wedge or die (thread
+    // joins, module unloads): the user's camera/selection/panels must survive a bad exit.
+    EditorUI::getSingleton()->SaveEditorState();
     AppInstance::GetSingleton()->StopFixedThread();
     nuke::Jobs::Shutdown();
-    EditorUI::getSingleton()->SaveEditorState();   // persist editor state (camera, selection, panels)
     Unload();   // runtime plugins first, then the render provider (its Shutdown deinits the renderer)
     return 0;
 }

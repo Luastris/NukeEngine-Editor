@@ -224,6 +224,8 @@ void EditorUI::Toolbar()
 		float centerW = bw * 4 + st.ItemSpacing.x * 3;
 		ImGui::SameLine();
 		ImGui::SetCursorPosX((winW - centerW) * 0.5f);
+		// PIE over a half-loaded boot world would snapshot (and later restore) a partial scene.
+		ImGui::BeginDisabled(bootLoading != 0);
 		if (ToolBtn(ICON_LC_PLAY, "Play", app->playState == 1, bw))
 		{
 			if (app->playState == 0)   // snapshot scene + edit target on entering play
@@ -278,6 +280,7 @@ void EditorUI::Toolbar()
 		                            : "PIE view: Game Camera — Main flag, else the first camera (click: keep the editor camera view)",
 		            !pieUseEditorCam && app->playState != 0, bw))
 			pieUseEditorCam = !pieUseEditorCam;
+		ImGui::EndDisabled();   // boot-load PIE lock
 
 		// RIGHT — camera projection (Perspective / Orthographic) + viewport draw mode (Solid / Wireframe)
 		float rightW = bw * 3 + st.ItemSpacing.x * 2;
@@ -307,6 +310,9 @@ void EditorUI::Draw()
 	nuke::Time::getSingleton()->NewFrame();   // real frame delta/elapsed (scripts & systems)
 
 	nuke::Jobs::PumpMain();   // deliver background-job results to the game thread (2.4)
+
+	if (!projectHubMode)
+		PumpBootLoad();   // background project load: pipelines/world staging + async-load pump (edit mode)
 
 	// DEV HOOKS (3.2 packaging tests): NUKE_PACKAGE=1 fires Package Project ~2.5 s after
 	// boot, NUKE_PACKAGE_MOD=1 fires Package Mod — headless verification without clicks.
@@ -381,7 +387,8 @@ void EditorUI::Draw()
 	}
 
 	// Hot-reload shaders + materials/textures edited on disk (~twice a second; cheap mtime checks).
-	if ((++hotReloadTick % 30) == 0)
+	// Gated during the boot load: the content scan is still WRITING ResDB on a worker.
+	if (!bootLoading && (++hotReloadTick % 30) == 0)
 	{
 		ResDB::getSingleton()->HotReloadShaders(AppInstance::GetSingleton()->render);
 		ResDB::getSingleton()->HotReloadAssets(AppInstance::GetSingleton()->render);
@@ -393,8 +400,9 @@ void EditorUI::Draw()
 	if (AppInstance::GetSingleton()->playState == 1)
 		AppInstance::GetSingleton()->currentWorld->Update();
 
-	// Restore the selection saved in editor_state.json, once the scene is loaded (by stable id, recursive).
-	if (pendingSelectId)
+	// Restore the selection saved in editor_state.json once the world is fully in (by stable id) —
+	// resolving against the still-growing boot world would silently drop the saved selection.
+	if (pendingSelectId && !bootLoading)
 	{
 		if (Atom* a = AppInstance::GetSingleton()->currentWorld->GetById(pendingSelectId))
 			AppInstance::GetSingleton()->selectedInHieararchy = a;
@@ -420,6 +428,7 @@ void EditorUI::Draw()
 	DrawSaveAsPopup();    // "Save World As" modal
 	DrawNewProjectPopup();      // "New Project" modal (File menu)
 	DrawPackageModPopup();      // "Package Mod" modal (pick the mod's name)
+	DrawPackageDlcPopup();      // "Package DLC" modal (name + the base pak to diff against)
 	DrawPackageProjectPopup();  // "Game Build" modal (game boot settings, then pack)
 	DrawSwitchConfirmPopup();   // unsaved-world guard before a project switch
 	TrackUndo();          // capture a selected-atom edit for undo when the UI settles
@@ -598,16 +607,18 @@ void EditorUI::RecordAdd(Atom* a)
 		[this, id, parent, index, json]{ ApplyAtomState(id, parent, index, json); });            // redo: re-add
 }
 
-void EditorUI::RecordReparent(Atom* a, long oldParent, int oldIndex)
+void EditorUI::RecordReparent(Atom* a, long oldParent, int oldIndex, const std::string& beforeJson)
 {
 	if (!a) return;
 	World* w = AppInstance::GetSingleton()->currentWorld;
 	long id = a->id.id, newParent = AtomParentId(a); int newIndex = AtomIndex(w, a);
 	if (oldParent == newParent && oldIndex == newIndex) return;
+	// Two snapshots: keep-world rewrote the locals on reparent, so undo needs the pre-move state
+	// (old-parent-relative) and redo the post-move state — one shared JSON restores a wrong pose.
 	std::string json = SaveAtomToString(a);
 	PushUndo("Reparent " + a->GetName(),
-		[this, id, oldParent, oldIndex, json]{ ApplyAtomState(id, oldParent, oldIndex, json); },
-		[this, id, newParent, newIndex, json]{ ApplyAtomState(id, newParent, newIndex, json); });
+		[this, id, oldParent, oldIndex, beforeJson]{ ApplyAtomState(id, oldParent, oldIndex, beforeJson); },
+		[this, id, newParent, newIndex, json]      { ApplyAtomState(id, newParent, newIndex, json); });
 }
 
 void EditorUI::RecordDelete(Atom* a)
@@ -641,15 +652,16 @@ static std::string AtomClipEnvelope(const std::string& atomJson)
 { return std::string("{\"nukeClipboard\":\"atom\",\"atom\":") + atomJson + "}"; }
 
 // "Box" -> "Box (2)" when a sibling at the destination already holds the name (first free N).
+// An existing counter is stripped first, so duplicating "Box (2)" yields "Box (3)", never "Box (2) (2)".
 static void UniquifySiblingName(World* w, Atom* a, long parentId)
 {
 	Atom* parent = parentId ? w->GetById(parentId) : nullptr;
 	auto& lst = parent ? parent->children : w->GetHierarchy();
 	auto taken = [&](const std::string& n)
 	{ for (Atom* s : lst) if (s && s != a && s->GetName() == n) return true; return false; };
-	std::string base = a->GetName();
-	if (!taken(base)) return;
-	for (int n = 2; n < 1000; ++n)
+	if (!taken(a->GetName())) return;
+	std::string base = StripNameCounter(a->GetName());
+	for (int n = 2; ; ++n)   // terminates: sibling list is finite, so some N is always free
 	{
 		std::string cand = base + " (" + std::to_string(n) + ")";
 		if (!taken(cand)) { a->SetName(cand); return; }
