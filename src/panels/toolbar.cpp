@@ -1,6 +1,7 @@
 // toolbar panel — EditorUI method definitions (translation unit).
 #include <editor/editorui.h>
 #include <API/Model/Light.h>
+#include <API/Model/Time.h>   // PIE enter/exit resets the game-speed scale
 #include <API/Model/Collider.h>   // primitives spawn with a matching collider by default
 #include <API/Model/Environment.h>
 #include <API/Model/ReflectionProbe.h>
@@ -13,6 +14,8 @@
 #include <iostream>                   // missing-type log line
 #include <algorithm>          // std::find (creator categories)
 #include <cstring>            // strcmp (NUKE_PACKAGE_MOD=<name> dev hook)
+#include <nlohmann/json.hpp>  // atom-clipboard envelope (copy/paste)
+using json = nlohmann::json;
 
 // ---- toolbar ----
 // A flat button that stays highlighted while `active` (radio/toggle look).
@@ -227,6 +230,9 @@ void EditorUI::Toolbar()
 			{
 				pieSnapshot  = app->currentWorld->SaveToString();
 				pieWorldPath = app->currentWorldPath;
+				// A fresh PIE session starts at NORMAL speed — a leftover Game.SetTimeScale
+				// from the previous session (slow-mo, freeze) must not leak in.
+				Time::getSingleton()->scale = 1.0;
 			}
 			app->playState = 1;
 		}
@@ -257,6 +263,8 @@ void EditorUI::Toolbar()
 			// A game script may have locked/hidden the cursor (Input.SetCursorMode) —
 			// stopping play must hand the editor a normal cursor back, always.
 			if (app->render) app->render->setCursorMode(0);
+			// ...and the game-speed setting dies with the session: edit mode runs at 1x.
+			Time::getSingleton()->scale = 1.0;
 			// ...and an in-flight Game.LoadWorldAsync must not survive into edit mode
 			// (activating a staged game world over the restored edit scene).
 			app->CancelWorldLoadAsync();
@@ -622,4 +630,86 @@ void EditorUI::DeleteSelectedAtom()
 	long id = a->id.id;
 	app->selectedInHieararchy = nullptr;
 	app->currentWorld->RemoveAtomById(id);               // deletes the atom + its subtree
+}
+
+// ---- atom clipboard (copy / cut / paste / duplicate) ----
+// Atoms travel as a JSON ENVELOPE on the OS clipboard: paste works across two running editors,
+// and stray clipboard text can never be mistaken for an atom. Only the pasted ROOT gets a
+// uniquified name — children are namespaced by their parent.
+
+static std::string AtomClipEnvelope(const std::string& atomJson)
+{ return std::string("{\"nukeClipboard\":\"atom\",\"atom\":") + atomJson + "}"; }
+
+// "Box" -> "Box (2)" when a sibling at the destination already holds the name (first free N).
+static void UniquifySiblingName(World* w, Atom* a, long parentId)
+{
+	Atom* parent = parentId ? w->GetById(parentId) : nullptr;
+	auto& lst = parent ? parent->children : w->GetHierarchy();
+	auto taken = [&](const std::string& n)
+	{ for (Atom* s : lst) if (s && s != a && s->GetName() == n) return true; return false; };
+	std::string base = a->GetName();
+	if (!taken(base)) return;
+	for (int n = 2; n < 1000; ++n)
+	{
+		std::string cand = base + " (" + std::to_string(n) + ")";
+		if (!taken(cand)) { a->SetName(cand); return; }
+	}
+}
+
+bool EditorUI::AtomClipboardAvailable()
+{
+	const char* clip = ImGui::GetClipboardText();
+	return clip && strstr(clip, "\"nukeClipboard\"") != nullptr;
+}
+
+void EditorUI::CopySelectedAtom()
+{
+	Atom* a = AppInstance::GetSingleton()->selectedInHieararchy;
+	if (!a || a->GetName() == "Editor Camera") return;   // the editor camera is not scene content
+	ImGui::SetClipboardText(AtomClipEnvelope(SaveAtomToString(a)).c_str());
+}
+
+void EditorUI::CutSelectedAtom()
+{
+	Atom* a = AppInstance::GetSingleton()->selectedInHieararchy;
+	if (!a || a->GetName() == "Editor Camera") return;
+	CopySelectedAtom();
+	DeleteSelectedAtom();   // undoable — a regretted cut comes back with Ctrl+Z
+}
+
+void EditorUI::PasteAtom()
+{
+	AppInstance* app = AppInstance::GetSingleton();
+	const char* clip = ImGui::GetClipboardText();
+	if (!clip || !strstr(clip, "\"nukeClipboard\"")) return;
+	json j = json::parse(clip, nullptr, false);
+	if (j.is_discarded() || j.value("nukeClipboard", std::string()) != "atom" || !j.contains("atom")) return;
+	Atom* a = CloneAtomFromString(j["atom"].dump());
+	if (!a) return;
+	// Placement: sibling AFTER the selection (same parent — the copy lands where you look);
+	// nothing selected -> end of the root level.
+	World* w = app->currentWorld;
+	Atom* sel = app->selectedInHieararchy;
+	long parentId = 0; int index = -1;
+	if (sel && sel->GetName() != "Editor Camera")
+	{ parentId = AtomParentId(sel); index = AtomIndex(w, sel) + 1; }
+	UniquifySiblingName(w, a, parentId);
+	w->InsertAtom(a, parentId, index);
+	app->selectedInHieararchy = a;
+	RecordAdd(a);
+}
+
+void EditorUI::DuplicateSelectedAtom()
+{
+	AppInstance* app = AppInstance::GetSingleton();
+	Atom* src = app->selectedInHieararchy;
+	if (!src || src->GetName() == "Editor Camera") return;
+	Atom* a = CloneAtomFromString(SaveAtomToString(src));   // clipboard untouched
+	if (!a) return;
+	World* w = app->currentWorld;
+	long parentId = AtomParentId(src); int index = AtomIndex(w, src) + 1;   // right below the source
+	UniquifySiblingName(w, a, parentId);
+	w->InsertAtom(a, parentId, index);
+	app->selectedInHieararchy = a;
+	RecordAdd(a);
 }

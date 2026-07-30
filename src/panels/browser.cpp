@@ -832,9 +832,9 @@ void EditorUI::winBrowser()
 		if (!ImGui::GetIO().WantTextInput)
 		{
 			auto chord = [&](const char* id) { nuke::Hotkey* h = hk->Find(id); return h && h->bound && ImGui::IsKeyChordPressed((ImGuiKeyChord)h->chord); };
-			if (chord("editor.browser.cut")   && !browserSel.empty()) { clipboard = { browserSel }; clipboardCut = true;  }
-			if (chord("editor.browser.copy")  && !browserSel.empty()) { clipboard = { browserSel }; clipboardCut = false; }
-			if (chord("editor.browser.paste")) BrowserPaste();
+			if (chord("editor.cut")   && !browserSel.empty()) { clipboard = { browserSel }; clipboardCut = true;  }
+			if (chord("editor.copy")  && !browserSel.empty()) { clipboard = { browserSel }; clipboardCut = false; }
+			if (chord("editor.paste")) BrowserPaste();
 		}
 	}
 

@@ -31,9 +31,13 @@ void EditorUI::RegisterHotkeys()
 	hk->Register("editor.browser.forward", "Browser: Forward", ImGuiKey_MouseX2, nullptr);
 	hk->Register("editor.delete",          "Delete",           ImGuiKey_Delete, nullptr);
 	hk->Register("editor.delete.force",    "Delete (no confirm)", ImGuiMod_Shift | ImGuiKey_Delete, nullptr);
-	hk->Register("editor.browser.cut",     "Browser: Cut",     ImGuiMod_Ctrl | ImGuiKey_X, nullptr);
-	hk->Register("editor.browser.copy",    "Browser: Copy",    ImGuiMod_Ctrl | ImGuiKey_C, nullptr);
-	hk->Register("editor.browser.paste",   "Browser: Paste",   ImGuiMod_Ctrl | ImGuiKey_V, nullptr);
+	// Generic clipboard chords, dispatched PER FOCUSED WINDOW like editor.delete: the browser
+	// acts on files, the hierarchy/viewport on atoms. One id each — the pool's conflict rule
+	// forbids a second binding of the same chord, so window-scoped actions must share ids.
+	hk->Register("editor.cut",       "Cut",       ImGuiMod_Ctrl | ImGuiKey_X, nullptr);
+	hk->Register("editor.copy",      "Copy",      ImGuiMod_Ctrl | ImGuiKey_C, nullptr);
+	hk->Register("editor.paste",     "Paste",     ImGuiMod_Ctrl | ImGuiKey_V, nullptr);
+	hk->Register("editor.duplicate", "Duplicate", ImGuiMod_Ctrl | ImGuiKey_D, nullptr);
 }
 
 // Fire bound hotkeys whose chord is pressed this frame. Each chord maps to exactly one bound hotkey

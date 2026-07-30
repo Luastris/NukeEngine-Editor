@@ -676,6 +676,15 @@ public:
 	void RecordReparent(Atom* a, long oldParent, int oldIndex);   // an atom moved in the hierarchy
 	void RecordDelete(Atom* a);                                   // an atom was deleted
 	void DeleteSelectedAtom();                                    // hierarchy: delete the selected atom (undoable)
+	// Atom clipboard (Edit menu / hierarchy / viewport). Copy puts the serialized subtree on the
+	// OS clipboard (JSON envelope — paste works across editor instances); paste clones with fresh
+	// ids as a sibling after the selection (root when nothing is selected); duplicate = one-step
+	// copy of the selection next to itself. All undoable.
+	void CopySelectedAtom();
+	void CutSelectedAtom();                                       // copy + undoable delete
+	void PasteAtom();
+	void DuplicateSelectedAtom();
+	bool AtomClipboardAvailable();                                // clipboard holds an atom envelope
 	void RemoveComponent(Atom* a, Component* c);                  // inspector: remove a component (undoable)
 	void RecordFileMove(const std::string& from, const std::string& to);   // a file/folder was renamed or moved
 	// Generic value edit (settings, paths, flags…): records before/after of any comparable value.

@@ -16,6 +16,7 @@ static bool s_camLookCapture = false;   // capture currently engaged
 #include "API/Model/Canvas.h"    // canvas 2D resize gizmo (corner/edge handles)
 #include <interface/ComponentIcons.h>   // registered entity icons (modules bring their own)
 #include <API/Model/Foliage.h>          // foliage paint brush (7.4)
+#include <reflect/Reflect.h>            // WaterRiver spline handles: the type lives in the water plugin — reach it by NAME
 #include <API/Model/DebugDraw.h>        // brush circle preview
 #include <functional>
 #include <cmath>
@@ -29,6 +30,10 @@ static bool s_camLookCapture = false;   // capture currently engaged
 // True while the canvas 2D rect gizmo is hovered/dragged this frame — the click-to-pick handler
 // must not steal (or deselect on) clicks meant for the handles.
 static bool s_canvasGizmoHot = false;
+
+// Same for the WaterRiver spline-point handles: while one is hovered/dragged the scene
+// click-pick AND the transform gizmo must not also react to the mouse.
+static bool s_riverGizmoHot = false;
 
 // Cast a ray from a screen point inside the viewport image and return the atom under it (null = none).
 // Shared by left-click selection and asset drag&drop onto an object.
@@ -232,6 +237,12 @@ void EditorUI::winRender()
 		if ((d  && d->bound  && ImGui::IsKeyChordPressed((ImGuiKeyChord)d->chord)) ||
 		    (df && df->bound && ImGui::IsKeyChordPressed((ImGuiKeyChord)df->chord)))
 			DeleteSelectedAtom();
+		// Atom clipboard works from the viewport as well (copy what you see, stamp duplicates).
+		auto chord = [&](const char* id) { nuke::Hotkey* h = hk->Find(id); return h && h->bound && ImGui::IsKeyChordPressed((ImGuiKeyChord)h->chord); };
+		if (chord("editor.copy"))      CopySelectedAtom();
+		if (chord("editor.cut"))       CutSelectedAtom();
+		if (chord("editor.paste"))     PasteAtom();
+		if (chord("editor.duplicate")) DuplicateSelectedAtom();
 	}
 
 	ImVec2 avail = ImGui::GetContentRegionAvail();
@@ -363,6 +374,248 @@ void EditorUI::winRender()
 			}
 		}
 
+		// --- WaterRiver spline handles: the control points are draggable right in the viewport.
+		// The water module already draws the spline + wire spheres while the atom is selected
+		// (its OnRender Overlay phase); here every point gets a screen-space circular handle.
+		// LMB-drag moves the point in the camera-facing plane through its grab position
+		// (Shift = the world XZ plane instead); the whole gesture is ONE undo entry (the
+		// entire `points` vector before/after). Ctrl+Click a handle deletes the point (a
+		// river keeps at least 2); Ctrl+Click near the drawn spline appends one at the
+		// clicked spot. Runs BEFORE the transform gizmo so a hot handle can mute it. -------
+		s_riverGizmoHot = false;
+		{
+			AppInstance* wapp = AppInstance::GetSingleton();
+			Atom* wsel = wapp->selectedInHieararchy;
+			// The WaterRiver TYPE lives in the water plugin DLL — the editor has ZERO compile-time
+			// knowledge of it. Find the component by its reflected type NAME (content compare:
+			// Component::name is a char* set in the ctor — == would compare pointers across DLLs
+			// and never hit, same rule as the entity icons), then reach the LIVE `points` vector
+			// through the reflection schema. Type or field missing (plugin not loaded) = no
+			// handles, silently.
+			nuke::Component* riv = nullptr;
+			std::vector<float>* rvPts = nullptr;
+			if (wsel && wapp->playState == 0)
+				for (nuke::Component* c : wsel->components)
+					if (c && c->name && !strcmp(c->name, "WaterRiver")) { riv = c; break; }
+			if (riv)
+				if (nuke::TypeInfo* rti = nuke::Registry_Find("WaterRiver"))
+					for (nuke::Field& rf : rti->fields)
+						if (rf.name == "points" && rf.type == nuke::FT::FloatList && rf.addr)
+							{ rvPts = (std::vector<float>*)rf.addr(riv); break; }
+			// Drag state survives frames; the component pointer doubles as an identity check so a
+			// selection/world change mid-drag ABORTS instead of writing into a different river.
+			static bool rvDragging = false; static int rvDragIdx = -1; static void* rvDragRiv = nullptr;
+			static std::vector<float> rvBefore;    // the whole vector at drag start (undo capture)
+			static Vector3 rvAnchor(0, 0, 0);      // dragged point's world pos at grab (plane anchor)
+			if (!possessed && riv && rvPts && riv->transform && editorCam && editorCam->transform)
+			{
+				ImVec2 rmin = ImGui::GetItemRectMin();
+				ImVec2 vsz  = ImGui::GetItemRectSize();
+				Transform* gcam = editorCam->transform;
+				Vector3 ge = gcam->globalPosition();
+				Vector3 gf = gcam->direction(), gu = gcam->up(), gr = gcam->right();
+				float aspect = (vsz.y > 0.0f) ? vsz.x / vsz.y : 1.0f;
+				glm::mat4 gv = glm::lookAtLH(
+					glm::vec3((float)ge.x, (float)ge.y, (float)ge.z),
+					glm::vec3((float)(ge.x + gf.x), (float)(ge.y + gf.y), (float)(ge.z + gf.z)),
+					glm::vec3((float)gu.x, (float)gu.y, (float)gu.z));
+				glm::mat4 gp = EditorCamProj(editorCam, aspect);   // the icons'/gizmo's exact view/proj
+				auto toScreen = [&](const Vector3& w, ImVec2& out) -> bool
+				{
+					glm::vec4 c = gp * gv * glm::vec4((float)w.x, (float)w.y, (float)w.z, 1.0f);
+					if (c.w <= 1e-4f) return false;
+					out = ImVec2(rmin.x + (c.x / c.w * 0.5f + 0.5f) * vsz.x,
+					             rmin.y + (0.5f - c.y / c.w * 0.5f) * vsz.y);
+					return true;
+				};
+				// Mouse ray from the SAME view (persp/ortho branches, matching PickAtScreen).
+				ImVec2 mp = ImGui::GetIO().MousePos;
+				auto mouseRay = [&](Vector3& ro, Vector3& rdir)
+				{
+					float ndcx = ((mp.x - rmin.x) / vsz.x) * 2.0f - 1.0f;
+					float ndcy = 1.0f - ((mp.y - rmin.y) / vsz.y) * 2.0f;
+					ro = ge; rdir = gf;
+					if (editorCam->projBlend >= 0.5f)
+					{
+						float oh = (editorCam->orthoSize > 1e-4f) ? editorCam->orthoSize : 1.0f, ow = oh * aspect;
+						ro = Vector3(ge.x + ndcx * ow * gr.x + ndcy * oh * gu.x,
+						             ge.y + ndcx * ow * gr.y + ndcy * oh * gu.y,
+						             ge.z + ndcx * ow * gr.z + ndcy * oh * gu.z);
+					}
+					else
+					{
+						float thf = tanf((float)editorCam->fov * 0.5f * 0.01745329252f);
+						rdir = Vector3(gf.x + ndcx * thf * aspect * gr.x + ndcy * thf * gu.x,
+						               gf.y + ndcx * thf * aspect * gr.y + ndcy * thf * gu.y,
+						               gf.z + ndcx * thf * aspect * gr.z + ndcy * thf * gu.z);
+					}
+				};
+
+				// Control points: atom-local -> world (world = pos + rot * local; rivers ignore
+				// atom scale — same rule as the river's own Rebuild).
+				Vector3 P = riv->transform->globalPosition();
+				Quaternion Q = riv->transform->globalRotation();
+				Quaternion Qc(-Q.x, -Q.y, -Q.z, Q.w);   // conjugate: world -> atom-local
+				const int n = (int)(rvPts->size() / 3);
+				std::vector<ImVec2>  hpos(n);
+				std::vector<Vector3> wpos(n);
+				for (int i = 0; i < n; ++i)
+				{
+					Vector3 lp((*rvPts)[i * 3], (*rvPts)[i * 3 + 1], (*rvPts)[i * 3 + 2]);
+					Vector3 rl = Q.Rotate(lp);
+					wpos[i] = Vector3(P.x + rl.x, P.y + rl.y, P.z + rl.z);
+					if (!toScreen(wpos[i], hpos[i])) hpos[i] = ImVec2(-10000, -10000);
+				}
+				int hover = -1;
+				if (ImGui::IsItemHovered() && !ImGuizmo::IsUsing())
+					for (int i = 0; i < n; ++i)
+					{
+						float dx = mp.x - hpos[i].x, dy = mp.y - hpos[i].y;
+						if (dx * dx + dy * dy < 8.0f * 8.0f) { hover = i; break; }
+					}
+
+				// One undo entry per gesture: restore/set the WHOLE points vector, resolved at
+				// undo time by atom id + type NAME + reflected field (pointers dangle across
+				// undo-recreated atoms, and the type itself stays plugin-side).
+				long aid = wsel->id.id;
+				auto pushPointsUndo = [&](const std::vector<float>& before, const std::vector<float>& after)
+				{
+					if (before == after) return;
+					auto set = [](long id, const std::vector<float>& v)
+					{
+						World* w = AppInstance::GetSingleton()->currentWorld;
+						Atom* a = w ? w->GetById(id) : nullptr;
+						nuke::TypeInfo* ti = a ? nuke::Registry_Find("WaterRiver") : nullptr;
+						if (!ti) return;
+						for (nuke::Component* c : a->components)
+							if (c && c->name && !strcmp(c->name, "WaterRiver"))
+								for (nuke::Field& f : ti->fields)
+									if (f.name == "points" && f.type == nuke::FT::FloatList && f.addr)
+										{ *(std::vector<float>*)f.addr(c) = v; return; }
+					};
+					PushUndo("Edit river points",
+						[set, aid, before]{ set(aid, before); },
+						[set, aid, after ]{ set(aid, after ); });
+					// The generic selected-atom settler (TrackUndo) must not ALSO record this
+					// gesture: drop its in-progress edit and adopt the post-edit state as the
+					// idle baseline (same idiom as the settings panels).
+					editing = false; editAtomId = 0;
+					idleAtomId = aid; idleSnap = SaveAtomToString(wsel); idleSnapValid = true;
+				};
+
+				// Ctrl+Click: delete the point under the cursor, or — near the drawn spline —
+				// append a new point at the end of the list at the clicked ground height.
+				bool rvClickDone = false;
+				if (!rvDragging && ImGui::IsItemHovered() && !ImGuizmo::IsUsing() &&
+				    ImGui::GetIO().KeyCtrl && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+				{
+					if (hover >= 0 && n > 2)   // keep at least 2 — below that there is no river
+					{
+						std::vector<float> before = *rvPts;
+						rvPts->erase(rvPts->begin() + hover * 3, rvPts->begin() + hover * 3 + 3);
+						pushPointsUndo(before, *rvPts);
+						hover = -1; rvClickDone = true;
+					}
+					else if (hover < 0 && n >= 2)
+					{
+						// Near the drawn spline? The module draws a Catmull-Rom through the
+						// points — walk the same curve here (subdivided per segment; click
+						// precision doesn't need the module's exact centripetal resample) and
+						// test the click against its projection.
+						bool nearSpline = false;
+						auto cpAt = [&](int i) -> const Vector3& { return wpos[std::min(std::max(i, 0), n - 1)]; };
+						for (int seg = 0; seg + 1 < n && !nearSpline; ++seg)
+						{
+							const Vector3& c0 = cpAt(seg - 1); const Vector3& c1 = cpAt(seg);
+							const Vector3& c2 = cpAt(seg + 1); const Vector3& c3 = cpAt(seg + 2);
+							for (int s2 = 0; s2 <= 8 && !nearSpline; ++s2)
+							{
+								const double u = s2 / 8.0, u2 = u * u, u3 = u2 * u;
+								Vector3 cp(0.5 * (2.0 * c1.x + (-c0.x + c2.x) * u + (2.0 * c0.x - 5.0 * c1.x + 4.0 * c2.x - c3.x) * u2 + (-c0.x + 3.0 * c1.x - 3.0 * c2.x + c3.x) * u3),
+								           0.5 * (2.0 * c1.y + (-c0.y + c2.y) * u + (2.0 * c0.y - 5.0 * c1.y + 4.0 * c2.y - c3.y) * u2 + (-c0.y + 3.0 * c1.y - 3.0 * c2.y + c3.y) * u3),
+								           0.5 * (2.0 * c1.z + (-c0.z + c2.z) * u + (2.0 * c0.z - 5.0 * c1.z + 4.0 * c2.z - c3.z) * u2 + (-c0.z + 3.0 * c1.z - 3.0 * c2.z + c3.z) * u3));
+								ImVec2 sp;
+								if (!toScreen(cp, sp)) continue;
+								float dx = mp.x - sp.x, dy = mp.y - sp.y;
+								nearSpline = (dx * dx + dy * dy < 14.0f * 14.0f);
+							}
+						}
+						if (nearSpline)
+						{
+							// Append at the clicked spot on the horizontal plane through the LAST
+							// point — the natural "keep extending the river" height.
+							Vector3 ro, rd; mouseRay(ro, rd);
+							if (fabs(rd.y) > 1e-8)
+							{
+								double tHit = (wpos[n - 1].y - ro.y) / rd.y;
+								if (tHit > 0.0)
+								{
+									Vector3 hit(ro.x + rd.x * tHit, ro.y + rd.y * tHit, ro.z + rd.z * tHit);
+									Vector3 lp = Qc.Rotate(Vector3(hit.x - P.x, hit.y - P.y, hit.z - P.z));
+									std::vector<float> before = *rvPts;
+									rvPts->push_back((float)lp.x);
+									rvPts->push_back((float)lp.y);
+									rvPts->push_back((float)lp.z);
+									pushPointsUndo(before, *rvPts);
+									rvClickDone = true;
+								}
+							}
+						}
+					}
+				}
+
+				// Drag lifecycle: grab on a plain LMB press over a handle; a selection/world
+				// switch mid-drag aborts; release records the single undo entry.
+				if (!rvDragging && !rvClickDone && hover >= 0 && !ImGui::GetIO().KeyCtrl &&
+				    ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+				{
+					rvDragging = true; rvDragIdx = hover; rvDragRiv = riv;
+					rvBefore = *rvPts; rvAnchor = wpos[hover];
+				}
+				if (rvDragging && rvDragRiv != (void*)riv)
+				{ rvDragging = false; rvDragIdx = -1; rvDragRiv = nullptr; }   // target gone: abort
+				if (rvDragging && !ImGui::IsMouseDown(ImGuiMouseButton_Left))
+				{
+					pushPointsUndo(rvBefore, *rvPts);
+					rvDragging = false; rvDragIdx = -1; rvDragRiv = nullptr;
+				}
+				if (rvDragging && rvDragIdx >= 0 && rvDragIdx < n)
+				{
+					// Drag plane: perpendicular to the camera forward, through the point's
+					// world position at grab time; Shift = the world XZ (horizontal) plane.
+					Vector3 ro, rd; mouseRay(ro, rd);
+					Vector3 pn = ImGui::GetIO().KeyShift ? Vector3(0, 1, 0) : gf;
+					double denom = rd.x * pn.x + rd.y * pn.y + rd.z * pn.z;
+					if (fabs(denom) > 1e-8)
+					{
+						double tHit = ((rvAnchor.x - ro.x) * pn.x + (rvAnchor.y - ro.y) * pn.y + (rvAnchor.z - ro.z) * pn.z) / denom;
+						if (tHit > 0.0)
+						{
+							Vector3 hit(ro.x + rd.x * tHit, ro.y + rd.y * tHit, ro.z + rd.z * tHit);
+							Vector3 lp = Qc.Rotate(Vector3(hit.x - P.x, hit.y - P.y, hit.z - P.z));
+							(*rvPts)[rvDragIdx * 3 + 0] = (float)lp.x;
+							(*rvPts)[rvDragIdx * 3 + 1] = (float)lp.y;
+							(*rvPts)[rvDragIdx * 3 + 2] = (float)lp.z;
+						}
+					}
+				}
+				s_riverGizmoHot = (hover >= 0) || rvDragging || rvClickDone;
+
+				// Handles on the viewport overlay: filled dot + dark outline; amber when hot.
+				ImDrawList* dl = ImGui::GetWindowDrawList();
+				for (int i = 0; i < n; ++i)
+				{
+					if (hpos[i].x < -999.0f) continue;
+					const bool hot = (i == hover) || (rvDragging && i == rvDragIdx);
+					const float rad = hot ? 7.0f : 6.0f;
+					dl->AddCircleFilled(hpos[i], rad, hot ? IM_COL32(255, 200, 60, 255) : IM_COL32(80, 180, 255, 230));
+					dl->AddCircle(hpos[i], rad, IM_COL32(20, 20, 20, 255), 0, 1.5f);
+				}
+			}
+			else if (rvDragging)
+			{ rvDragging = false; rvDragIdx = -1; rvDragRiv = nullptr; }   // context gone (PIE/possess/deselect): abort
+		}
+
 		// Transform gizmo over the selected object (only when a manip tool is active).
 		{
 			AppInstance* gapp = AppInstance::GetSingleton();
@@ -419,7 +672,11 @@ void EditorUI::winRender()
 				float gsnapv   = (gop == ImGuizmo::TRANSLATE) ? 0.5f : (gop == ImGuizmo::ROTATE) ? 15.0f : 0.1f;
 				float gsnap[3] = { gsnapv, gsnapv, gsnapv };
 				float* gsnapPtr = ImGui::GetIO().KeyCtrl ? gsnap : nullptr;   // hold Ctrl to snap
+				// A hot river-point handle owns the mouse: the gizmo draws muted and ignores input
+				// (Enable is sticky — restore it right after the call).
+				ImGuizmo::Enable(!s_riverGizmoHot);
 				ImGuizmo::Manipulate(gview, gproj, gop, gmode, gizmoMatrix, nullptr, gsnapPtr);
+				ImGuizmo::Enable(true);
 				if (ImGuizmo::IsUsing())
 				{
 					// Decompose the manipulated GLOBAL matrix, then convert back to LOCAL using this
@@ -658,7 +915,7 @@ void EditorUI::winRender()
 
 			// Left-click: pick the object under the cursor (null = deselect).
 			// Skip if the gizmo is being interacted with, so dragging it doesn't deselect.
-			if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGuizmo::IsUsing() && !ImGuizmo::IsOver() && !s_canvasGizmoHot && !foliagePainting)
+			if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGuizmo::IsUsing() && !ImGuizmo::IsOver() && !s_canvasGizmoHot && !s_riverGizmoHot && !foliagePainting)
 			{
 				ImVec2 rmin = ImGui::GetItemRectMin();
 				ImVec2 sz   = ImGui::GetItemRectSize();

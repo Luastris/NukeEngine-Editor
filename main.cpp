@@ -660,6 +660,7 @@ int main(int argc, char** argv)
 	nuke::RegisterAtomCreator({ "Effects", "Wind Zone", "\xee\x86\xb0" /* ICON_LC_WIND */, { "WindZone" } });
 	// ENGINE component icons for the viewport overlay (interface/ComponentIcons.h) — same
 	// registry the modules use; the viewport draws only from it, zero per-type hardcode.
+	// (Water creators/icons live in the NukeWater MODULE now — UE-style water plugin.)
 	nuke::RegisterComponentIcon({ "WindZone", "\xee\x86\xb0" /* ICON_LC_WIND */, { 0.63f, 0.9f, 0.78f, 0.92f } });
 
 	editorinit();                       // SetUp: loads the project + activates its chosen plugins

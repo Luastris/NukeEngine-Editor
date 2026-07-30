@@ -115,6 +115,20 @@ void EditorUI::DrawAtomNode(Atom* atom)
 		s_toggleSuppress = false;   // cleared once the click fully settles
 	if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) { app->selectedInHieararchy = atom; FocusSelected(); }
 
+	// Right-click: select + the atom clipboard menu (same ops as the Edit menu / chords).
+	if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right))
+		app->selectedInHieararchy = atom;
+	if (ImGui::BeginPopupContextItem("##atomctx"))
+	{
+		if (ImGui::MenuItem(ICON_LC_COPY " Copy"))            CopySelectedAtom();
+		if (ImGui::MenuItem(ICON_LC_SCISSORS " Cut"))         CutSelectedAtom();
+		if (ImGui::MenuItem(ICON_LC_CLIPBOARD_PASTE " Paste", nullptr, false, AtomClipboardAvailable())) PasteAtom();
+		if (ImGui::MenuItem(ICON_LC_COPY_PLUS " Duplicate"))  DuplicateSelectedAtom();
+		ImGui::Separator();
+		if (ImGui::MenuItem(ICON_LC_TRASH_2 " Delete"))       DeleteSelectedAtom();
+		ImGui::EndPopup();
+	}
+
 	if (ImGui::BeginDragDropSource())
 	{
 		ImGui::SetDragDropPayload("NUKE_ATOM", &atom, sizeof(Atom*));
@@ -201,6 +215,12 @@ void EditorUI::winHierarchy()
 		if ((d  && d->bound  && ImGui::IsKeyChordPressed((ImGuiKeyChord)d->chord)) ||
 		    (df && df->bound && ImGui::IsKeyChordPressed((ImGuiKeyChord)df->chord)))
 			DeleteSelectedAtom();
+		// Atom clipboard — the same generic chords the browser uses for files.
+		auto chord = [&](const char* id) { nuke::Hotkey* h = hk->Find(id); return h && h->bound && ImGui::IsKeyChordPressed((ImGuiKeyChord)h->chord); };
+		if (chord("editor.copy"))      CopySelectedAtom();
+		if (chord("editor.cut"))       CutSelectedAtom();
+		if (chord("editor.paste"))     PasteAtom();
+		if (chord("editor.duplicate")) DuplicateSelectedAtom();
 	}
 
 	// Apply deferred DnD now that the whole tree is drawn (mutating the lists mid-iteration corrupts it).

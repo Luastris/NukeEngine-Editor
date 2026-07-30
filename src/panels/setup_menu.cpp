@@ -325,9 +325,23 @@ void EditorUI::EditorMenu()
 			if (ImGui::MenuItem("Undo", "Ctrl+Z", false, !undoStack.empty())) Undo();
 			if (ImGui::MenuItem("Redo", "Ctrl+Y", false, !redoStack.empty())) Redo();
 			ImGui::Separator();
-			if (ImGui::MenuItem("Cut", "CTRL+X")) {}
-			if (ImGui::MenuItem("Copy", "CTRL+C")) {}
-			if (ImGui::MenuItem("Paste", "CTRL+V")) {}
+			// Atom clipboard: acts on the hierarchy selection. Chord labels come from the pool
+			// (rebindable); the actions are called directly — the pool entries stay callback-free
+			// because the same chords are dispatched per focused window (browser = files).
+			{
+				AppInstance* app = AppInstance::GetSingleton();
+				Atom* sel = app->selectedInHieararchy;
+				const bool haveSel = sel && sel->GetName() != "Editor Camera";
+				auto chordName = [](const char* id) -> const char*
+				{
+					nuke::Hotkey* h = nuke::Hotkeys::Get()->Find(id);
+					return (h && h->bound) ? ImGui::GetKeyChordName((ImGuiKeyChord)h->chord) : nullptr;
+				};
+				if (ImGui::MenuItem("Cut",       chordName("editor.cut"),       false, haveSel)) CutSelectedAtom();
+				if (ImGui::MenuItem("Copy",      chordName("editor.copy"),      false, haveSel)) CopySelectedAtom();
+				if (ImGui::MenuItem("Paste",     chordName("editor.paste"),     false, AtomClipboardAvailable())) PasteAtom();
+				if (ImGui::MenuItem("Duplicate", chordName("editor.duplicate"), false, haveSel)) DuplicateSelectedAtom();
+			}
 			ImGui::Separator();
 			// ENGINE-wide preferences (per machine/user, not per project) — external editor etc.
 			if (ImGui::MenuItem(ICON_LC_SETTINGS_2 " Preferences...")) { prefsOpen = true; prefsFocus = true; }
