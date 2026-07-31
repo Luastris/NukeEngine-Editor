@@ -1,9 +1,9 @@
-// setup_menu panel — EditorUI method definitions (translation unit).
+// EditorUI setup, boot loading, style and main menu bar.
 #include <editor/editorui.h>
-#include <import/assimporter.h>   // drag&drop import (ImportAny)
-#include <API/Model/Package.h>    // mounted-pak session (3.2)
-#include <API/Model/Jobs.h>       // background boot load (StartBootLoad)
-#include <API/Model/StatusBar.h>  // step-by-step boot reporting
+#include <import/assimporter.h>
+#include <API/Model/Package.h>
+#include <API/Model/Jobs.h>
+#include <API/Model/StatusBar.h>
 namespace bfs = boost::filesystem;
 
 void EditorUI::SetUp()
@@ -13,7 +13,6 @@ void EditorUI::SetUp()
 
 	win = &Config::getSingleton()->window;
 
-	// The UI module owns the font atlas, but the APP chooses its font.
 	ImGuiIO& io = ImGui::GetIO();
 	if (!win->mainFont.empty())
 	{
@@ -24,18 +23,15 @@ void EditorUI::SetUp()
 	{
 		io.Fonts->AddFontDefault();
 	}
-	// Merge Lucide icons on top so toolbar/panels can use ICON_LC_* glyphs.
-	// Lucide glyphs sit high in the line, so nudge them down to centre.
+	// Lucide glyphs sit high in the line — the 4.0f offset nudges them to centre.
 	NukeUI::MergeIconFont("fonts/lucide.ttf", 20.0f, 4.0f);
 
 	InitMenu();
 
-	// PROJECT HUB boot (no project chosen): none of the project machinery runs — no panels,
-	// no .nuproj load, no content scan, no world. Draw() renders only the hub window
-	// (recent / open / create); picking a project relaunches the editor on it.
+	// Project hub boot (no project chosen): no panels, no .nuproj, no world — Draw() shows only the hub.
 	if (projectHubMode)
 	{
-		LoadPreferences();   // recent-projects list + machine prefs (backend, detach, ...)
+		LoadPreferences();   // recent-projects list + machine prefs
 		cout << "[editorui]\t\t" << "Project hub: no project loaded." << endl;
 		return;
 	}
@@ -54,49 +50,42 @@ void EditorUI::SetUp()
 		editorCam = camObj->GetComponent<Camera>();
 	if (editorCam)
 	{
-		// Park the editor camera so it looks at the origin (camera control TODO).
 		editorCam->transform->position.x = 0; editorCam->transform->position.y = 0; editorCam->transform->position.z = -5;
-		editorCam->fov = 60.0f;   // 90 vertical is too wide → strong edge distortion
-		// rotation defaults to identity quaternion (looks +Z, at the origin).
+		editorCam->fov = 60.0f;
 	}
-	// (meshGuid/matGuid now render as asset pickers via their [[nuke::prop(asset=...)]] metadata.)
-	RegisterInspectorOverrides();   // per-type custom inspector drawing (e.g. MeshRenderer material panel)
-	RegisterHotkeys();              // editor's built-in hotkeys (plugins add their own on load)
+	RegisterInspectorOverrides();   // per-type custom inspector drawing
+	RegisterHotkeys();              // built-in hotkeys
 
-	LoadPreferences();   // engine-wide (%APPDATA%) FIRST: recent-projects list must be in
-	                     // memory before LoadProject records this project into it
-	LoadProject();   // .nuproj: content dir, startup world, plugin load list, hotkey bindings (default if missing)
-	PushRecentProject(projectFile);   // machine-wide recent list ("open last project" startup)
+	LoadPreferences();   // FIRST: the recent-projects list must be in memory before LoadProject records this project
+	LoadProject();   // .nuproj: content dir, startup world, plugin list, hotkey bindings
+	PushRecentProject(projectFile);
 
-	// Project-local C++ GAME modules (<project>/modules, Phase 6.0) join the shared pool
-	// BEFORE the plugin list applies — their types must register before the world loads.
+	// Project-local C++ game modules join the shared pool BEFORE the plugin list applies —
+	// their types must register before the world loads.
 	DiscoverProjectModules();
 
-	// Activate the project's chosen plugins from the shared pool (InitModules discovered
-	// them already). Types register here (OnLoad) BEFORE the world auto-loads, so a world's
-	// components resolve; plugins left off keep their components as inert placeholders.
+	// Plugin types register here (OnLoad) BEFORE the world auto-loads, so a world's components
+	// resolve; plugins left off keep their components as inert placeholders.
 	ApplyProjectPlugins();
 
-	// Now that plugin hotkeys are registered too, apply the project's saved bindings over the defaults.
+	// Plugin hotkeys are registered by now: saved bindings can override the defaults.
 	nuke::Hotkeys::Get()->ApplyBindings(pendingHotkeyBinds);
 
-	// Project content folder (imported assets live here). Create it + open the browser there.
 	boost::system::error_code ec;
 	bfs::create_directories(contentDir, ec);
 	browserCwd = contentDir;
 
-	// Content relative paths (scripts etc.) resolve against the project, not the exe root.
+	// Content-relative paths (scripts etc.) resolve against the project, not the exe root.
 	AppInstance::GetSingleton()->contentRoot = contentDir;
 
-	if (iRender* r = AppInstance::GetSingleton()->render)   // push global RTX reflection settings (config/main.json)
+	if (iRender* r = AppInstance::GetSingleton()->render)   // global RTX reflection settings
 	{
 		nuke::NukeRT& rt = nuke::Config::getSingleton()->rt;
 		r->setRTReflection(rt.intensity, rt.maxDist, rt.bounces, rt.roughCutoff);
 	}
 
-	// Drag&drop from the desktop/Explorer -> import the dropped model/image into the current
-	// browser folder. ASYNC (2.4): the conversion runs on a worker — a dropped FBX must not
-	// freeze the frame (this was the last synchronous import path).
+	// Explorer drag&drop -> import into the current browser folder, on a worker so a dropped FBX
+	// does not freeze the frame.
 	AppInstance::GetSingleton()->render->setOnFileDrop([this](const char* p) {
 		std::string dest = browserCwd.empty() ? contentDir : browserCwd;
 		std::string src = p;
@@ -105,18 +94,11 @@ void EditorUI::SetUp()
 		});
 	});
 
-	// The heavy tail — content scan, shader loads, pipeline compiles, the boot world — runs in
-	// the BACKGROUND from here (roadmap: fast editor boot). The window and panels are already
-	// up; Hierarchy/Inspector/Viewport/Browser stay locked and the status bar reports each step
-	// until PumpBootLoad() (called every frame from Draw) flips bootLoading back to 0.
-	StartBootLoad();
+	StartBootLoad();   // content, shaders, pipelines and the world load in the background
 
 	cout << "[editorui]\t\t" << "EditorUI up — project content loading in background." << endl;
 }
 
-// Background tail of SetUp(): scan content and load shader sources on a worker, then hop back
-// to the game thread for GPU-facing steps and stage the boot world asynchronously. Split off
-// so the editor window appears immediately instead of after the whole project load.
 void EditorUI::StartBootLoad()
 {
 	bootLoading = 1;
@@ -125,55 +107,43 @@ void EditorUI::StartBootLoad()
 	const std::string cdir = contentDir;
 	nuke::Jobs::Schedule([this, mounted, cdir]()
 	{
-		// Worker-safe half: pure disk + CPU. Panels that read ResDB are locked while this runs.
-		// Checkpoints between the steps (and inside the scans themselves): closing the editor
-		// mid-boot must exit promptly — Jobs::Shutdown JOINS this job.
+		// Disk + CPU only. Jobs::Shutdown JOINS this job, hence the Stopping() checkpoints.
 		ResDB::getSingleton()->LoadContentDir(cdir);
 		if (nuke::Jobs::Stopping()) return;
 		if (mounted)
 		{
-			// Opened from a .nupak (3.2): the base game is MOUNTED read-only (Bethesda-style,
-			// no extraction) — register its assets too; the raw dir is the modder's overlay.
 			nuke::StatusBar::Set("boot", "Loading packaged content...", nuke::StatusBar::kIndeterminate);
 			ResDB::getSingleton()->LoadContentPackaged();
-			ResDB::getSingleton()->LoadShadersPackaged();   // content shaders straight from pak bytes
+			ResDB::getSingleton()->LoadShadersPackaged();
 			if (nuke::Jobs::Stopping()) return;
 		}
-		// Shaders from two roots: engine built-in (shaders/) then project (content/). Engine wins
-		// on name clashes, so a project can't shadow the built-in "world" default by accident.
+		// Engine built-ins first: a project must not shadow the built-in "world" default.
 		nuke::StatusBar::Set("boot", "Loading shaders...", nuke::StatusBar::kIndeterminate);
 		ResDB::getSingleton()->LoadShadersDir("shaders");
 		ResDB::getSingleton()->LoadShadersDir(cdir);
 		if (nuke::Jobs::Stopping()) return;
 		nuke::Jobs::RunOnMain([this]()
 		{
-			// Game-thread tail: GPU resources + editor state, then stage the world. Pipelines
-			// are NOT built here in one gulp — PumpBootLoad compiles a couple per frame.
 			AppInstance* editor = AppInstance::GetSingleton();
-			ResDB::getSingleton()->CreateRenderTextures(editor->render);   // RTs for RenderTextures
-			// Editor state (project-tied): camera, selection, browser + panel state, lastWorld.
+			ResDB::getSingleton()->CreateRenderTextures(editor->render);
 			LoadEditorState();
 			// Boot world = the last one open (editor_state.json), else the project default.
 			boost::system::error_code ec;
 			bootWorldRel = (!lastWorld.empty() && bfs::exists(bfs::path(editor->WorldFullPath(lastWorld)), ec))
 			             ? lastWorld : startupWorld;
 			bootPrevActBudget = editor->GetWorldActivationBudget();
-			editor->SetWorldActivationBudget(6.0);   // ms/frame: atoms stream in without hitching the UI
+			editor->SetWorldActivationBudget(6.0);   // ms/frame
 			if (!bootWorldRel.empty())
-				editor->StartWorldLoadAsync(bootWorldRel);   // read+merge+parse on a worker
+				editor->StartWorldLoadAsync(bootWorldRel);
 			bootLoading = 2;
 		});
 	});
 }
 
-// Per-frame boot pump (called from Draw): finishes material pipelines a couple per frame,
-// activates the staged world under the activation budget, then holds ONE more locked frame
-// (lazy shader bursts — water — land there) before unlocking the panels.
+// Also drives the async-world machinery in edit mode, where World::Update never runs.
 void EditorUI::PumpBootLoad()
 {
 	AppInstance* app = AppInstance::GetSingleton();
-	// Outside PIE nothing pumps the async world machinery (World::Update is PIE-gated in the
-	// editor) — pump it here so background loads work in edit mode too, boot or not.
 	if (app->playState == 0)
 	{
 		app->ApplyAsyncWorldLoad();
@@ -190,21 +160,20 @@ void EditorUI::PumpBootLoad()
 			return;
 		}
 		if (app->WorldLoadReady())
-			app->ActivateLoadedWorld();   // swap happens in the pump above next frame
+			app->ActivateLoadedWorld();   // the swap happens in the pump above, next frame
 		const double lp = app->WorldLoadProgress(), ap = app->WorldActivationProgress();
 		if      (ap >= 0) nuke::StatusBar::Set("boot", "Activating world...", (float)ap);
 		else if (lp >= 0) nuke::StatusBar::Set("boot", "Loading world '" + bootWorldRel + "'...", (float)lp);
 		else
 		{
-			// Both idle: the world finished (or was empty/missing — already logged). Housekeep.
+			// Both idle: the world is in (or was missing — already logged).
 			app->SetWorldActivationBudget(bootPrevActBudget);
-			SyncWorldBaseline();   // baseline = the world we just opened (title, dirty "*")
-			// Dev hook (NUKE_OPEN_ASSET=<content-relative path>): open asset editors after the
-			// content is actually in — same family as NUKE_GM_NEW/NUKE_GM_BUILD.
+			SyncWorldBaseline();
+			// Dev hook: NUKE_OPEN_ASSET=<content-relative path>[;<path>...]
 			if (const char* oa = std::getenv("NUKE_OPEN_ASSET"))
 				if (oa[0])
 				{
-					std::string all = oa;   // ';'-separated list
+					std::string all = oa;
 					for (size_t p = 0; p < all.size(); )
 					{
 						size_t q = all.find(';', p);
@@ -228,7 +197,6 @@ void EditorUI::PumpBootLoad()
 	cout << "[editorui]\t\t" << "Project loaded — editor unlocked." << endl;
 }
 
-// NukeEngine dark theme (ported from the old gui.cpp to imgui 1.92 enums).
 void EditorUI::ApplyStyle()
 {
 	ImGuiStyle* s = &ImGui::GetStyle();
@@ -282,7 +250,7 @@ void EditorUI::ApplyStyle()
 	c[ImGuiCol_PlotHistogramHovered] = ImVec4(0.25f, 1.00f, 0.00f, 1.00f);
 	c[ImGuiCol_TextSelectedBg]       = ImVec4(0.25f, 1.00f, 0.00f, 0.43f);
 	c[ImGuiCol_ModalWindowDimBg]     = ImVec4(0.00f, 0.00f, 0.00f, 0.55f);   // dark dim, not a white flash
-	// Docking-branch tab / dock colors (kept dark so the light label text reads).
+	// Docking tab / dock colors, kept dark so the light label text reads.
 	c[ImGuiCol_Tab]                       = ImVec4(0.10f, 0.09f, 0.12f, 1.00f);
 	c[ImGuiCol_TabHovered]                = ImVec4(0.24f, 0.23f, 0.29f, 1.00f);
 	c[ImGuiCol_TabSelected]               = ImVec4(0.18f, 0.17f, 0.22f, 1.00f);
@@ -331,16 +299,13 @@ void EditorUI::EditorMenu()
 	{
 		if (ImGui::BeginMenu("File"))
 		{
-			// Projects: create a fresh one, or open ANY form — raw .nuproj (development),
-			// packed .nupak (release game, mounted read-only + mod overlay), .numod (mod).
-			// Switching relaunches the editor on the picked path (project lifecycle = boot).
+			// Open accepts .nuproj, .nupak or .numod; switching relaunches the editor on the picked path.
 			if (ImGui::MenuItem(ICON_LC_FOLDER_PLUS " New Project...")) openNewProjectPopup = true;
 			if (ImGui::MenuItem(ICON_LC_FOLDER_OPEN " Open Project...")) OpenProjectCmd();
 			ImGui::Separator();
 			MenuHotkeyItem("New World",           "editor.world.new");
 			MenuHotkeyItem("Open Default World",  "editor.world.open");
-			// Mounted-pak session: the base game's worlds live in the pak, not the overlay
-			// dir the browser shows — list them here so a modder can open any of them.
+			// Mounted-pak session: the base game's worlds live in the pak, not the overlay dir the browser shows.
 			if (nuke::Package::MountedCount() > 0 && ImGui::BeginMenu("Open World (package)"))
 			{
 				for (const std::string& rel : nuke::Package::List("content/"))
@@ -357,32 +322,25 @@ void EditorUI::EditorMenu()
 			MenuHotkeyItem("Project Settings...", "editor.settings");
 			if (ImGui::MenuItem("World Settings...")) { worldSettingsOpen = true; worldSettingsFocus = true; }
 			ImGui::Separator();
-			// Packaging (3.2) — the two commands are mutually exclusive by session kind.
-			// AUTHORING project (no basePakPath): Package Project only — there is nothing to
-			// mod, you own the game. ARCHIVE session (opened from .nupak/.numod): Package Mod
-			// only — repackaging someone's shipped game into a full second game is forbidden.
+			// Packaging is mutually exclusive by session kind: an authoring project (no basePakPath)
+			// packages itself; an archive session opened from .nupak/.numod can only package a mod.
 			if (basePakPath.empty())
 			{
 				if (ImGui::MenuItem(ICON_LC_PACKAGE " Package Project (dist)...")) PackageProjectCmd();   // Game Build dialog first
-				// DLC (developer-only): a crc diff of the cooked project vs a SHIPPED base pak —
-				// same container, mounts between the base and the mods, never editable itself.
+				// DLC: a crc diff of the cooked project vs a shipped base pak.
 				if (ImGui::MenuItem(ICON_LC_PACKAGE " Package DLC (.nupak)..."))    PackageDlcCmd();
 			}
 			else if (ImGui::MenuItem(ICON_LC_PUZZLE " Package Mod (.numod)..."))   PackageModCmd();
 			ImGui::Separator();
-			// Editor-driven builds (root superbuild): output -> Console, progress -> status
-			// bar, worker thread. The config the editor RUNS is locked (skipped with a note).
+			// Root superbuild on a worker; the config the editor currently RUNS is locked and skipped.
 			if (ImGui::MenuItem(ICON_LC_HAMMER " Build Engine (Release)")) RunEngineBuild("Release", nullptr);
 			if (ImGui::MenuItem(ICON_LC_HAMMER " Build Engine (Debug)"))   RunEngineBuild("Debug", nullptr);
 			ImGui::Separator();
-			// C++ GAME modules (Phase 6.0): the game lives in <project>/source as native
-			// NUKEModule DLLs; Build & Reload rebuilds them and hot-swaps the DLLs in place
-			// (components survive as placeholders through the swap). Refused while playing.
+			// Build & Reload hot-swaps <project>/source module DLLs in place; refused while playing.
 			if (ImGui::MenuItem(ICON_LC_FILE_PLUS_2 " New C++ Game Module...")) gmNamePopup = true;
 			if (ImGui::MenuItem(ICON_LC_HAMMER " Build & Reload Game Modules")) BuildGameModules();
 			ImGui::Separator();
-			// Same path as closing the window with X/Alt+F4: the render loop ends and the
-			// normal shutdown (unsaved-changes handling included) runs in main().
+			// Same path as the window X: the render loop ends and main() runs the normal shutdown.
 			if (ImGui::MenuItem("Quit", "Alt+F4"))
 				if (AppInstance* app = AppInstance::GetSingleton(); app && app->render)
 					app->render->requestClose();
@@ -393,9 +351,8 @@ void EditorUI::EditorMenu()
 			if (ImGui::MenuItem("Undo", "Ctrl+Z", false, !undoStack.empty())) Undo();
 			if (ImGui::MenuItem("Redo", "Ctrl+Y", false, !redoStack.empty())) Redo();
 			ImGui::Separator();
-			// Atom clipboard: acts on the hierarchy selection. Chord labels come from the pool
-			// (rebindable); the actions are called directly — the pool entries stay callback-free
-			// because the same chords are dispatched per focused window (browser = files).
+			// Chord labels come from the pool, but the actions are called directly: pool entries stay
+			// callback-free because the same chords dispatch per focused window (browser = files).
 			{
 				AppInstance* app = AppInstance::GetSingleton();
 				Atom* sel = app->selectedInHieararchy;
@@ -411,7 +368,7 @@ void EditorUI::EditorMenu()
 				if (ImGui::MenuItem("Duplicate", chordName("editor.duplicate"), false, haveSel)) DuplicateSelectedAtom();
 			}
 			ImGui::Separator();
-			// ENGINE-wide preferences (per machine/user, not per project) — external editor etc.
+			// Engine-wide preferences: per machine/user, not per project.
 			if (ImGui::MenuItem(ICON_LC_SETTINGS_2 " Preferences...")) { prefsOpen = true; prefsFocus = true; }
 			ImGui::EndMenu();
 		}

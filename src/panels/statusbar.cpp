@@ -1,14 +1,12 @@
-// Status bar (roadmap 2.3) — a bottom viewport side-bar: frame stats, backend,
-// scene counters, process memory, then every plugin-registered StatusBar field.
-// Fields with a progress value are background JOBS: the active one shows inline with a
-// progress bar, and the right-edge button drops UP a list of all of them + pool stats.
+// Bottom viewport side-bar: frame stats, backend, world counters, memory and StatusBar fields.
+// Fields carrying a progress value are treated as background jobs.
 #include <editor/editorui.h>
 #include <API/Model/StatusBar.h>
 #include <API/Model/Jobs.h>
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
-#include <Psapi.h>   // GetProcessMemoryInfo (working set)
+#include <Psapi.h>   // GetProcessMemoryInfo
 #pragma comment(lib, "Psapi.lib")
 #endif
 
@@ -35,7 +33,7 @@ void EditorUI::StatusBarPanel()
 		AppInstance* app = AppInstance::GetSingleton();
 		iRender* r = app->render;
 
-		// FPS / frame time — smoothed so the numbers are readable, not a blur.
+		// Smoothed so the numbers stay readable rather than flickering.
 		const double dt = nuke::Time::getSingleton()->delta;
 		static double emaDt = 1.0 / 60.0;
 		if (dt > 0.0 && dt < 1.0) emaDt = emaDt * 0.95 + dt * 0.05;
@@ -44,7 +42,6 @@ void EditorUI::StatusBarPanel()
 
 		auto sep = [] { ImGui::SameLine(); ImGui::TextDisabled("|"); ImGui::SameLine(); };
 
-		// Renderer: backend + scene geometry submitted last frame.
 		sep();
 		ImGui::TextUnformatted(r ? r->getEngine() : "no renderer");
 		int draws = 0, tris = 0;
@@ -53,7 +50,6 @@ void EditorUI::StatusBarPanel()
 		ImGui::Text("%d draws", draws);
 		ImGui::SameLine(); ImGui::TextDisabled("%d tris", tris);
 
-		// World: atom count (+ play state marker).
 		sep();
 		ImGui::Text("%d atoms", app->currentWorld ? CountAtoms(app->currentWorld->GetHierarchy()) : 0);
 		if (app->playState != 0)
@@ -62,7 +58,6 @@ void EditorUI::StatusBarPanel()
 			ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.45f, 1.0f), app->playState == 1 ? "PLAY" : "PAUSE");
 		}
 
-		// Process memory (working set).
 #ifdef _WIN32
 		{
 			static int memTick = 0; static double memMB = 0.0;
@@ -77,8 +72,7 @@ void EditorUI::StatusBarPanel()
 		}
 #endif
 
-		// Plugin fields (nuke::StatusBar::Set), in first-set order. Jobs (progress
-		// fields) are pulled out for the inline bar + the drop-up list.
+		// Plugin fields in first-set order; progress fields are pulled out as jobs.
 		const std::vector<nuke::StatusBar::Entry> fields = nuke::StatusBar::All();
 		std::vector<const nuke::StatusBar::Entry*> jobs;
 		for (const auto& e : fields)
@@ -90,7 +84,7 @@ void EditorUI::StatusBarPanel()
 			if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", e.key.c_str());
 		}
 
-		// Indeterminate bars animate (ImGui: negative moving fraction), known ones show %.
+		// ImGui animates a progress bar only for a negative, moving fraction.
 		auto jobBar = [](const nuke::StatusBar::Entry& e, float width)
 		{
 			const bool indet = (e.progress == nuke::StatusBar::kIndeterminate);
@@ -98,7 +92,7 @@ void EditorUI::StatusBarPanel()
 			ImGui::ProgressBar(frac, ImVec2(width, ImGui::GetTextLineHeight()), indet ? "" : nullptr);
 		};
 
-		// The ACTIVE job inline (the first running one; queued ones wait in the list).
+		// Only the first job shows inline; the rest wait in the drop-up list.
 		if (!jobs.empty())
 		{
 			const nuke::StatusBar::Entry& e = *jobs.front();
@@ -108,7 +102,6 @@ void EditorUI::StatusBarPanel()
 			jobBar(e, 140.0f);
 		}
 
-		// Right edge: the jobs button -> a list POPPING UP above the bar.
 		{
 			char btn[48];
 			if (jobs.empty()) snprintf(btn, sizeof(btn), ICON_LC_ACTIVITY);

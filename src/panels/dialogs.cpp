@@ -1,9 +1,9 @@
-// dialogs panel — EditorUI method definitions (translation unit).
+// About / Console panels, machine-wide preferences and external-editor launching.
 #include <editor/editorui.h>
-#include "nukeui.h"   // DocDetachAll: the preference toggle applies to doc windows too
+#include "nukeui.h"   // DocDetachAll
 #include <nlohmann/json.hpp>
 #include <boost/filesystem/fstream.hpp>
-#include <cstdlib>   // getenv (preferences path)
+#include <cstdlib>
 
 void EditorUI::winAbout()
 {
@@ -15,16 +15,15 @@ void EditorUI::winAbout()
 	});
 }
 
-// ---- Console: viewer over the engine Log ring (cout/cerr are captured into it) -----------------
+// ---- Console: viewer over the engine Log ring (cout/cerr are captured into it) ----
 
 static const ImVec4 kLvColor[3] = { ImVec4(0.75f, 0.75f, 0.75f, 1),     // info
                                     ImVec4(1.00f, 0.80f, 0.30f, 1),     // warn
                                     ImVec4(1.00f, 0.40f, 0.35f, 1) };   // error
 static const char* kLvIcon[3] = { ICON_LC_INFO, ICON_LC_TRIANGLE_ALERT, ICON_LC_CIRCLE_X };
 
-// Mine a compiler-style "path(line[,col]): ..." reference out of a log LINE. dotnet/MSVC
-// errors arrive through the cout capture as plain text — no structured source on the
-// entry, but the reference is right there in the message.
+// Mine a compiler-style "path(line[,col]): ..." reference out of a log line.
+// Returns true and fills file/line on a match.
 static bool ParseSourceRef(const std::string& text, std::string& file, int& line)
 {
 	size_t search = 0, open;
@@ -71,8 +70,6 @@ void EditorUI::winConsole()
 	NukeUI::DocPanel("panel:console", "Console", &win->console, window_flags, 920, 320, [this]()
 	{
 
-	// Toolbar: severity toggles (with live counts), filter, clear, auto-scroll — all
-	// FULL-SIZE controls (a SmallButton row next to a regular checkbox/input reads broken).
 	int nInfo = 0, nWarn = 0, nErr = 0;
 	nuke::Log::Counts(nInfo, nWarn, nErr);
 	auto lvBtn = [&](int lv, int count) {
@@ -93,12 +90,11 @@ void EditorUI::winConsole()
 	ImGui::InputTextWithHint("##confilter", ICON_LC_SEARCH " Filter (tag or text)", conFilter, sizeof(conFilter));
 	ImGui::Separator();
 
-	// Snapshot only when the ring changed (Version is a cheap counter).
+	// Snapshot only when the ring changed; Version is a cheap counter.
 	const uint64_t v = nuke::Log::Version();
 	const bool grew = v != conVersion;
 	if (grew) { conCache = nuke::Log::Snapshot(); conVersion = v; }
 
-	// Visible = severity toggles + substring filter (tag or text, case-insensitive).
 	auto ciContains = [](const std::string& hay, const char* needle) {
 		std::string h = hay, n = needle;
 		for (char& c : h) c = (char)tolower((unsigned char)c);
@@ -114,11 +110,10 @@ void EditorUI::winConsole()
 		vis.push_back(&e);
 	}
 
-	// Horizontal scrollbar: long lines (compiler errors with full paths) must stay
-	// REACHABLE, not silently clipped at the panel edge.
+	// Horizontal scrollbar: long compiler-error lines must stay reachable, not clipped.
 	ImGui::BeginChild("##conlist", ImVec2(0, 0), ImGuiChildFlags_Borders,
 	                  ImGuiWindowFlags_HorizontalScrollbar);
-	static uint64_t conSelId = 0;       // selected entry (click) — Ctrl+C / context "Copy"
+	static uint64_t conSelId = 0;       // selected entry
 	std::string copyText;               // set when a copy is requested this frame
 	ImGuiListClipper clip;
 	clip.Begin((int)vis.size());
@@ -128,7 +123,6 @@ void EditorUI::winConsole()
 			const nuke::LogEntry& e = *vis[i];
 			ImGui::PushID((int)(e.id & 0x7fffffff));
 			ImGui::PushStyleColor(ImGuiCol_Text, kLvColor[e.level]);
-			// One selectable row: icon, xN collapse count, [tag], message.
 			std::string row = std::string(kLvIcon[e.level]) + "  ";
 			if (e.count > 1) row += "x" + std::to_string(e.count) + "  ";
 			if (!e.tag.empty()) row += "[" + e.tag + "]  ";
@@ -136,8 +130,7 @@ void EditorUI::winConsole()
 			if (ImGui::Selectable(row.c_str(), e.id == conSelId, ImGuiSelectableFlags_AllowDoubleClick))
 				conSelId = e.id;
 			ImGui::PopStyleColor();
-			// Source to jump to: the entry's own file/line, else a compiler-style
-			// "path(line,col):" reference mined from the TEXT (dotnet/MSVC errors).
+			// Jump target: the entry's own file/line, else a reference mined from the text.
 			std::string srcFile = e.file;
 			int srcLine = e.line;
 			if (srcFile.empty()) ParseSourceRef(e.text, srcFile, srcLine);
@@ -179,8 +172,6 @@ void EditorUI::winConsole()
 	});
 }
 
-// Resolve a log entry's source path (absolute; else project content; else engine shaders)
-// and jump to it in the user's editor of choice.
 void EditorUI::OpenLogSource(const nuke::LogEntry& e)
 {
 	boost::system::error_code ec;
@@ -196,7 +187,7 @@ void EditorUI::OpenLogSource(const nuke::LogEntry& e)
 	OpenExternal(bfs::absolute(p).string(), e.line);
 }
 
-// ---- Preferences: MACHINE-wide editor settings (%APPDATA%/NukeEngine/preferences.json) ---------
+// ---- Preferences: machine-wide editor settings (%APPDATA%/NukeEngine/preferences.json) ----
 
 static bfs::path PreferencesPath()
 {
@@ -207,7 +198,7 @@ static bfs::path PreferencesPath()
 
 void EditorUI::LoadPreferences()
 {
-	extEditors = EditorDetectExternalEditors();   // scan first — the choice must resolve
+	extEditors = EditorDetectExternalEditors();   // scan first: the saved choice must resolve
 	bfs::ifstream f(PreferencesPath());
 	if (f)
 	{
@@ -227,8 +218,8 @@ void EditorUI::LoadPreferences()
 					if (r.is_string()) recentProjects.push_back(r.get<std::string>());
 		}
 	}
-	// Doc windows (text editor, module editors) must know the default BEFORE their first
-	// frame — module draw callbacks can run ahead of winAssetEditors' per-frame refresh.
+	// Doc windows must know the default BEFORE their first frame: module draw callbacks can
+	// run ahead of winAssetEditors' per-frame refresh.
 	NukeUI::DocDetachDefault(detachAssetEditors);
 	if (!extCustomExe.empty())
 		extEditors.push_back({ "Custom", extCustomExe,
@@ -258,11 +249,9 @@ void EditorUI::winPreferences()
 	if (prefsFocus) { NukeUI::DocFocus("panel:preferences"); prefsFocus = false; }
 	NukeUI::DocPanel("panel:preferences", "Preferences", &prefsOpen, window_flags, 540, 460, [this]()
 	{
-		// Engine-wide (per machine/user, NOT per project) — lives in %APPDATA%/NukeEngine.
 		ImGui::SeparatorText("Editor");
 		{
-			// The EDITOR's render backend. The RUNTIME (Player) backend is a PROJECT
-			// setting (Project Settings > Render Backend) and ships with the game.
+			// Editor-only backend; the runtime (Player) backend is a project setting.
 			const char* ebModes[] = { "Direct3D 11", "Direct3D 12 (ray tracing)", "Vulkan (default)" };
 			int eb = editorBackend;
 			if (ImGui::Combo("Editor Render Backend", &eb, ebModes, IM_ARRAYSIZE(ebModes)) && eb != editorBackend)
@@ -275,8 +264,7 @@ void EditorUI::winPreferences()
 				ImGui::SetTooltip("Vulkan: native detachable windows (default).\n"
 				                  "D3D12: RT reflections in the editor viewport.\n"
 				                  "Applied on the next editor restart.");
-			// RT master switch for the EDITOR: off = shaders compile for the raster path
-			// (shadow maps + SSR); shadows/reflections stop ray-querying entirely.
+			// Off compiles shaders for the raster path (shadow maps + SSR) — no ray queries at all.
 			bool ert = editorRayTracing;
 			if (ImGui::Checkbox("Ray Tracing (editor)", &ert) && ert != editorRayTracing)
 			{
@@ -289,8 +277,7 @@ void EditorUI::winPreferences()
 				                  "RT-capable GPU (cheaper; matches non-RT players).\n"
 				                  "The game's own switch is window.rayTracing in config.\n"
 				                  "Applied on the next editor restart.");
-			// Startup project behavior. Explicit opens (CLI arg, double-clicked .nuproj,
-			// file association) always win over this.
+			// Explicit opens (CLI arg, double-clicked .nuproj) always win over this.
 			const char* spModes[] = { "Open last project", "Show project window" };
 			int sp = startupProjectMode;
 			if (ImGui::Combo("On startup", &sp, spModes, IM_ARRAYSIZE(spModes)) && sp != startupProjectMode)
@@ -308,9 +295,8 @@ void EditorUI::winPreferences()
 		if (ImGui::Checkbox("Open asset editors detached by default", &detachAssetEditors))
 		{
 			SavePreferences();
-			// The toggle acts NOW, not just on future windows: every open editor follows
-			// it immediately (hosts are torn down via wantDock — next frame, never from
-			// inside their own tick).
+			// Applies to already-open editors too; hosts are torn down via wantDock on the
+			// next frame, never from inside their own tick.
 			for (AssetEditorWin& w : assetEds)
 			{
 				if (detachAssetEditors) { if (!w.host) w.detached = true; }
@@ -350,7 +336,6 @@ void EditorUI::winPreferences()
 			if (ed.name == extEditorName)
 				ImGui::TextDisabled("%s %s", ed.exe.c_str(), ed.args.c_str());
 
-		// Custom entry: any exe + an argument template ({file} and {line} expand).
 		ImGui::Spacing();
 		ImGui::TextUnformatted("Custom editor");
 		std::string exeShown = extCustomExe.empty() ? std::string("(pick an .exe)") : extCustomExe;
@@ -385,10 +370,8 @@ void EditorUI::winPreferences()
 	});
 }
 
-// Open file:line in the chosen external editor; no choice (or a vanished exe) falls back
-// to the built-in text editor panel. A C# script resolves its PROJECT CONTEXT (the
-// generated managed/GameScripts.csproj) — the IDE opens the whole project with
-// IntelliSense over the engine API, never a lone file.
+// Open file:line in the chosen external editor; falls back to the built-in text panel.
+// A .cs file is opened through its generated GameScripts.csproj so the IDE gets project context.
 void EditorUI::OpenExternal(const std::string& file, int line)
 {
 	boost::system::error_code ec;
@@ -410,10 +393,8 @@ void EditorUI::OpenExternal(const std::string& file, int line)
 	{
 		if (ed.name != extEditorName || extEditorName.empty()) continue;
 		if (!bfs::exists(bfs::path(ed.exe), ec)) break;   // stale detection -> fallback
-		// REUSE a running IDE: when its process already exists, the file-only arguments
-		// route into the live instance (devenv /Edit, VSCode -r, Rider/N++ forwarders) —
-		// the project-context variant is for the FIRST launch only, or every open spawns
-		// a fresh IDE window.
+		// The project-context argument variant is for the FIRST launch only: a running IDE
+		// takes the file-only args so it reuses the live instance instead of spawning a window.
 		const bool running = EditorProcessRunning(ed.exe);
 		std::string args = (!running && !ctxProject.empty() && !ed.argsProj.empty()) ? ed.argsProj : ed.args;
 		auto replaceAll = [&](const char* what, const std::string& with) {
@@ -428,5 +409,5 @@ void EditorUI::OpenExternal(const std::string& file, int line)
 		if (EditorLaunchDetached(ed.exe, args)) return;
 		break;   // launch failed -> fallback
 	}
-	OpenTextFile(file, line);   // built-in editor (jumps to the line too)
+	OpenTextFile(file, line);   // built-in editor fallback
 }

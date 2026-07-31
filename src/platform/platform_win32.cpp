@@ -1,31 +1,28 @@
-// Windows implementation of the editor's OS-integration seam (declared neutrally in
-// editor/editorui.h). ALL Win32 lives here behind _WIN32 — no platform API leaks into shared code.
-// Other platforms are served by platform_other.cpp (POSIX/stub).
+// Windows implementation of the editor's OS-integration seam (declared in editor/editorui.h):
+// file/folder dialogs, external editor detection/launch, relaunch, .nuproj file association.
 #ifdef _WIN32
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
-#include <tlhelp32.h>   // process snapshot: reuse a RUNNING IDE instead of spawning one per file
+#include <tlhelp32.h>   // process snapshot
 #include <commdlg.h>
 #include <shobjidl.h>   // IFileOpenDialog (folder picker)
 #include <string>
 #include <cstring>
-#include <interface/Importers.h>   // plugin importer extensions -> import dialog filter
+#include <interface/Importers.h>   // plugin importer extensions -> dialog filter
 #pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "ole32.lib")
 
-// Native "open file" dialog for asset import (models + images). Filter labels list the extensions so it
-// is obvious what is supported. The browser dispatches by extension (AssImporter::ImportAny).
+// Native "open file" dialog for asset import (models + images). Returns "" if cancelled.
 std::string EditorPickModelFile()
 {
 	char file[1024] = "";
 	OPENFILENAMEA ofn = {};
 	ofn.lStructSize = sizeof(ofn);
 
-	// Filter is built at RUNTIME so registered plugin importers (EPS/PSD/custom formats) show up
-	// alongside the built-in models + images. OPENFILENAME wants a double-null-terminated
-	// "label\0pattern\0..." block — build it in a std::string (embedded NULs are fine via c_str()).
+	// Built at runtime to include plugin importers. OPENFILENAME wants a double-null-terminated
+	// "label\0pattern\0..." block, hence the embedded NULs.
 	const char* kModels = "*.obj;*.fbx;*.dae;*.gltf;*.glb;*.3ds;*.ply;*.stl";
 	const char* kImages = "*.png;*.jpg;*.jpeg;*.tga;*.bmp;*.hdr;*.psd;*.gif";
 	std::string pluginPats;
@@ -89,13 +86,11 @@ std::string EditorPickProjectFile()
 	return std::string();
 }
 
-// External editor integration (Preferences). Detection scans the STANDARD install spots —
-// no registry crawling: VS2022 editions, JetBrains Rider (per-user + Program Files, any
-// version dir), VS Code (per-user + system), Notepad++. Each entry carries the argument
-// template that makes the editor open file:line ({file}/{line} expand at launch).
 #include <editor/exteditor.h>
-#include <boost/filesystem.hpp>   // Boost over std, same as everywhere else in the project
+#include <boost/filesystem.hpp>
 
+// Scan the standard install spots (VS2022, Rider, VS Code, Notepad++) for external editors,
+// each with its file:line argument template. De-duplicated by name.
 std::vector<ExtEditor> EditorDetectExternalEditors()
 {
 	namespace fs = boost::filesystem;
@@ -115,15 +110,13 @@ std::vector<ExtEditor> EditorDetectExternalEditors()
 		fs::path devenv = fs::path(pf) / "Microsoft Visual Studio" / "2022" / ed / "Common7" / "IDE" / "devenv.exe";
 		if (fs::exists(devenv, ec))
 		{
-			// Project context: devenv <csproj> <file> loads the project (IntelliSense) AND
-			// opens the file; /Command jumps to the line once the IDE is up.
 			add((std::string("Visual Studio 2022 ") + ed).c_str(), devenv,
 			    "/Edit \"{file}\" /Command \"Edit.GoTo {line}\"",
 			    "\"{project}\" \"{file}\" /Command \"Edit.GoTo {line}\"");
 			break;
 		}
 	}
-	// JetBrains Rider: the per-user Toolbox spot + any versioned dir under Program Files.
+	// Rider: per-user Toolbox spot + any versioned dir under Program Files.
 	if (!local.empty())
 		add("Rider", fs::path(local) / "Programs" / "Rider" / "bin" / "rider64.exe",
 		    "--line {line} \"{file}\"", "\"{project}\" --line {line} \"{file}\"");
@@ -201,9 +194,8 @@ std::string EditorPickExeFile()
 	return std::string();
 }
 
-// Launch a NEW editor instance on `projectPath` (New/Open Project switch projects by
-// relaunch: the project lifecycle — PHASE_BOOT renderer, plugin set, ResDB — is bound to
-// startup and cannot be swapped live). The caller closes THIS instance afterwards.
+// Launch a new editor instance on `projectPath` (project lifecycle is bound to startup, so
+// switching projects means relaunching); the caller closes this instance. False if spawn failed.
 bool EditorRelaunch(const std::string& projectPath)
 {
 	char exe[MAX_PATH] = "";
@@ -217,12 +209,11 @@ bool EditorRelaunch(const std::string& projectPath)
 	return true;
 }
 
-// Native "pick folder" dialog (build output path). Modern IFileOpenDialog with
-// FOS_PICKFOLDERS; COM is initialized locally (S_FALSE = already up, fine either way).
+// Native "pick folder" dialog (build output path). Returns "" if cancelled.
 std::string EditorPickFolder()
 {
 	std::string out;
-	HRESULT ci = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+	HRESULT ci = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);   // S_FALSE = already up; only uninit on S_OK
 	IFileOpenDialog* dlg = nullptr;
 	if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dlg))))
 	{
@@ -267,8 +258,7 @@ bool RegisterProjectFileAssociation()
 	bool ok = setKey("Software\\Classes\\.nuproj", "NukeEngine.Project");
 	ok = setKey("Software\\Classes\\NukeEngine.Project", "NukeEngine Project") && ok;
 	ok = setKey("Software\\Classes\\NukeEngine.Project\\shell\\open\\command", cmd.c_str()) && ok;
-	// Archives too (3.2): double-clicking a packed project / mod extracts its work tree
-	// beside the pak and opens it (see EditorUI::PrepareArchiveProject).
+	// Archives too: opening a .nupak/.numod extracts its work tree (EditorUI::PrepareArchiveProject).
 	ok = setKey("Software\\Classes\\.nupak", "NukeEngine.Package") && ok;
 	ok = setKey("Software\\Classes\\NukeEngine.Package", "NukeEngine Packed Project") && ok;
 	ok = setKey("Software\\Classes\\NukeEngine.Package\\shell\\open\\command", cmd.c_str()) && ok;

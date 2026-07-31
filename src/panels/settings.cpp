@@ -1,19 +1,18 @@
-// settings panel — hotkeys, world (level) commands, Project Settings window. EditorUI methods.
+// settings panel — hotkeys, world commands, Project/World Settings windows. EditorUI methods.
 #include <editor/editorui.h>
-#include "nukeui.h"   // DocWindow: detachable panels (task #137)
-#include <API/Model/Layers.h>   // render-layer names (Project Settings > Layers)
-#include <API/Model/Wind.h>     // global wind field (World Settings > Wind, 7.2)
+#include "nukeui.h"
+#include <API/Model/Layers.h>
+#include <API/Model/Wind.h>
 #include <boost/filesystem.hpp>
 #include <boost/filesystem/fstream.hpp>
 #include <config.h>
 #include <nlohmann/json.hpp>
 #include <vector>
 #include <sstream>
-#include <utility>   // std::swap (mods list reorder)
-#include <set>       // loadability fixpoint over the enabled mods
+#include <utility>
+#include <set>
 
-// Register the editor's built-in hotkeys in the shared pool. Plugins register their own the same
-// way (nuke::Hotkeys::Get()->Register(...)); conflicts auto-resolve to UNBOUND for manual fixup.
+// Register the editor's built-in hotkeys in the shared pool; conflicts resolve to unbound.
 void EditorUI::RegisterHotkeys()
 {
 	nuke::Hotkeys* hk = nuke::Hotkeys::Get();
@@ -24,35 +23,30 @@ void EditorUI::RegisterHotkeys()
 	hk->Register("editor.settings",   "Project Settings",     ImGuiMod_Ctrl | ImGuiKey_Comma, [this] { settingsOpen = true; });
 	hk->Register("editor.edit.undo",  "Undo",                 ImGuiMod_Ctrl | ImGuiKey_Z,     [this] { Undo(); });
 	hk->Register("editor.edit.redo",  "Redo",                 ImGuiMod_Ctrl | ImGuiKey_Y,     [this] { Redo(); });
-	// Context hotkeys: registered in the pool (rebindable, shown in settings, conflict-aware) but
-	// dispatched by the Browser only when it's hovered — so no global action (DispatchHotkeys skips
-	// null-action entries). Default to the mouse back/forward buttons (M4/M5).
+	// Context hotkeys carry a null action: DispatchHotkeys skips them, the panels dispatch them.
 	hk->Register("editor.browser.back",    "Browser: Back",    ImGuiKey_MouseX1, nullptr);
 	hk->Register("editor.browser.forward", "Browser: Forward", ImGuiKey_MouseX2, nullptr);
 	hk->Register("editor.delete",          "Delete",           ImGuiKey_Delete, nullptr);
 	hk->Register("editor.delete.force",    "Delete (no confirm)", ImGuiMod_Shift | ImGuiKey_Delete, nullptr);
-	// Generic clipboard chords, dispatched PER FOCUSED WINDOW like editor.delete: the browser
-	// acts on files, the hierarchy/viewport on atoms. One id each — the pool's conflict rule
-	// forbids a second binding of the same chord, so window-scoped actions must share ids.
+	// One id per clipboard chord: the pool forbids a second binding of the same chord, so
+	// window-scoped actions must share ids and dispatch per focused window.
 	hk->Register("editor.cut",       "Cut",       ImGuiMod_Ctrl | ImGuiKey_X, nullptr);
 	hk->Register("editor.copy",      "Copy",      ImGuiMod_Ctrl | ImGuiKey_C, nullptr);
 	hk->Register("editor.paste",     "Paste",     ImGuiMod_Ctrl | ImGuiKey_V, nullptr);
 	hk->Register("editor.duplicate", "Duplicate", ImGuiMod_Ctrl | ImGuiKey_D, nullptr);
 }
 
-// Fire bound hotkeys whose chord is pressed this frame. Each chord maps to exactly one bound hotkey
-// (conflicts are unbound), so nothing fires twice even when two plugins wanted the same combo.
+// Fire bound hotkeys whose chord is pressed this frame.
 void EditorUI::DispatchHotkeys()
 {
-	if (ImGui::GetIO().WantTextInput) return;            // typing in a field — don't trigger shortcuts
-	if (!rebindId.empty()) return;                       // capturing a rebind — swallow input
+	if (ImGui::GetIO().WantTextInput) return;   // typing in a field
+	if (!rebindId.empty()) return;              // capturing a rebind — swallow input
 	for (const nuke::Hotkey& h : nuke::Hotkeys::Get()->All())
 		if (h.bound && h.action && ImGui::IsKeyChordPressed((ImGuiKeyChord)h.chord))
 			h.action();
 }
 
-// A menu entry whose shortcut text + action come from a pooled hotkey (so the menu shows the live
-// binding and stays in sync with rebinds).
+// A menu entry whose shortcut text and action come from the pooled hotkey `id`.
 void EditorUI::MenuHotkeyItem(const char* label, const char* id)
 {
 	nuke::Hotkey* h = nuke::Hotkeys::Get()->Find(id);
@@ -67,18 +61,18 @@ void EditorUI::SaveWorldCmd()
 	AppInstance* app = AppInstance::GetSingleton();
 	std::string path = !app->currentWorldPath.empty() ? app->currentWorldPath
 	                 : (!startupWorld.empty() ? startupWorld : std::string("world.nuworld"));
-	app->SaveWorld(path);                                // writes into the project content
+	app->SaveWorld(path);
 	if (startupWorld.empty()) { startupWorld = path; SaveProject(); }   // first world becomes the default
-	SyncWorldBaseline();   // saved == disk now
+	SyncWorldBaseline();
 }
 
 void EditorUI::OpenWorldCmd(const std::string& relPath)
 {
 	if (relPath.empty()) return;
-	pendingWorldOpen = relPath;   // applied at the FRAME BOUNDARY (see ApplyPendingWorldOpen)
+	pendingWorldOpen = relPath;   // applied at the frame boundary (see ApplyPendingWorldOpen)
 }
 
-// Open the "Save World As" modal; default the folder to the one currently open in the browser.
+// Open the "Save World As" modal, defaulting the folder to the browser's current one.
 void EditorUI::SaveWorldAsCmd()
 {
 	AppInstance* app = AppInstance::GetSingleton();
@@ -89,7 +83,7 @@ void EditorUI::SaveWorldAsCmd()
 	openSaveAsPopup = true;
 }
 
-// Recursive folder tree for the save dialog — click a folder to select it as the save target.
+// Recursive folder tree for the save dialog; clicking a folder selects it as the save target.
 void EditorUI::SaveAsFolderTree(const std::string& dir)
 {
 	boost::system::error_code ec;
@@ -122,7 +116,6 @@ void EditorUI::DrawSaveAsPopup()
 		ImGui::SetNextItemWidth(400);
 		bool enter = ImGui::InputText("Name", saveAsBuf, sizeof(saveAsBuf), ImGuiInputTextFlags_EnterReturnsTrue);
 
-		// Build the target path = chosen folder / name(.nuworld), then a content-relative path for SaveWorld.
 		std::string name = saveAsBuf;
 		const std::string ext = ".nuworld";
 		if (!name.empty() && (name.size() < ext.size() || name.compare(name.size() - ext.size(), ext.size(), ext) != 0)) name += ext;
@@ -139,11 +132,11 @@ void EditorUI::DrawSaveAsPopup()
 
 		const char* label = exists ? "Overwrite" : "Save";
 		ImGui::BeginDisabled(empty);
-		// Enter saves a NEW file directly; an overwrite requires the explicit button (confirmation).
+		// Enter saves a new file directly; an overwrite requires the explicit button.
 		if (ImGui::Button(label, ImVec2(120, 0)) || (enter && !exists && !empty))
 		{
-			AppInstance::GetSingleton()->SaveWorld(rel);   // forced into project content
-			SyncWorldBaseline();   // saved == disk; path may have changed
+			AppInstance::GetSingleton()->SaveWorld(rel);
+			SyncWorldBaseline();
 			ImGui::CloseCurrentPopup();
 		}
 		ImGui::EndDisabled();
@@ -153,7 +146,7 @@ void EditorUI::DrawSaveAsPopup()
 	}
 }
 
-// Open a .nuworld that was double-clicked in the browser (its full path -> content-relative).
+// Queue a .nuworld given by full path (browser double-click); converted to content-relative.
 void EditorUI::OpenWorldFromBrowser(const std::string& fullPath)
 {
 	boost::system::error_code ec;
@@ -161,15 +154,11 @@ void EditorUI::OpenWorldFromBrowser(const std::string& fullPath)
 	pendingWorldOpen = (!ec && !rel.empty()) ? rel.generic_string() : fullPath;
 }
 
-// World switching is DEFERRED to the frame boundary: the click that requests it lands
-// mid-frame (inside the UI pass), and tearing the world down there destroys resources
-// the half-recorded command list still references — D3D12 then fails to CLOSE the list
-// ("Failed to close the command list") and can remove the device. Called FIRST in the
-// render callback, before any preview/scene recording.
+// Perform a queued world switch. Must run FIRST in the render callback, before any recording:
+// tearing the world down mid-frame frees resources the open command list still references.
 void EditorUI::ApplyPendingWorldOpen()
 {
-	// Dev hook (headless repro of world-switch bugs): NUKE_OPEN_WORLD=<content-relative>
-	// queues that world ~1.5 s after boot, mimicking a user click without a user.
+	// Dev hook: NUKE_OPEN_WORLD=<content-relative> queues that world ~1.5 s after boot.
 	static int devDelay = -2;
 	if (devDelay == -2)
 	{
@@ -186,9 +175,8 @@ void EditorUI::ApplyPendingWorldOpen()
 	SyncWorldBaseline();
 }
 
-// Persist the RTX quality block into the editor's config json (read-modify-write, other
-// sections kept). The dist config is formed FROM this file at packaging, so the game
-// inherits the knobs automatically.
+// Persist the RTX quality block into the editor's config json (read-modify-write; other
+// sections are preserved).
 static void WriteRTBlock(const boost::filesystem::path& cfg, float inten, float maxDist, int bounces, float rough)
 {
 	try
@@ -208,9 +196,8 @@ static void WriteRTBlock(const boost::filesystem::path& cfg, float inten, float 
 	catch (...) {}
 }
 
-// Apply a full project-settings snapshot: update editor members + engine config, push everything to the renderer
-// (live), and persist (game.nuproj via SaveProject + config/main.json for RTX). Used by the undo/redo closures and
-// "Reset to Defaults" so a single call fully restores a state.
+// Apply a full project-settings snapshot: editor members, engine config, live renderer state,
+// and persistence (game.nuproj + config/main.json). One call fully restores a state.
 void EditorUI::ApplyProjectSettings(const ProjectSettings& ps)
 {
 	msaaSamples     = ps.msaa;
@@ -234,8 +221,6 @@ void EditorUI::ApplyProjectSettings(const ProjectSettings& ps)
 		r->setRTReflection(ps.rtIntensity, ps.rtMaxDist, ps.rtBounces, ps.rtRoughCutoff);
 	}
 	SaveProject();   // msaa/hdr/nits/disk-modes live in game.nuproj
-	// RTX lives in the editor's config/main.json ["raytracing"] — the dist config is formed
-	// from this same file at packaging, so the game inherits it automatically.
 	WriteRTBlock(nuke::Config::baseDir() / "config" / "main.json", ps.rtIntensity, ps.rtMaxDist, ps.rtBounces, ps.rtRoughCutoff);
 }
 
@@ -244,13 +229,13 @@ void EditorUI::winSettings()
 	if (!settingsOpen) return;
 	NukeUI::DocPanel("panel:settings", "Project Settings", &settingsOpen, 0, 460, 420, [this]()
 	{
-		// Snapshot helpers for the undoable project settings (rendering + RTX + disk sync).
+		// Snapshot helpers for the undoable project settings.
 		auto capturePS = [this]() -> ProjectSettings {
 			nuke::NukeRT rt; if (nuke::Config* c = nuke::Config::getSingleton()) rt = c->rt;
 			return { msaaSamples, hdrEnabled, hdrPaperWhite, hdrPeak, rt.intensity, rt.maxDist, rt.bounces, rt.roughCutoff, reloadCleanMode, conflictMode };
 		};
 		auto defaultPS = []() -> ProjectSettings {
-			nuke::NukeRT d;   // engine config defaults
+			nuke::NukeRT d;
 			return { 4, true, 200.0f, 1000.0f, d.intensity, d.maxDist, d.bounces, d.roughCutoff, 0, 0 };
 		};
 		auto samePS = [](const ProjectSettings& a, const ProjectSettings& b) {
@@ -258,8 +243,7 @@ void EditorUI::winSettings()
 			    && a.rtIntensity == b.rtIntensity && a.rtMaxDist == b.rtMaxDist && a.rtBounces == b.rtBounces
 			    && a.rtRoughCutoff == b.rtRoughCutoff && a.reloadClean == b.reloadClean && a.conflict == b.conflict;
 		};
-		// Per-field reset: a small ↺ button placed after a control that reverts JUST that field to its default
-		// (`after` = the current snapshot with the one field defaulted). Undoable as one command.
+		// Per-field reset button; `after` = the current snapshot with one field defaulted.
 		auto resetBtn = [&](const char* id, const ProjectSettings& after, const char* label) {
 			ImGui::SameLine();
 			ImGui::PushID(id);
@@ -272,16 +256,15 @@ void EditorUI::winSettings()
 				if (!samePS(before, after))
 				{
 					ApplyProjectSettings(after);
-					psBefore = capturePS();   // adopt as new idle baseline so the settler doesn't double-record
+					psBefore = capturePS();   // new idle baseline, else the settler double-records
 					PushUndo(label, [this, before]{ ApplyProjectSettings(before); },
 					                [this, after ]{ ApplyProjectSettings(after ); });
 				}
 			}
 		};
 
-		const ProjectSettings PSD = defaultPS();   // per-field default source for the ↺ reset buttons
+		const ProjectSettings PSD = defaultPS();   // per-field default source for resetBtn
 
-		// --- Default world (the game loads this one after loading the project) ---
 		ImGui::SeparatorText("World");
 		std::vector<std::string> worlds;
 		{
@@ -306,7 +289,7 @@ void EditorUI::winSettings()
 					startupWorld = after; SaveProject();
 					PushUndo("Default world", [this, before]{ startupWorld = before; SaveProject(); },
 					                          [this, after ]{ startupWorld = after;  SaveProject(); },
-					         false);   // project setting — not a change of the open world
+					         false);   // project setting, not a change of the open world
 				}
 			ImGui::EndCombo();
 		}
@@ -338,7 +321,7 @@ void EditorUI::winSettings()
 		ImGui::SameLine(); ImGui::TextDisabled("(?)");
 		if (ImGui::IsItemHovered()) ImGui::SetTooltip("On: float (RGBA16F) rendering, real dynamic range (enables bloom later).\nOff: LDR (RGBA8), cheaper, tonemap inline.");
 
-		// HDR10 display mapping (only affects real HDR10 output in the Player; harmless otherwise).
+		// HDR10 display mapping; only affects real HDR10 output in the Player.
 		bool nitsCh = false;
 		nitsCh |= ImGui::SliderFloat("HDR Paper White (nits)", &hdrPaperWhite, 80.0f, 400.0f, "%.0f");
 		{ ProjectSettings a = capturePS(); a.paperWhite = PSD.paperWhite; resetBtn("rst_pw", a, "Reset HDR Paper White"); }
@@ -351,8 +334,7 @@ void EditorUI::winSettings()
 			SaveProject();
 		}
 
-		// Ray Tracing (RTX) — GLOBAL reflection quality. The per-camera "rtreflect" post effect is the on/off
-		// switch; these control how it traces. Persisted to config/main.json ["raytracing"].
+		// Global RT reflection quality; the per-camera "rtreflect" post effect is the on/off switch.
 		{
 			nuke::Config* cfg = nuke::Config::getSingleton();
 			if (cfg)
@@ -371,22 +353,15 @@ void EditorUI::winSettings()
 				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Global RT reflection quality. Add the 'rtreflect' post effect to a camera to enable RT there (needs D3D12).");
 				if (ch && AppInstance::GetSingleton()->render)   // live preview
 					AppInstance::GetSingleton()->render->setRTReflection(rt.intensity, rt.maxDist, rt.bounces, rt.roughCutoff);
-				if (done)   // persist on edit-end (the dist config inherits this file at packaging)
+				if (done)   // persist on edit-end
 					WriteRTBlock(nuke::Config::baseDir() / "config" / "main.json", rt.intensity, rt.maxDist, rt.bounces, rt.roughCutoff);
 			}
 		}
 
-		// (Game Build — the packaged game's boot settings — moved to the packaging dialog:
-		// File -> Package Project opens the "Game Build" modal; the dist config/main.json is
-		// formed at packaging from the editor's current config + the dialog's tweaks.)
-
-		// --- Packaging (3.2): the project pak is the immutable release artifact (max
-		// compression); mod paks are editable overlays (store by default). File menu:
-		// "Package Project (dist)" / "Package Mod (.numod)".
+		// Packaging: the project pak is the release artifact, mod paks are editable overlays.
 		ImGui::SeparatorText("Packaging");
 		{
-			// The shipped exe carries the game's own identity: <name>.exe + this icon +
-			// the window title (all applied by Package Project).
+			// Name, icon and window title of the shipped exe, applied by Package Project.
 			char nameBuf[128];
 			strncpy(nameBuf, projectName.c_str(), sizeof(nameBuf) - 1); nameBuf[sizeof(nameBuf) - 1] = 0;
 			if (ImGui::InputText("Game name", nameBuf, sizeof(nameBuf), ImGuiInputTextFlags_EnterReturnsTrue)
@@ -394,9 +369,8 @@ void EditorUI::winSettings()
 			{
 				if (projectName != nameBuf && nameBuf[0]) { projectName = nameBuf; SaveProject(); }
 			}
-			// Game icon: live PREVIEW + content picker + native Browse dialog + drag&drop
-			// from the browser + reset. The value stays content-relative; a file picked
-			// outside the project is COPIED into content (the pak must be self-contained).
+			// Game icon. The value stays content-relative; a file picked outside the project
+			// is copied into content, since the pak must be self-contained.
 			{
 				nuke::iRender* r = AppInstance::GetSingleton()->render;
 				if (gameIcon != iconPrevPath)   // (re)build the preview texture lazily
@@ -422,8 +396,7 @@ void EditorUI::winSettings()
 				ImGui::BeginGroup();
 				std::string cur = gameIcon.empty() ? "(none)" : bfs::path(gameIcon).filename().string();
 				if (ImGui::Button((cur + "##gicon").c_str(), ImVec2(220, 0))) ImGui::OpenPopup("##giconpop");
-				// Drag an .ico from the content browser straight onto the button.
-				if (ImGui::BeginDragDropTarget())
+				if (ImGui::BeginDragDropTarget())   // drag an .ico from the browser onto the button
 				{
 					if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("NUKE_ASSET"))
 					{
@@ -485,8 +458,8 @@ void EditorUI::winSettings()
 				ImGui::SameLine(0, 6); ImGui::TextUnformatted("Game icon");
 				ImGui::EndGroup();
 			}
-			// Build output folder: default = <project>/dist (project root, beside content
-			// and the manifest). Relative settings resolve against the project.
+			// Build output folder; defaults to <project>/dist. Relative paths resolve
+			// against the project.
 			{
 				std::string shown = distPath.empty() ? std::string("dist  (default, in the project root)") : distPath;
 				if (ImGui::Button((shown + "##distp").c_str(), ImVec2(320, 0)))
@@ -497,9 +470,9 @@ void EditorUI::winSettings()
 						boost::system::error_code ec;
 						bfs::path rel = bfs::relative(bfs::path(picked), bfs::path(projectDir), ec);
 						std::string r = ec ? std::string() : rel.generic_string();
-						// Inside the project -> keep it relative (portable .nuproj); outside -> absolute.
+						// Inside the project -> relative (portable .nuproj); outside -> absolute.
 						distPath = (!r.empty() && r != "." && r.compare(0, 2, "..") != 0) ? r : picked;
-						if (r == ".") distPath.clear();   // the project root itself is not a build dir — default
+						if (r == ".") distPath.clear();   // the project root is not a build dir
 						SaveProject();
 					}
 				}
@@ -535,19 +508,16 @@ void EditorUI::winSettings()
 				ImGui::SetTooltip("Project pak: zstd max = smallest release, fast to load.\nMods default to Store so they stay editable/diffable.");
 		}
 
-		// --- Mods (mounted-pak session): what the game — and THIS session — loads. The list
-		// is config/mods.json (checkbox = enabled, row order = load order among mods that
-		// don't depend on each other; dependencies always mount below dependents). Mounts
-		// happen at boot, so changes apply on session reload.
+		// Mods list, backed by config/mods.json: checkbox = enabled, row order = load order.
+		// Mounts happen at boot, so changes apply on session reload.
 		if (basePakPath.size() > 6 && basePakPath.compare(basePakPath.size() - 6, 6, ".nupak") == 0)
 		{
 			ImGui::SeparatorText("Mods");
-			// No rescan while an item is active — a drag-reorder must not have the rows
-			// rebuilt under it (SaveModsUi resets the throttle when it actually writes).
+			// No rescan while an item is active: a drag-reorder must not have its rows rebuilt.
 			if (!ImGui::IsAnyItemActive() && (modsUiTick < 0 || ImGui::GetFrameCount() - modsUiTick > 120))
 			{ ScanModsUi(); modsUiTick = ImGui::GetFrameCount(); }
 
-			// Which mods WILL actually load: the loader's fixpoint over the enabled set
+			// Which mods will actually load: the loader's fixpoint over the enabled set
 			// (a mod is loadable when every requirement is an enabled loadable mod).
 			auto lowerS = [](std::string s) { for (char& c : s) c = (char)tolower((unsigned char)c); return s; };
 			{
@@ -570,12 +540,12 @@ void EditorUI::winSettings()
 				}
 			}
 
-			bool changed = false;         // checkbox / auto-sort -> save right away
-			static bool modsDragDirty = false;   // drag reorder -> save when the mouse releases
+			bool changed = false;                // checkbox / auto-sort: save right away
+			static bool modsDragDirty = false;   // drag reorder: save when the mouse releases
 			if (ImGui::BeginTable("modsui", 5, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingStretchProp))
 			{
-				ImGui::TableSetupColumn("Game", ImGuiTableColumnFlags_WidthFixed, 38);     // the PLAYER's list (config/mods.json)
-				ImGui::TableSetupColumn("Editor", ImGuiTableColumnFlags_WidthFixed, 44);   // THIS session's mounts (separate)
+				ImGui::TableSetupColumn("Game", ImGuiTableColumnFlags_WidthFixed, 38);     // the player's list
+				ImGui::TableSetupColumn("Editor", ImGuiTableColumnFlags_WidthFixed, 44);   // this session's mounts
 				ImGui::TableSetupColumn("Mod");
 				ImGui::TableSetupColumn("Requires");
 				ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthFixed, 120);
@@ -584,12 +554,10 @@ void EditorUI::winSettings()
 				{
 					ModRow& r = modsUi[i];
 					ImGui::TableNextRow();
-					// Unsatisfied requirements (or a dead config entry) paint the ROW red.
-					if (!r.reqOk || !r.found)
+					if (!r.reqOk || !r.found)   // unsatisfied requirements paint the row red
 						ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, IM_COL32(150, 40, 40, 90));
 					ImGui::PushID(r.file.c_str());   // id follows the mod through reorders
 					ImGui::TableNextColumn();
-					// Enabling is BLOCKED until every requirement is enabled (turn deps on first).
 					const bool blockOn = !r.enabled && (!r.reqOk || !r.found);
 					ImGui::BeginDisabled(blockOn);
 					if (ImGui::Checkbox("##on", &r.enabled)) changed = true;
@@ -597,24 +565,20 @@ void EditorUI::winSettings()
 					if (blockOn && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
 						ImGui::SetTooltip(!r.found ? "File not found." : "Enable its requirements first: %s", r.req.c_str());
 					ImGui::TableNextColumn();
-					// The EDITOR's own mount toggle — separate from the game's config: the
-					// session remounts immediately (reopen the world to see the merge).
 					ImGui::BeginDisabled(!r.found);
 					if (ImGui::Checkbox("##ed", &r.edMounted)) SaveEditorMods();
 					ImGui::EndDisabled();
 					if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
 						ImGui::SetTooltip("Mount in THIS editor session (the game's own list is the 'Game' column)");
 					ImGui::TableNextColumn();
-					// The name cell doubles as a DRAG HANDLE: drag rows to reorder (enabled
-					// block only — disabled mods have no position in the config).
+					// The name cell doubles as a drag handle; only enabled rows have a position.
 					ImGui::Selectable((ICON_LC_GRIP_HORIZONTAL "  " + r.name).c_str(), false,
 					                  ImGuiSelectableFlags_AllowOverlap);
 					if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s%s", r.file.c_str(), r.enabled ? "\n(drag to reorder)" : "");
 					if (r.enabled && ImGui::IsItemActive() && !ImGui::IsItemHovered())
 					{
-						// One swap per ROW of mouse travel. The naive "swap when the cursor
-						// leaves the item" fires in the padding gap between rows too and the
-						// dragged mod skips a position — so wait out a row's worth of delta.
+						// One swap per row of mouse travel: swapping when the cursor leaves the
+						// item also fires in the inter-row padding and skips a position.
 						const float rowH = ImGui::GetItemRectSize().y + ImGui::GetStyle().CellPadding.y * 2.0f;
 						const float dy = ImGui::GetMouseDragDelta(0).y;
 						if (dy <= -rowH * 0.6f || dy >= rowH * 0.6f)
@@ -643,14 +607,11 @@ void EditorUI::winSettings()
 				ImGui::EndTable();
 			}
 			if (modsUi.empty()) ImGui::TextDisabled("No mods in the game's mods/ folder.");
-			// A drag writes the config ONCE, when the mouse releases (mid-drag saves would
-			// rescan and rebuild the rows under the cursor).
+			// A drag writes the config once, on release: a mid-drag save would rebuild the rows.
 			if (modsDragDirty && !ImGui::IsMouseDown(0)) { SaveModsUi(); modsDragDirty = false; }
 			if (changed) SaveModsUi();
 			ImGui::TextDisabled("'Game' = the PLAYER's list (config/mods.json). 'Editor' = mounted in THIS session only\n(applies immediately; reopen the world to see the merge). A mod always loads AFTER its requirements.");
-			// Rewrite the config in clean dependency order: the loader's fixpoint, kept
-			// stable (current order preserved among mods that don't depend on each other);
-			// mods with unsatisfied requirements sink to the end (they won't load anyway).
+			// Rewrite the config in dependency order (stable); unsatisfiable mods sink to the end.
 			if (ImGui::Button("Auto-sort (dependencies)"))
 			{
 				std::vector<ModRow> sorted;
@@ -691,9 +652,8 @@ void EditorUI::winSettings()
 		if (ImGui::Combo("Disk changed (editor dirty)", &conflictMode, conflModes, IM_ARRAYSIZE(conflModes))) SaveProject();
 		{ ProjectSettings a = capturePS(); a.conflict = PSD.conflict; resetBtn("rst_cf", a, "Reset disk (dirty)"); }
 
-		// Undo for the value edits above: snapshot while idle (true pre-edit baseline), push ONE command when an
-		// edit settles. Widgets apply/persist live; this records the reversible delta. Default World + hotkeys
-		// keep their own undo/persist and are excluded from this snapshot (samePS ignores them).
+		// Undo for the value edits above: snapshot while idle, push one command when an edit
+		// settles. Default World and hotkeys keep their own undo and are excluded from samePS.
 		bool psActive = ImGui::IsAnyItemActive();
 		if (psActive) psEditing = true;
 		else if (psEditing)
@@ -706,12 +666,11 @@ void EditorUI::winSettings()
 				PushUndo("Project settings",
 					[this, before]{ ApplyProjectSettings(before); },
 					[this, after ]{ ApplyProjectSettings(after ); },
-					false);   // project settings — not a change of the open world
+					false);   // project settings, not a change of the open world
 			}
 		}
 		if (!psActive) psBefore = capturePS();
 
-		// --- Hotkeys (centralized pool: rebind, see conflicts) ---
 		ImGui::SeparatorText("Hotkeys");
 		ImGui::Text("Rebind, then press a key combo. Conflicting hotkeys stay unbound — assign manually.");
 		nuke::Hotkeys* hk = nuke::Hotkeys::Get();
@@ -739,7 +698,7 @@ void EditorUI::winSettings()
 			ImGui::EndTable();
 		}
 
-		// --- Render layers: 32 named channels (Atom.layer + Camera.layerMask filter on them) ---
+		// 32 named render channels (Atom.layer + Camera.layerMask filter on them).
 		ImGui::SeparatorText("Layers");
 		ImGui::Text("Named render channels. Atoms pick a Layer; cameras pick what they draw via Layer Mask.");
 		if (ImGui::BeginTable("layers", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit, ImVec2(320, 0)))
@@ -758,21 +717,20 @@ void EditorUI::winSettings()
 				if (ImGui::InputText("##ln", lbuf, sizeof(lbuf)))
 				{
 					nuke::Layers::SetName(i, lbuf);
-					SaveProject();   // slot names are project data (game.nuproj "layers")
+					SaveProject();   // slot names live in game.nuproj "layers"
 				}
 				ImGui::PopID();
 			}
 			ImGui::EndTable();
 		}
 
-		// --- OS integration ---
 		ImGui::SeparatorText("System");
 		if (ImGui::Button("Register .nuproj file association"))
-			RegisterProjectFileAssociation();   // HKCU: double-clicking a .nuproj opens this editor
+			RegisterProjectFileAssociation();   // HKCU only
 		ImGui::SameLine();
 		ImGui::Text("(current user; open .nuproj files in this editor)");
 
-		// Capture a chord for the hotkey being rebound (first non-modifier key press + current mods).
+		// Capture a chord for the hotkey being rebound: first non-modifier key + current mods.
 		if (!rebindId.empty())
 		{
 			ImGuiIO& io = ImGui::GetIO();
@@ -782,7 +740,7 @@ void EditorUI::winSettings()
 				if (k >= ImGuiKey_LeftCtrl && k <= ImGuiKey_RightSuper) continue;   // skip pure modifier keys
 				if (ImGui::IsKeyPressed(k, false))
 				{
-					hk->Rebind(rebindId, mods | k);   // false on conflict -> hotkey keeps its state; pick another
+					hk->Rebind(rebindId, mods | k);   // on conflict the hotkey keeps its state
 					SaveProject();
 					rebindId.clear();
 					break;
@@ -792,13 +750,13 @@ void EditorUI::winSettings()
 	});
 }
 
-// World Settings window — world-level render settings (saved in the .nuworld). Currently global shadows;
-// WHICH lights cast shadows stays per-Light. Edits push to the renderer live + mark the world dirty.
+// World Settings window: world-level render/physics/wind settings, saved in the .nuworld.
+// Edits push to the renderer live and mark the world dirty.
 void EditorUI::winWorldSettings()
 {
 	if (!worldSettingsOpen) return;
-	if (worldSettingsFocus) { NukeUI::DocFocus("panel:worldsettings"); worldSettingsFocus = false; }   // only when opened via menu
-	// NoFocusOnAppearing: restored-open on load must NOT steal the dock's active tab.
+	if (worldSettingsFocus) { NukeUI::DocFocus("panel:worldsettings"); worldSettingsFocus = false; }   // menu-opened only
+	// NoFocusOnAppearing: restored-open on load must not steal the dock's active tab.
 	NukeUI::DocPanel("panel:worldsettings", "World Settings", &worldSettingsOpen, ImGuiWindowFlags_NoFocusOnAppearing, 440, 560, [this]()
 	{
 		World* w = AppInstance::GetSingleton()->currentWorld;
@@ -842,9 +800,7 @@ void EditorUI::winWorldSettings()
 
 		if (changed) apply(s);   // live apply + mark dirty
 
-		// --- Wind (7.2): the world's GLOBAL wind field — saved in the .nuworld ("wind" block),
-		// sampled by scripts (Wind.Sample) and pushed to shaders every frame. Local volumes are
-		// WindZone COMPONENTS on atoms, not here.
+		// The world's global wind field; local volumes are WindZone components on atoms.
 		ImGui::SeparatorText("Wind");
 		{
 			bool wch = false;
@@ -873,7 +829,7 @@ void EditorUI::winWorldSettings()
 			if (wch) { worldDirty = true; UpdateWindowTitle(); }   // wind saves with the world
 		}
 
-		// Undo: snapshot while idle (true pre-edit value), push ONE command when an edit settles.
+		// Undo: snapshot while idle, push one command when an edit settles.
 		bool active = ImGui::IsAnyItemActive();
 		if (active) wsEditing = true;
 		else if (wsEditing)
@@ -887,6 +843,6 @@ void EditorUI::winWorldSettings()
 					[this, apply, after ]{ apply(after ); });
 			}
 		}
-		if (!active) wsBefore = s;   // refresh the idle baseline for the next edit
+		if (!active) wsBefore = s;   // refresh the idle baseline
 	});
 }

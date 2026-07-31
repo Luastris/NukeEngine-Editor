@@ -1,40 +1,32 @@
 #ifndef EDITORUI_H
 #define EDITORUI_H
-// Editor UI panels, ported to Dear ImGui 1.92 and the NukeUI module.
-//
-// All the old plumbing is GONE — it now lives elsewhere:
-//   * ImGui context / font / frame (NewFrame/Render) -> NukeUI module
-//   * GPU rendering of draw data                      -> renderer via iRender seam
-//   * input                                            -> (wired later via iRender callbacks)
-//   * OpenGL2 immediate-mode renderer + freeglut       -> deleted
-//   * ImGuizmo gizmo                                   -> deferred (lib not in build yet)
-// What remains here is just the panels: menu, hierarchy, inspector, about, etc.
+// Editor UI panels: menu, hierarchy, inspector, browser, viewport, settings.
 
 #include "imgui.h"
-#include "imgui_internal.h"   // BeginViewportSideBar (toolbar attached under the main menu bar)
-#include "nukeui.h"           // NukeUI::MergeIconFont
-#include "IconsLucide.h"      // ICON_LC_* toolbar icons
-#include "ImGuizmo.h"         // transform gizmo (lives in NukeImGui, shares the context)
+#include "imgui_internal.h"   // BeginViewportSideBar
+#include "nukeui.h"
+#include "IconsLucide.h"
+#include "ImGuizmo.h"         // gizmo lives in NukeImGui, shares the context
 #include "config.h"
 #include "interface/AppInstance.h"
 #include "interface/Modular.h"
 #include "API/Model/MeshRenderer.h"
-#include "API/Model/PostProcess.h"   // custom post-effect chain inspector
+#include "API/Model/PostProcess.h"
 #include "API/Model/UnknownComponent.h"
-#include "API/Model/resdb.h"   // asset database (meshes by GUID, browser)
-#include "import/assimporter.h" // external model import -> native .numesh
-#include "API/Model/Prefab.h"   // instantiate .nuprefab assets
-#include "reflect/Reflect.h"   // auto-inspector: draw component fields from the schema
-#include "API/Model/Time.h"    // per-frame delta/elapsed
-#include "API/Model/Log.h"     // console panel: the engine log ring
-#include "editor/exteditor.h"  // external editor detection/launch (Preferences)
-#include "input/Hotkeys.h"     // centralized hotkey pool (editor + plugins)
-#include "input/InputTypes.h"  // InputAction/InputContext/InputBinding (.nuinput asset editor)
+#include "API/Model/resdb.h"
+#include "import/assimporter.h"
+#include "API/Model/Prefab.h"
+#include "reflect/Reflect.h"
+#include "API/Model/Time.h"
+#include "API/Model/Log.h"
+#include "editor/exteditor.h"
+#include "input/Hotkeys.h"
+#include "input/InputTypes.h"
 #include <boost/container/list.hpp>
 #include <boost/bind/bind.hpp>
 #include <cstring>
-#include <nlohmann/json.hpp>   // editor_state.json (editor-side state, not world state)
-#include <boost/filesystem/fstream.hpp>   // boost file streams (project's stack — not std)
+#include <nlohmann/json.hpp>
+#include <boost/filesystem/fstream.hpp>
 #include <map>
 #include <functional>
 #include <string>
@@ -42,40 +34,39 @@
 #include <cctype>
 #include <cstdio>
 #include <algorithm>
-#include <boost/filesystem.hpp>   // project content browser (bfs, matching the engine's stack)
+#include <boost/filesystem.hpp>
 #include <cmath>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtx/quaternion.hpp>
 #include <glm/gtc/type_ptr.hpp>
-#include <glm/ext.hpp>   // lookAtLH / perspectiveLH_ZO (match the renderer's LH, z0..1)
+#include <glm/ext.hpp>   // lookAtLH / perspectiveLH_ZO (renderer is LH, z 0..1)
 
-using namespace nuke;   // engine API lives in namespace nuke
-using namespace std;    // cout/endl (previously leaked from engine headers)
+using namespace nuke;
+using namespace std;
 
-// Native OS "open file" dialog for importing models. Defined in main.cpp (isolates <windows.h>).
-// Returns the picked path, or "" if cancelled.
+// Native OS file dialogs (defined in main.cpp, which isolates <windows.h>).
+// Each returns the picked path, or "" if cancelled.
 std::string EditorPickModelFile();
-std::string EditorPickIconFile();   // .ico picker (game icon, Project Settings -> Packaging)
-std::string EditorPickFolder();     // native folder picker (build path, Project Settings -> Packaging)
-std::string EditorPickProjectFile();// .nuproj / .nupak / .numod picker (File -> Open Project)
-std::string EditorPickExeFile();    // .exe picker (Preferences -> custom external editor)
+std::string EditorPickIconFile();   // .ico picker (game icon)
+std::string EditorPickFolder();     // folder picker (build path)
+std::string EditorPickProjectFile();// .nuproj / .nupak / .numod picker
+std::string EditorPickExeFile();    // .exe picker (custom external editor)
 bool        EditorRelaunch(const std::string& projectPath);   // spawn a new editor on that project
 
-class TextEditor;   // vendored ImGuiColorTextEdit (src/textedit), compiled into the editor
+class TextEditor;   // vendored ImGuiColorTextEdit (src/textedit)
 
-// Register the .nuproj file extension (HKEY_CURRENT_USER) so double-clicking a project opens it in
-// this editor. User-scope + reversible; defined in main.cpp (isolates <windows.h>). Returns success.
+// Register the .nuproj extension under HKEY_CURRENT_USER so double-clicking a project
+// opens this editor. Returns success.
 bool RegisterProjectFileAssociation();
 
-// "Box (2)" -> "Box"; names without a trailing " (N)" counter come back unchanged. Shared by every
-// uniquifier (atom names, file paths) so counters increment instead of stacking: never "Box (2) (2)".
+// "Box (2)" -> "Box". Returns `s` unchanged when there is no trailing " (N)" counter.
 static inline std::string StripNameCounter(const std::string& s)
 {
 	if (s.size() < 4 || s.back() != ')') return s;
 	size_t open = s.rfind(" (");
-	if (open == std::string::npos || open + 2 >= s.size() - 1) return s;   // need >= 1 digit inside
+	if (open == std::string::npos || open + 2 >= s.size() - 1) return s;
 	for (size_t i = open + 2; i + 1 < s.size(); ++i)
 		if (!isdigit((unsigned char)s[i])) return s;
 	return s.substr(0, open);
@@ -103,14 +94,11 @@ private:
 	uint64_t sceneRTId = 0;   // render target the editor camera draws into
 	uint64_t camPreviewRT = 0;          // small RT for the selected camera's preview
 	nuke::Camera* previewCam = nullptr; // camera currently retargeted to the preview RT
-	// PIE possess (toolbar switch): false = play through the GAME's main camera (UE-style,
-	// World::GetMainCamera), true = keep the editor camera view. Editor-only choice —
-	// the player always uses the game camera rule.
-	bool pieUseEditorCam = false;
+	bool pieUseEditorCam = false;   // PIE possess: false = game main camera, true = editor camera
 	std::map<std::string, bool> uiOpen; // persisted CollapsingHeader states (Components + per atom/component)
 	long pendingSelectId = 0;           // atom id to reselect after load (from editor_state.json; recursive)
 	int  browserView = 0;               // asset browser: 0 Tiles, 1 List, 2 Tree, 3 By Type
-	int  browserRoot = 0;               // browse root: 0 = content, 1 = <project>/source (6.0)
+	int  browserRoot = 0;               // browse root: 0 = content, 1 = <project>/source
 	char browserSearch[128] = "";
 	bool fMesh = true, fMat = true, fTex = true, fPrefab = true;   // browser type filters
 	std::string contentDir = "project/content";   // project content root (imported assets live here)
@@ -123,8 +111,7 @@ private:
 	bool        openDeletePopup = false;           // request to open the delete-confirm modal next frame
 	std::vector<std::string> deleteDeps;           // resources depending on pendingDelete (shown in the modal)
 	bool        unlinkOnDelete = false;            // project setting: break refs to a deleted resource
-	// Disk<->editor sync of the open world. worldOnDisk = canonical JSON of the last loaded/saved state
-	// (dirty baseline + the on-disk reference); worldDirty drives the "*" in the title + browser.
+	// Disk<->editor sync: canonical JSON of the last loaded/saved world state.
 	std::string worldOnDisk;
 	bool        worldDirty = false;
 	long long   worldMtime = 0;                    // last-known disk mtime of the world file
@@ -140,9 +127,7 @@ private:
 	bool        wasWindowFocused = true;            // disk re-check fires on focus-gain (avoids mid-write triggers)
 	Vector3     camFocusTarget;                      // smooth "focus selected": target editor-cam position
 	bool        camFocusing = false;
-	// Foliage paint brush (7.4): armed from the Foliage inspector, applied in the viewport
-	// while a Foliage layer is selected. 0 = off, 1 = paint, 2 = erase.
-	int   foliageBrush = 0;
+	int   foliageBrush = 0;             // foliage paint: 0 = off, 1 = paint, 2 = erase
 	float foliageBrushRadius = 2.0f;
 	float foliageBrushDensity = 1.0f;   // density multiplier per stroke step
 	bool        mergeOpen = false;                  // merge/resolve window visible
@@ -158,29 +143,22 @@ private:
 	// Deferred reparent (applied AFTER the tree is drawn — mutating the lists mid-iteration corrupts it).
 	Atom* dndAtom = nullptr; Atom* dndBefore = nullptr; Atom* dndParent = nullptr; bool dndPending = false;
 	std::string dndAsset; Atom* dndAssetParent = nullptr;   // deferred: instantiate a browser asset (then parent)
-	// Deferred component move ("NUKE_COMPONENT" payload: a component header dragged from the
-	// inspector onto a hierarchy row). Ids, not pointers — the payload survives frames safely.
+	// Deferred component move ("NUKE_COMPONENT" payload: inspector header -> hierarchy row).
 	struct CompDragPayload { long atomId = 0; long compId = 0; };
 	long dndCompAtomId = 0; long dndCompId = 0; Atom* dndCompDst = nullptr;
-	// Undo/redo: a GENERIC command stack. Each undoable action pushes its OWN inverse closures, so it
-	// covers anything that changes — atom edits, spawns, reparenting, project/editor settings, paths —
-	// not just atoms. Atom edits are captured as a delta (the affected atom subtree's before/after
-	// JSON), never the whole world. Use PushUndo / RecordChange<T> at any mutation site.
+	// Generic undo/redo stack: each action pushes its own inverse closures (atom edits are
+	// captured as a subtree delta, never the whole world). Push via PushUndo / RecordChange<T>.
 	struct UndoCmd { std::function<void()> undo, redo; std::string label; long serial = 0; };
 	std::vector<UndoCmd> undoStack, redoStack;
-	// Monotonic edit id: every pushed command gets one; the world is DIRTY when the id on
-	// top of the undo stack differs from the id recorded at the last save/load. This is
-	// the whole dirty check — serializing the world to diff it (the old way) froze the
-	// editor 4x/second on big scenes.
+	// Monotonic edit id; the world is dirty when the top-of-stack id differs from the
+	// one recorded at the last save/load. This is the whole dirty check.
 	long editSerial = 0;
 	long savedWorldSerial = 0;
 	long WorldEditSerial() const { return undoStack.empty() ? 0 : undoStack.back().serial; }
 	std::string editBefore; long editAtomId = 0; bool editing = false;   // selected-atom edit detector
 	unsigned int editActiveId = 0;   // ImGui active-widget id of the in-progress edit (flush when it changes)
-	std::string  idleSnap; long idleAtomId = 0;   // last snapshot taken while NOTHING was being edited = true pre-edit "before"
-	bool idleSnapValid = false;   // refresh ON DEMAND (selection change / after an edit) — NOT per
-	                              // frame: serializing a selected 200-atom subtree every frame was
-	                              // the "editor stutters, Player is fine" freeze
+	std::string  idleSnap; long idleAtomId = 0;   // snapshot taken while nothing was being edited = pre-edit "before"
+	bool idleSnapValid = false;   // refresh on demand (selection change / after an edit), never per frame
 	Atom* pendingCompAtom = nullptr; Component* pendingCompDel = nullptr;   // deferred component removal
 	std::string rebindId;                          // hotkey id currently being rebound ("" = none)
 	bool        settingsOpen = false;              // Project Settings window open?
@@ -191,8 +169,7 @@ private:
 	std::string projectDir  = "project";           // project root
 	std::string projectFile = "project/game.nuproj";
 	std::string projectName = "NukeGame";          // .nuproj "name" (dist/pak naming)
-	// Packaging (3.2): compression of the project pak (immutable release artifact; zstd max
-	// by default) and of mod paks (editable; store by default). Persisted in the .nuproj.
+	// Pak compression for the project (release) and for mods, persisted in the .nuproj.
 	int pakMethod = 2, pakLevel = 22;              // 0 store / 1 zlib / 2 zstd
 	int modMethod = 0, modLevel = 0;
 	std::string gameIcon;                          // .ico (content-relative) stamped onto the shipped exe
@@ -201,20 +178,16 @@ private:
 	std::string iconPrevPath;                      // which path iconPrevTex was decoded from
 	// Decode the best image of an .ico into RGBA8 (PNG-compressed and 32-bpp DIB entries).
 	static bool DecodeIcoRGBA(const std::string& path, std::vector<unsigned char>& rgba, int& w, int& h);
-	// New Project modal state (File -> New Project...). Creation + switch happen on OK:
-	// scaffold <location>/<name>/game.nuproj + content/, relaunch the editor on it.
+	// New Project modal state; on OK the project is scaffolded and the editor relaunches on it.
 	bool openNewProjectPopup = false;
 	char newProjName[128] = "MyGame";
 	std::string newProjDir;
-	// Module choice for the scaffold: plugins list (non-boot modules, checkbox each) +
-	// the render provider (PHASE_BOOT, single combo choice -> "services.render").
 	std::map<std::string, bool> newProjMods;       // moduleFile -> load in this project?
 	bool        newProjModsInit = false;           // lazily filled from the discovered pool
 	std::string newProjRender;                     // chosen render provider moduleFile
 	void DrawNewProjectPopup();
-	// PROJECT HUB: the editor booted with NO project (nothing auto-created). Only the hub
-	// window runs (recent list / open / create); picking a project relaunches the editor
-	// on it — the same lifecycle every other route uses (CLI arg, association, File menu).
+	// Project hub: the editor booted with no project, so only the hub window runs
+	// (recent / open / create); picking a project relaunches the editor on it.
 public:
 	bool projectHubMode = false;   // set by main.cpp before any UI exists
 private:
@@ -228,38 +201,30 @@ private:
 	std::string pendingSwitchPath;                 // project awaiting the unsaved-world decision
 	bool openSwitchConfirm = false;
 	void SwitchToProject(const std::string& path); // relaunch this editor on `path` + close
-	// Set when this project was opened FROM an archive (.nupak/.numod): the source pak.
-	// Drives Package Mod (diff vs a .nupak base; in-place repack of a .numod).
+	// Source pak when this project was opened from an archive (.nupak/.numod); drives Package Mod.
 	std::string basePakPath;
-	// Package Mod modal state (File -> Package Mod...). The chosen name persists in the
-	// work manifest ("modName") so repacking updates the SAME mod; a new name = a new file.
+	// Package Mod modal state. The name persists in the manifest ("modName"), so repacking
+	// updates the SAME mod and a new name creates a new file.
 	bool openPackageModPopup = false;
 	char packModName[128] = "";
 	std::string modName;                           // last packaged mod name (from the .nuproj)
-	// Package Mod split: 0 = single .numod, 1 = side parts by content type (textures/audio/
-	// meshes), 2 = greedy parts under a raw-size cap. Parts carry {"part_of": <mod>} and are
-	// mounted with (and hidden behind) their main mod.
+	// Package Mod split: 0 = one .numod, 1 = parts by content type, 2 = parts under a size cap.
 	int modSplitMode = 0;
 	int modSplitCapMB = 512;
-	// Package DLC (developer-only, raw project): name + the shipped base game.nupak to diff
-	// against; the result lands in the base's content/dlc/.
+	// Package DLC: name + the shipped base game.nupak to diff against.
 	bool openPackageDlcPopup = false;
 	char packDlcName[128] = "";
 	char packDlcBase[512] = "";
-	// Game Build modal (File -> Package Project): the game's boot settings, tweaked in a
-	// dialog BEFORE packaging. Nothing is stored anywhere else — the dist config/main.json
-	// is FORMED at packaging (editor's current config + these overrides); a repack pre-fills
-	// from the previous dist config.
+	// Game Build modal: boot settings tweaked before packaging. The dist config/main.json is
+	// FORMED at packaging (editor config + these overrides) — nothing is stored elsewhere.
 	bool openPackageProjectPopup = false;
 	bool gbWinSet = false;                         // dialog confirmed: worker overrides the window block
 	nuke::NukeWindow gbWin{};                      // dialog model (game window settings for the dist)
-	bool gbLog   = false;                          // dist logToConsole — ships OFF by default
-	bool gbDebug = false;                          // dist gpuValidation (debug layer) — ships OFF by default
+	bool gbLog   = false;                          // dist logToConsole
+	bool gbDebug = false;                          // dist gpuValidation (debug layer)
 	void PackageProjectCmd();                      // pre-fill (editor config + prev dist) -> open the modal
 	void DrawPackageProjectPopup();
-	// Mods panel (Project Settings, mounted-pak session): the game's mod list — enable/
-	// disable + order writes config/mods.json; mounts happen at boot -> apply reloads the
-	// session. Rows come from the config (order = load order) + disabled files in mods/.
+	// One row of the Mods panel; enable/disable + order writes config/mods.json.
 	struct ModRow
 	{
 		std::string file, path, name, req;         // req = display string of `reqs`
@@ -272,29 +237,25 @@ private:
 	int  modsUiTick = -1;                          // frame-count throttle for rescans
 	void ScanModsUi();                             // rebuild modsUi (config + mods/ dir + manifests)
 	void SaveModsUi();                             // write enabled rows (in order) to config/mods.json
-	// The EDITOR's own mod selection (config/mods.json is the PLAYER's list): persisted as
-	// editor_mods.json in the session overlay; saving REMOUNTS the stack live (base + the
-	// selection) — reopen the world to see the merge.
+	// Persist the EDITOR's own mod selection (config/mods.json is the PLAYER's list) and
+	// remount the stack live; the world must be reopened to see the merge.
 	void SaveEditorMods();
 	std::string GameRootFromBase() const;          // the game dir the session's pak belongs to
-	// Console (viewer over the engine's Log ring — cout/cerr are captured into it).
+	// Console: viewer over the engine's Log ring (cout/cerr are captured into it).
 	uint64_t conVersion = ~0ull;                   // last seen Log::Version (cheap change check)
 	std::vector<nuke::LogEntry> conCache;          // snapshot, refreshed when the version moves
 	bool conShow[3] = { true, true, true };        // info / warn / error visibility
 	char conFilter[128] = "";                      // substring filter (tag + text)
 	bool conAutoScroll = true;
 	void OpenLogSource(const nuke::LogEntry& e);   // double-click: resolve + jump to file:line
-	// Preferences (MACHINE-wide, %APPDATA%/NukeEngine/preferences.json — not per-project).
+	// Preferences: machine-wide (%APPDATA%/NukeEngine/preferences.json), not per-project.
 	bool prefsOpen = false, prefsFocus = false;
 	std::vector<ExtEditor> extEditors;             // detected external editors + "Custom"
 	std::string extEditorName;                     // the chosen one (persisted by name; "" = built-in)
 	std::string extCustomExe, extCustomArgs;       // the "Custom" entry ({file}/{line} template)
-	// Asset editors as SEPARATE OS windows (experimental: detached-window DXGI races —
-	// see memory 'nukeengine-detached-windows'). Default false = docked/floating inside
-	// the main window, the Godot single-window fallback.
-	bool detachAssetEditors = false;
-	// EDITOR render backend (engine-wide preference, %APPDATA%): 0=D3D11, 1=D3D12, 2=Vulkan
-	// (default). The RUNTIME backend is a PROJECT setting (config/main.json window.backend).
+	bool detachAssetEditors = false;   // asset editors as separate OS windows (else docked)
+	// Editor render backend (machine preference): 0=D3D11, 1=D3D12, 2=Vulkan.
+	// The RUNTIME backend is a project setting (config/main.json window.backend).
 	int editorBackend = 2;
 	bool editorRayTracing = true;   // false = raster path (shadow maps/SSR) in the editor; restart to apply
 	void DrawAssetEditorBody(int i);   // one editor's content (docked window OR host window)
@@ -307,19 +268,16 @@ private:
 	std::string lastWorld;                         // from editor_state.json: world open when the editor last exited
 	std::vector<std::string> enabledPlugins;       // per-project plugin load list (dll names)
 	bool pluginListLoaded = false;                 // did the .nuproj specify a plugin list?
-	// Per-project service provider choice (unified plugin model): service -> dll name, e.g.
-	// "render" -> "NukeRenderDiligent.dll". Boot services (render) apply on next start.
+	// Per-project service provider choice: service -> dll name. Boot services apply on next start.
 	std::map<std::string, std::string> serviceChoices;
 	std::vector<std::pair<nuke::NUKEModule*, bool>> pendingPluginToggle;   // applied after the window loop
 	char        pluginFilter[128] = "";            // plugin window: text search over name + tags
 	int         pluginServiceFilter = 0;           // plugin window: 0=All, 1=Utility, 2+=service index
 	float camYaw = 0.0f, camPitch = 0.0f;   // editor camera look angles (radians)
 	float gizmoMatrix[16] = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };   // persistent during a gizmo drag
-	std::string pieSnapshot;   // scene serialized on Play, restored on Stop (PIE)
-	// The editor's edit TARGET captured on Play, restored on Stop: a script's Game.LoadWorld
-	// during PIE retargets AppInstance::currentWorldPath at the loaded world — without this,
-	// Stop would leave the restored (previous) world pointing at the played world's file, so
-	// the next Save would overwrite THAT file with the previous world's content.
+	std::string pieSnapshot;   // world serialized on Play, restored on Stop (PIE)
+	// Edit target captured on Play, restored on Stop: Game.LoadWorld during PIE retargets
+	// AppInstance::currentWorldPath, and the restored world must not inherit that path.
 	std::string pieWorldPath;
 
 public:
@@ -339,30 +297,23 @@ public:
 
 	// --- panel methods (definitions in src/panels/*.cpp) ---
 	// project
-	// Read one "services.<service>" choice straight from the .nuproj — used during phase-1
-	// boot, BEFORE LoadProject() (the render provider must come up before any UI exists).
-	// Returns "" when the project/key doesn't exist (caller falls back to the first provider).
+	// Read one "services.<service>" choice straight from the .nuproj during phase-1 boot,
+	// BEFORE LoadProject(). Returns "" when the project/key doesn't exist.
 	std::string EarlyProjectService(const std::string& service);
 	void SaveProject();
 	void LoadProject();
-	// Packaging (3.2, packaging.cpp): build the full release dist/ (player + deps + used
-	// modules + config + the project as content/game.nupak), or a mod overlay (.numod).
-	// Each mod is its OWN file: the modder picks the name in a modal (DrawPackageModPopup),
-	// the same name repacks/updates that mod, a new name creates a separate .numod.
-	void PackageProject();           // Release build first (stale binaries never ship), then dist
+	// Build the full release dist/ (player + deps + used modules + config + the project
+	// packed as content/game.nupak).
+	void PackageProject();           // Release build first, then dist
 	void PackageProjectNow();        // the packaging body itself (no build step)
-	// Editor-driven builds (the unified root superbuild): `cmake --build <repo>/build
-	// --config <cfg>` on a Jobs WORKER — output streams into the Console line by line,
-	// progress ticks the status bar, msbuild /m parallelizes independent projects.
-	// Skipped with a note when the asked config is the one this editor is RUNNING
-	// (its binaries are locked). onDone fires on the game thread.
+	// Run `cmake --build <repo>/build --config <config>` on a Jobs worker, streaming output
+	// into the Console. Skipped when `config` is the one this editor is running (locked
+	// binaries). onDone fires on the game thread.
 	void RunEngineBuild(const std::string& config, std::function<void(bool)> onDone);
 
-	// C++ game modules (Phase 6.0, panels/gamemodule.cpp): the game is native NUKEModule
-	// DLLs living in <project>/source (built to <project>/modules). Scaffold generates a
-	// ready-to-build module; DiscoverProjectModules pulls the DLLs into the plugin pool
-	// (auto-enabled on first sight); BuildGameModules runs the rebuild + DLL hot-swap cycle
-	// (unload -> cmake build -> re-discover -> enable; components survive as placeholders).
+	// C++ game modules: native NUKEModule DLLs in <project>/source, built to <project>/modules.
+	// Scaffold generates one; Discover pulls DLLs into the plugin pool (auto-enabled on first
+	// sight); Build runs rebuild + DLL hot-swap (components survive as placeholders).
 	void CreateGameModuleScaffold(const std::string& name);
 	void DiscoverProjectModules();
 	void BuildGameModules();
@@ -371,15 +322,12 @@ public:
 	void PackageMod(const std::string& name = "");   // "" -> last used / project name (dev hook)
 	void PackageModCmd();            // open the "Package Mod" modal (prefills the name)
 	void DrawPackageModPopup();      // the modal itself (drawn each frame)
-	void PackageDlc(const std::string& name, const std::string& basePak);   // cooked crc-diff vs the base pak
-	void PackageDlcCmd();            // open the "Package DLC" modal (prefills name + base path)
+	void PackageDlc(const std::string& name, const std::string& basePak);   // crc-diff of the cooked project vs basePak
+	void PackageDlcCmd();            // open the "Package DLC" modal
 	void DrawPackageDlcPopup();      // the modal itself (drawn each frame)
-	// Open-with support (3.2). A .nupak NEVER extracts (the packed project is read-only —
-	// an unpacked tree would be an unprotected copy anyone could repackage): it is MOUNTED
-	// at runtime, Bethesda-style, and edits land in a "<stem>_mod" OVERLAY dir beside it
-	// that holds ONLY the modder's files. A .numod (editable by design) extracts into
-	// "<stem>_project" for full editing + in-place repack. Both return the work project's
-	// .nuproj ("" on failure) and record the base pak for PackageMod.
+	// Open-with support. A .nupak never extracts: it is MOUNTED and edits land in a
+	// "<stem>_mod" overlay dir; a .numod extracts into "<stem>_project" for full editing.
+	// Both return the work project's .nuproj ("" on failure) and record the base pak.
 	static std::string PrepareMountedProject(const std::string& pakAbs);   // .nupak
 	static std::string PrepareArchiveProject(const std::string& pakAbs);   // .numod
 	void ApplyProjectPlugins();
@@ -405,9 +353,8 @@ public:
 	void SaveAsFolderTree(const std::string& dir);   // recursive folder tree (pick the save folder)
 	void OpenWorldCmd(const std::string& relPath);            // open a world from project content
 	void OpenWorldFromBrowser(const std::string& fullPath);   // open a .nuworld picked in the browser
-	// World switches requested mid-frame (menu/browser clicks land inside the UI pass)
-	// are QUEUED and applied here, first thing in the render callback — tearing a world
-	// down mid-command-list makes D3D12 fail to close the list (render safety).
+	// World switches requested mid-frame are QUEUED and applied first thing in the render
+	// callback: tearing a world down mid-command-list makes D3D12 fail to close the list.
 	std::string pendingWorldOpen;
 	void ApplyPendingWorldOpen();
 	void winSettings();              // Project Settings window (default world + hotkeys)
@@ -421,15 +368,13 @@ public:
 	void FocusSelected();                        // frame the selected atom with the editor camera
 	// inspector
 	void CamComponent(Camera* cam);
-	// Reusable asset-reference picker (mesh/material/shader/texture). Type-locked (rejects other
-	// kinds), DnD target from the browser, "locate original" + "reset to default" buttons, and a
-	// filterable popup list of every asset of that type in the project. Same-named files in different
-	// folders are fine — assets are keyed by GUID. Returns true when the value changed.
+	// Type-locked asset-reference picker (mesh/material/shader/texture) with a browser DnD
+	// target, locate/reset buttons and a filterable list. Returns true when the value changed.
 	bool AssetPicker(const char* label, std::string& guid, const std::string& kind, const std::string& defGuid = "");
 	void RegisterInspectorOverrides();
 	void DrawMeshRendererInspector(nuke::MeshRenderer* mr);
 	void DrawPostProcessInspector(nuke::PostProcess* pp);
-	void DrawAnimatorInspector(nuke::Animator* an);   // serialized state machine (3.1)
+	void DrawAnimatorInspector(nuke::Animator* an);   // serialized state machine
 	void winWorldSettings();   // World Settings window (global shadow settings, saved in the .nuworld)
 	bool worldSettingsOpen = false;
 	bool worldSettingsFocus = false;   // focus the window only when opened via menu, not when restored on load
@@ -437,9 +382,8 @@ public:
 	World::Settings wsBefore;  // pre-edit snapshot of world settings (idle baseline for undo)
 	bool wsEditing = false;
 
-	// Project Settings undo: a snapshot of the value-based project settings (rendering + RTX + disk sync).
-	// Same idle-snapshot -> PushUndo-on-settle scheme as world settings. Backend (restart-required) and the
-	// Default World (own undo) are intentionally NOT part of this snapshot.
+	// Snapshot of the value-based project settings for undo (rendering + RTX + disk sync).
+	// Backend and Default World are deliberately excluded.
 	struct ProjectSettings {
 		int   msaa; bool hdr; float paperWhite, peak;
 		float rtIntensity, rtMaxDist; int rtBounces; float rtRoughCutoff;
@@ -452,8 +396,8 @@ public:
 	void DrawDynamicProps(nuke::Component* cmp);
 	bool EditV3(const char* rowLabel, double v[3]);
 	void winInspector();
-	// Asset inspector: when nothing is selected in the Hierarchy but a project file is selected in the Browser,
-	// the Inspector shows that asset's properties (texture usage/info, material fields, or read-only info + Open).
+	// Inspector body for a browser-selected asset (texture usage/info, material fields,
+	// or read-only info + Open), shown when the Hierarchy selection is empty.
 	void DrawAssetInspector(const std::string& path);
 	std::string     inspAssetPath;                 // cache key: asset currently loaded into the inspector
 	long long       inspAssetMtime = 0;            // + its last-write time, so a reimport (same path) reloads
@@ -463,8 +407,7 @@ public:
 	bool  inspChromaPick = false;                   // eyedropper armed (click the preview to sample)
 	bool  inspChromaOutside = true;                 // key only the border-connected background (keep enclosed areas)
 	nuke::Material* inspMat = nullptr;             // cached loaded .numat (field editing)
-	// text editor (2.2): tabs of open text files; syntax from the file-type descriptor (0.6);
-	// Ctrl+S saves; saved shaders/materials hot-reload through the existing mtime watcher.
+	// One tab of the text editor; syntax comes from the file-type descriptor.
 	struct TextDoc
 	{
 		std::string path;                       // full path on disk
@@ -481,10 +424,8 @@ public:
 	void SaveTextDoc(TextDoc& d);
 	void winTextEditor();
 
-	// --- shared 3D-preview infrastructure: POOLED mini-worlds (sky + shadowless sun +
-	// one mesh atom + camera into an own RT). Pooled because the render seam has no
-	// destroyRenderTarget — closed editors return their scene for reuse. Each World
-	// pushes its own globals per Render() call, so extra worlds never taint the scene.
+	// Shared 3D-preview mini-world (sky + sun + one mesh atom + camera into an own RT).
+	// Pooled: the render seam has no destroyRenderTarget, so closed editors return theirs.
 	struct PreviewWorld
 	{
 		World*        world = nullptr;
@@ -502,16 +443,14 @@ public:
 		ImVec2  rectMin, rectSize;          // last drawn screen rect (gizmo overlay target)
 		int     wantW = 0, wantH = 0;       // debounced resize request (see DrawPreviewImage)
 		int     wantFrames = 0;
-		// The overlay gizmo is hovered/grabbed (set by the CALLER inside its ImGuizmo ID
-		// scope — IsUsing()/IsOver() queried outside the PushID scope lie). Orbit is
-		// suppressed while true.
+		// Overlay gizmo hovered/grabbed; must be set by the caller INSIDE its ImGuizmo ID
+		// scope (IsUsing()/IsOver() lie outside it). Suppresses orbit while true.
 		bool    gizmoBusy = false;
 	};
 	std::vector<PreviewWorld*> pvPool;      // every created scene (in use or free)
 	PreviewWorld* AcquirePreview();
 	void ReleasePreview(PreviewWorld* s);
-	// The interactive 3D view: fills exactly `size` (any aspect — the RT follows it),
-	// LMB drag orbits (captured — never drags the window), wheel dollies.
+	// Interactive 3D view filling exactly `size`: LMB drag orbits, wheel dollies.
 	void DrawPreviewImage(PreviewWorld& s, ImVec2 size);
 	void FramePreview(PreviewWorld& s, Atom* subtree);       // bounds of a subtree (or the mesh atom) -> center/radius
 
@@ -523,10 +462,8 @@ public:
 	void DrawAssetPreview3D(const std::string& path, const std::string& ext);   // inspector widget
 	void RenderAssetPreview(iRender* r);    // render hook: draws every visible preview scene BEFORE the live scene
 
-	// --- ASSET EDITORS: each .numat / .numesh / .nuprefab opens its OWN window with a
-	// live 3D view (own preview scene) and type-specific editing; saves back to the file.
-	// Snapshot of a texture's sprite-slice metadata (Sprite Slicer undo/redo — small enough to copy).
-	// margins ml/mr/mt/mb (per side), spacing sx/sy, 9-slice sl/sr/st/sb.
+	// --- ASSET EDITORS: each .numat / .numesh / .nuprefab opens its own window.
+	// Sprite-slice metadata snapshot: margins ml/mr/mt/mb, spacing sx/sy, 9-slice sl/sr/st/sb.
 	struct SpriteMeta { int cols=1,rows=1, ml=0,mr=0,mt=0,mb=0, sx=0,sy=0, sl=0,sr=0,st=0,sb=0; bool nine=false; };
 
 	struct AssetEditorWin
@@ -540,7 +477,7 @@ public:
 		float dropX = 0, dropY = 0;         // drop point in main-window client coords
 		PreviewWorld* pv = nullptr;
 		Material* mat = nullptr;            // .numat: owned editing copy (saved to the file)
-		// .nutex Sprite Slicer: owned editing copy + GPU preview (downsampled) + 2D view state.
+		// .nutex Sprite Slicer: owned editing copy + downsampled GPU preview + 2D view state.
 		nuke::Texture* tex = nullptr;
 		uint64_t  texPreview = 0;
 		int       texPrevW = 0, texPrevH = 0;
@@ -552,7 +489,7 @@ public:
 		bool      slPlay = false; float slAcc = 0; int slCur = 0;
 		bool      slShowMirror = false; int slPadL = 0, slPadR = 0, slPadT = 0, slPadB = 0;   // cell-0 markup mirrored dimly
 		std::vector<SpriteMeta> undoS, redoS; SpriteMeta idleS; bool haveIdleS = false;
-		// .nuinput: the parsed input map (actions/contexts/bindings), edited in place + saved to the file.
+		// .nuinput: the parsed input map, edited in place and saved back to the file.
 		std::vector<nuke::InputAction>  inActions;
 		std::vector<nuke::InputContext> inContexts;
 		std::vector<std::string> undoI, redoI;   // .nuinput history (serialized map JSON)
@@ -564,18 +501,14 @@ public:
 		bool      gizmoWorld = true;        // gizmo space: world / local (X toggles, like the viewport)
 		long      pendingDeleteId = 0;      // tree ops applied AFTER the tree walk
 		long      pendingAddParentId = 0;
-		// Animation preview (3.1): the ▶ toggle ticks the subtree's Animators each frame;
-		// the pose snapshot taken at play start restores the prefab on stop (mini-PIE).
+		// Animation preview: ticks the subtree's Animators; animSnap restores the pose on stop.
 		bool        animPlay = false;
 		std::string animSnap;
-		// Audio preview (ogg/wav/mp3/flac): the live Preview-bus voice of this window.
-		uint64_t audioVoice = 0;
+		uint64_t audioVoice = 0;            // live Preview-bus voice of this window
 		float    audioVol = 1.0f;
 		float     gizmoMtx[16] = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };   // persistent during a drag
-		// Per-WINDOW undo/redo: Ctrl+Z/Ctrl+Y route here while this window is focused
-		// (EditorUI::Undo/Redo check aeFocused). Snapshots — prefab: atom-subtree JSON;
-		// material: owned clones. An edit BURST (drag) coalesces into ONE entry via the
-		// idle-baseline latch, same idiom as the scene's TrackUndo.
+		// Per-window undo/redo: Ctrl+Z/Ctrl+Y route here while this window is focused
+		// (Undo/Redo check aeFocused). An edit burst coalesces via the idle-baseline latch.
 		std::vector<std::string> undoP, redoP;   // .nuprefab history
 		std::vector<Material*>   undoM, redoM;   // .numat history (owned clones)
 		std::string idleP;                       // pre-edit baseline (prefab JSON)
@@ -585,8 +518,6 @@ public:
 		bool dirty = false, open = true, wantFocus = false;
 	};
 	std::vector<AssetEditorWin> assetEds;
-	// (GPU preview destroys go straight to iRender::destroyTexture2D — the renderer's centralized
-	// trash defers the actual release until no in-flight draw data can reference the handle.)
 	int  aeCloseConfirm = -1;               // editor index awaiting the discard-changes modal
 	int  aeFocused   = -1;                  // asset-editor window focused THIS frame (undo routing)
 	int  textFocused = -1;                  // text-editor window focused THIS frame (undo routing)
@@ -598,8 +529,8 @@ public:
 	void        LoadInputMapJson(AssetEditorWin& w, const std::string& json); // JSON -> w.in*
 	void        SaveInputAsset(AssetEditorWin& w);                            // write the file + apply to live
 	void SlicerPushUndo(AssetEditorWin& w);          // snapshot sprite metadata for undo (coalesced)
-	// Decode + upload a texture's mip0 as a GPU preview, box-downsampled so the longest side <= cap
-	// (huge sheets would otherwise be a multi-MB VRAM spike). Returns the handle; fills the uploaded size.
+	// Decode + upload a texture's mip0 as a GPU preview, box-downsampled to longest side <= cap.
+	// Returns the handle and fills the uploaded size.
 	uint64_t UploadTexPreview(nuke::Texture* t, int cap, int& outW, int& outH);
 	void AssetEditorUndo(AssetEditorWin& w);
 	void AssetEditorRedo(AssetEditorWin& w);
@@ -610,12 +541,11 @@ public:
 
 	// viewport
 	void winRender();
-	// Billboard icons for INVISIBLE entities (camera / light / probe / environment):
-	// screen-space Lucide glyphs (same mapping as the hierarchy) overlaid on the viewport
-	// image in EDIT mode — projected with the exact gizmo view/proj, clickable to select.
+	// Clickable billboard icons for invisible entities (camera / light / probe / environment),
+	// overlaid on the viewport image in edit mode using the gizmo's view/proj.
 	void DrawEntityIcons(ImVec2 rmin, ImVec2 sz);
-	// This frame's icon hit-rects (min.xy, max.zw -> atom), ordered back-to-front; the
-	// viewport click handler tests these BEFORE the scene ray-pick (topmost icon wins).
+	// This frame's icon hit-rects (min.xy, max.zw -> atom), back-to-front; the viewport
+	// click handler tests these BEFORE the scene ray-pick (topmost icon wins).
 	std::vector<std::pair<ImVec4, Atom*>> iconHits;
 	// dialogs
 	void winAbout();
@@ -633,8 +563,7 @@ public:
 	void BrowserNavigate(const std::string& path);   // change folder + push history (clears forward)
 	void BrowserBack();                              // M4 / back button
 	void BrowserForward();                           // M5 / forward button
-	// Drag & drop: drag a browser entry (payload "NUKE_ASSET" = full path); drop on a folder to move,
-	// or on the viewport / hierarchy to instantiate.
+	// Browser drag & drop; payload "NUKE_ASSET" = full path (folder = move, viewport = instantiate).
 	void BrowserDragSource(const std::string& path);
 	void BrowserFolderDropTarget(const std::string& folderPath);
 	void SaveAtomAsPrefab(Atom* a, const std::string& folder);   // drag an atom into the browser -> .nuprefab
@@ -656,32 +585,32 @@ public:
 	void OverwriteWorld();           // save editor state over disk + reset baseline
 	void DrawReloadPopup();          // "changed on disk (editor clean): reload?"
 	void DrawConflictPopup();        // "changed on disk AND in editor: reload / overwrite / merge / ignore"
-	// Merge/resolve window: hierarchical per-object/param diff of editor vs disk, pick a side per node.
+	// Merge/resolve window: per-object/param diff of editor vs disk, pick a side per node.
 	void OpenMerge(const std::string& editorJson, const std::string& diskJson);
 	void DrawMergeWindow();
 	void AcceptAssetDropTarget();                    // viewport/hierarchy: accept an asset drop
 	Atom* DropAsset(const std::string& path);        // instantiate by extension; returns the new atom (or null)
-	// Drop a material/texture asset ONTO an existing atom (viewport DnD): .numat -> the atom's material,
-	// .nutex -> the atom's material base-color (diffuse). Undoable. No-op if the atom has no MeshRenderer.
+	// Drop a .numat (-> material) or .nutex (-> base color) onto an atom. Undoable;
+	// no-op if the atom has no MeshRenderer.
 	void  DropAssetOnAtom(Atom* a, const std::string& path);
 	Atom* SpawnMeshAsset(const std::string& path);   // .numesh -> new Atom + MeshRenderer
 	// Create new assets in a content folder (from the browser's "New" menu).
 	void CreateFolderAsset(const std::string& folder);
 	void CreateWorldAsset(const std::string& folder);    // empty .nuworld
 	void CreateMaterialAsset(const std::string& folder); // default .numat (registered in ResDB)
-	void CreateBoneMapAsset(const std::string& folder);  // .nubonemap retarget map (JSON, 3.1)
+	void CreateBoneMapAsset(const std::string& folder);  // .nubonemap retarget map (JSON)
 	void CreateShaderAsset(const std::string& folder);   // .vs/.ps.hlsl pair (registered + pipeline built)
 	void CreateRenderTextureAsset(const std::string& folder);   // .nutex RenderTexture (camera target)
 	// plugins
 	void PluginMGRWindow();
-	// status bar (2.3): frame stats + scene counters + plugin fields (nuke::StatusBar)
+	// status bar: frame stats + scene counters + plugin fields (nuke::StatusBar)
 	void StatusBarPanel();
 	// toolbar
 	bool ToolBtn(const char* icon, const char* tip, bool active, float w);
 	void SpawnEmpty();
 	void SpawnPrimitive(const char* atomName, const char* guid);
-	// Spawn placement: in front of the editor camera — on the surface it's looking at (ray hit) if any,
-	// else a fixed distance ahead. FinishSpawn positions + adds + selects + records a freshly-created atom.
+	// Spawn placement in front of the editor camera (on the ray-hit surface if any).
+	// FinishSpawn positions, adds, selects and records a freshly-created atom.
 	Vector3 SpawnPos();
 	Atom*   FinishSpawn(Atom* atom);
 	void SpawnCube();
@@ -689,39 +618,32 @@ public:
 	void SpawnLight(int type, const char* atomName);   // type 0=dir 1=point 2=spot
 	void SpawnEnvironment();                           // atom + Environment (sky/ambient)
 	void SpawnReflectionProbe();                       // atom + ReflectionProbe (scene-captured reflections)
-	// Boot-time background project load (fast editor UI, content later): SetUp() defers the
-	// heavy tail — content scan, shader loads, pipeline compiles, the boot world — to a worker
-	// plus a per-frame pump. While bootLoading != 0 the Hierarchy/Inspector/Viewport/Browser
-	// panels draw a locked placeholder and the status bar reports each step.
-	// 0 = idle/done, 1 = content+shaders on a worker, 2 = pipelines/world staged+activating,
-	// 3 = warm-up frame (the first real world frame compiles lazy shaders, e.g. water).
+	// Background project load. 0 = done, 1 = content+shaders on a worker, 2 = pipelines/world,
+	// 3 = warm-up frame. Non-zero locks the Hierarchy/Inspector/Viewport/Browser panels.
 	int bootLoading = 0;
-	std::string bootWorldRel;          // boot world (lastWorld|startupWorld), picked after editor_state loads
-	double bootPrevActBudget = 0.0;    // activation budget restored once the boot finishes
-	void StartBootLoad();
-	void PumpBootLoad();
+	std::string bootWorldRel;
+	double bootPrevActBudget = 0.0;
+	void StartBootLoad();   // start the background tail of SetUp()
+	void PumpBootLoad();    // per frame: pipelines, world activation, unlock
 	void Toolbar();
 	void Draw();
 	// undo/redo (generic command stack)
 	void Undo();
 	void Redo();
-	// worldEdit=false for commands that do NOT change the open world (file moves, project
-	// settings, asset tweaks) — they stay undoable but must not flip the world's dirty "*".
+	// Push an undoable command. worldEdit=false for commands that do not change the open
+	// world (file moves, project settings): undoable, but they must not flip the dirty "*".
 	void PushUndo(const std::string& label, std::function<void()> undoFn, std::function<void()> redoFn,
 	              bool worldEdit = true);
 	void TrackUndo();                  // detect a settled selected-atom edit (inspector/gizmo); not in PIE
 	void ResetUndo();                  // clear history (on world load / new)
 	void ApplyAtomState(long id, long parentId, int index, const std::string& json);   // undo primitive
 	void RecordAdd(Atom* a);                                       // an atom was created
-	void RecordReparent(Atom* a, long oldParent, int oldIndex,
-	                    const std::string& beforeJson);           // an atom moved in the hierarchy
-	                                                              // (beforeJson = pre-move snapshot)
+	// An atom moved in the hierarchy. beforeJson = its serialized state BEFORE the move.
+	void RecordReparent(Atom* a, long oldParent, int oldIndex, const std::string& beforeJson);
 	void RecordDelete(Atom* a);                                   // an atom was deleted
 	void DeleteSelectedAtom();                                    // hierarchy: delete the selected atom (undoable)
-	// Atom clipboard (Edit menu / hierarchy / viewport). Copy puts the serialized subtree on the
-	// OS clipboard (JSON envelope — paste works across editor instances); paste clones with fresh
-	// ids as a sibling after the selection (root when nothing is selected); duplicate = one-step
-	// copy of the selection next to itself. All undoable.
+	// Atom clipboard, all undoable. Copy serializes the subtree onto the OS clipboard as a
+	// JSON envelope (so paste works across editor instances); paste clones with fresh ids.
 	void CopySelectedAtom();
 	void CutSelectedAtom();                                       // copy + undoable delete
 	void PasteAtom();

@@ -1,42 +1,38 @@
-// viewport panel — EditorUI method definitions (translation unit).
+// Viewport panel: EditorUI method definitions.
 
-// INFINITE camera look/pan (editor viewport): while an RMB/MMB drag is live the cursor is
-// CAPTURED (hidden + unbounded virtual deltas) so the rotation never dies at the screen
-// edge; on release the OS cursor pops back where the drag began.
+// Infinite camera look/pan: while an RMB/MMB drag is live the cursor is captured
+// (hidden, unbounded deltas) so rotation never dies at the screen edge.
 static bool s_camLookWant = false;      // set by the drag handlers each frame they apply
 static bool s_camLookCapture = false;   // capture currently engaged
 #include <editor/editorui.h>
-#include "nukeui.h"   // DocWindow: detachable panels (task #137)
+#include "nukeui.h"
 #include "API/Model/Math.h"
-#include "API/Model/resdb.h"   // RenderTexture camera preview (resolve targetTexGuid -> RT)
-#include "API/Model/Light.h"             // entity icons: glyph/tint per component
+#include "API/Model/resdb.h"
+#include "API/Model/Light.h"
 #include "API/Model/ReflectionProbe.h"
 #include "API/Model/Environment.h"
-#include "API/Model/Screen.h"    // editor feeds the "game screen" size (the viewport panel)
-#include "API/Model/Canvas.h"    // canvas 2D resize gizmo (corner/edge handles)
-#include <interface/ComponentIcons.h>   // registered entity icons (modules bring their own)
-#include <API/Model/Foliage.h>          // foliage paint brush (7.4)
-#include <reflect/Reflect.h>            // WaterRiver spline handles: the type lives in the water plugin — reach it by NAME
-#include <API/Model/DebugDraw.h>        // brush circle preview
+#include "API/Model/Screen.h"
+#include "API/Model/Canvas.h"
+#include <interface/ComponentIcons.h>
+#include <API/Model/Foliage.h>
+#include <reflect/Reflect.h>            // WaterRiver type lives in the water plugin — reached by name
+#include <API/Model/DebugDraw.h>
 #include <functional>
 #include <cmath>
 #include <algorithm>
 #include <cctype>
-#include <cstring>   // strcmp: module-component icon match by type name
+#include <cstring>   // strcmp: cross-DLL type-name match
 #define GLM_ENABLE_EXPERIMENTAL
-#include <glm/gtx/matrix_decompose.hpp>   // gizmo: decompose the manipulated world matrix
+#include <glm/gtx/matrix_decompose.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
-// True while the canvas 2D rect gizmo is hovered/dragged this frame — the click-to-pick handler
-// must not steal (or deselect on) clicks meant for the handles.
+// Set while the canvas 2D rect gizmo is hovered/dragged — click-pick must not steal those clicks.
 static bool s_canvasGizmoHot = false;
 
-// Same for the WaterRiver spline-point handles: while one is hovered/dragged the scene
-// click-pick AND the transform gizmo must not also react to the mouse.
+// Same for WaterRiver spline handles: mutes click-pick and the transform gizmo.
 static bool s_riverGizmoHot = false;
 
-// Cast a ray from a screen point inside the viewport image and return the atom under it (null = none).
-// Shared by left-click selection and asset drag&drop onto an object.
+// Ray-picks the atom under a screen point inside the viewport image; null when nothing is hit.
 static nuke::Atom* PickAtScreen(nuke::Camera* cam, ImVec2 rmin, ImVec2 sz, ImVec2 mp)
 {
 	if (!cam || !cam->transform || sz.x <= 0.0f || sz.y <= 0.0f) return nullptr;
@@ -46,7 +42,7 @@ static nuke::Atom* PickAtScreen(nuke::Camera* cam, ImVec2 rmin, ImVec2 sz, ImVec
 	nuke::Vector3 o = t->globalPosition();
 	nuke::Vector3 f = t->direction(), rr = t->right(), uu = t->up();
 	float aspect = sz.x / sz.y;
-	if (cam->projBlend >= 0.5f)   // orthographic: rays are PARALLEL (dir = forward), the ORIGIN slides across the frame
+	if (cam->projBlend >= 0.5f)   // ortho: rays are parallel — the origin slides, not the direction
 	{
 		float halfH = (cam->orthoSize > 1e-4f) ? cam->orthoSize : 1.0f, halfW = halfH * aspect;
 		nuke::Vector3 ori(o.x + ndcx * halfW * rr.x + ndcy * halfH * uu.x,
@@ -61,9 +57,8 @@ static nuke::Atom* PickAtScreen(nuke::Camera* cam, ImVec2 rmin, ImVec2 sz, ImVec
 	return nuke::AppInstance::GetSingleton()->currentWorld->Pick(o, dir);
 }
 
-// The editor camera's projection matrix (glm, LH depth 0..1), matching the renderer's
-// persp<->ortho blend (Camera::projBlend) so gizmos / entity icons / picking stay glued to the
-// rendered image in orthographic mode and during the transition.
+// Editor camera projection (glm, LH depth 0..1), blended persp<->ortho like the renderer,
+// so gizmos / icons / picking stay glued to the rendered image.
 static glm::mat4 EditorCamProj(nuke::Camera* cam, float aspect)
 {
 	glm::mat4 persp = glm::perspectiveLH_ZO((float)cam->fov * 0.01745329252f, aspect, cam->_near, cam->_far);
@@ -77,10 +72,6 @@ static glm::mat4 EditorCamProj(nuke::Camera* cam, float aspect)
 	return r;
 }
 
-// Billboard icons for invisible entities (2.1): cameras, lights, reflection probes and
-// environments have no mesh — in EDIT mode each gets a screen-space Lucide glyph (the
-// hierarchy's icon language) at its world position, drawn back-to-front on the viewport
-// overlay. Hovering shows the atom name; the click handler picks icons before the ray.
 void EditorUI::DrawEntityIcons(ImVec2 rmin, ImVec2 sz)
 {
 	iconHits.clear();
@@ -89,8 +80,7 @@ void EditorUI::DrawEntityIcons(ImVec2 rmin, ImVec2 sz)
 	if (app->playState != 0) return;                       // edit mode only
 	if (sz.x <= 1.0f || sz.y <= 1.0f) return;
 
-	// The EXACT view/proj the gizmo uses (renderer convention: LH, depth 0..1), so the
-	// icons sit on the rendered image precisely.
+	// Must be the EXACT view/proj the gizmo uses (LH, depth 0..1) or icons drift off the image.
 	glm::mat4 vp;
 	{
 		Transform* c = editorCam->transform;
@@ -103,7 +93,7 @@ void EditorUI::DrawEntityIcons(ImVec2 rmin, ImVec2 sz)
 			glm::vec3((float)(e.x + f.x), (float)(e.y + f.y), (float)(e.z + f.z)),
 			glm::vec3((float)u.x, (float)u.y, (float)u.z));
 		(void)fovy;
-		vp = EditorCamProj(editorCam, aspect) * v;   // persp/ortho blended (matches the render)
+		vp = EditorCamProj(editorCam, aspect) * v;
 	}
 
 	struct Icon { float depth; ImVec2 c; const char* glyph; ImU32 col; Atom* atom; };
@@ -122,8 +112,7 @@ void EditorUI::DrawEntityIcons(ImVec2 rmin, ImVec2 sz)
 			else if (Light* l = atom->GetComponent<Light>())
 			{
 				glyph = l->type == 0 ? ICON_LC_SUN : (l->type == 2 ? ICON_LC_SPOTLIGHT : ICON_LC_LIGHTBULB);
-				// tint with the light color, floored so a dark light stays readable
-				const double fl = 0.35;
+				const double fl = 0.35;   // color floor so a dark light stays readable
 				col = IM_COL32((int)(255.0 * std::max(l->color.r, fl)),
 				               (int)(255.0 * std::max(l->color.g, fl)),
 				               (int)(255.0 * std::max(l->color.b, fl)), 235);
@@ -132,10 +121,7 @@ void EditorUI::DrawEntityIcons(ImVec2 rmin, ImVec2 sz)
 			else if (atom->GetComponent<Environment>())     { glyph = ICON_LC_CLOUD_SUN; col = IM_COL32(150, 200, 255, 235); }
 			else
 			{
-				// REGISTERED component icons (interface/ComponentIcons.h): engine systems and
-				// MODULES register their own — no editor hardcode, no editor<->module linkage.
-				// Match by TYPE NAME content (Component::name is char*; == would compare
-				// pointers across DLLs and never hit).
+				// Registered component icons: match by type-name CONTENT — pointer compare fails across DLLs.
 				for (nuke::Component* mc : atom->components)
 				{
 					if (!mc || !mc->name) continue;
@@ -181,7 +167,7 @@ void EditorUI::DrawEntityIcons(ImVec2 rmin, ImVec2 sz)
 	{
 		ImVec2 ts = font->CalcTextSizeA(isz, FLT_MAX, 0.0f, ic.glyph);
 		ImVec2 p0(ic.c.x - ts.x * 0.5f, ic.c.y - ts.y * 0.5f);
-		if (ic.atom == sel)   // selection ring, matching the gizmo's accent
+		if (ic.atom == sel)   // selection ring
 			dl->AddCircle(ic.c, ts.x * 0.85f, IM_COL32(255, 190, 60, 220), 0, 1.5f);
 		dl->AddText(font, isz, ImVec2(p0.x + 1.0f, p0.y + 1.0f), IM_COL32(0, 0, 0, 170), ic.glyph);   // shadow
 		dl->AddText(font, isz, p0, ic.col, ic.glyph);
@@ -203,11 +189,9 @@ void EditorUI::winRender()
 	if (!win->render) return;
 	NukeUI::DocPanel("panel:render", "Render", &win->render, window_flags, 960, 620, [this]()
 	{
-	// Boot load in progress: locked — the world is still streaming in (gizmos/picking would
-	// operate on half a scene). The status bar reports progress.
+	// Locked while booting: gizmos/picking would operate on half a world.
 	if (bootLoading) { ImGui::TextDisabled("Loading project..."); return; }
 
-	// Smooth "focus selected": ease the editor camera toward the target each frame (orientation kept).
 	if (camFocusing && editorCam && editorCam->transform)
 	{
 		ImGuiIO& fio = ImGui::GetIO();
@@ -221,9 +205,8 @@ void EditorUI::winRender()
 		}
 	}
 
-	// Hotkeys: fire when the viewport is focused OR hovered (mouse over it) — matching the WASD camera
-	// input, which is hover-based, so tools/Delete work even if another docked panel holds focus. Not
-	// while typing in a field or flying with RMB held. Q/W/E/R = tools, X = World/Local, F = frame, Del.
+	// Hotkeys fire on focus OR hover (matching the hover-based WASD camera), never while typing
+	// in a field or flying with RMB held. Q/W/E/R = tools, X = World/Local, F = frame, Del.
 	if ((ImGui::IsWindowFocused() || ImGui::IsWindowHovered()) && !ImGui::GetIO().WantTextInput && !ImGui::IsMouseDown(ImGuiMouseButton_Right))
 	{
 		AppInstance* a = AppInstance::GetSingleton();
@@ -232,15 +215,13 @@ void EditorUI::winRender()
 		if (ImGui::IsKeyPressed(ImGuiKey_E)) a->manipulationMode = 2;
 		if (ImGui::IsKeyPressed(ImGuiKey_R)) a->manipulationMode = 3;
 		if (ImGui::IsKeyPressed(ImGuiKey_X)) a->manipulationWorld = !a->manipulationWorld;
-		if (ImGui::IsKeyPressed(ImGuiKey_F)) FocusSelected();   // frame the selected object
-		// Delete the selected atom from the viewport too (same rebindable pool as the hierarchy).
+		if (ImGui::IsKeyPressed(ImGuiKey_F)) FocusSelected();
 		nuke::Hotkeys* hk = nuke::Hotkeys::Get();
 		nuke::Hotkey* d  = hk->Find("editor.delete");
 		nuke::Hotkey* df = hk->Find("editor.delete.force");
 		if ((d  && d->bound  && ImGui::IsKeyChordPressed((ImGuiKeyChord)d->chord)) ||
 		    (df && df->bound && ImGui::IsKeyChordPressed((ImGuiKeyChord)df->chord)))
 			DeleteSelectedAtom();
-		// Atom clipboard works from the viewport as well (copy what you see, stamp duplicates).
 		auto chord = [&](const char* id) { nuke::Hotkey* h = hk->Find(id); return h && h->bound && ImGui::IsKeyChordPressed((ImGuiKeyChord)h->chord); };
 		if (chord("editor.copy"))      CopySelectedAtom();
 		if (chord("editor.cut"))       CutSelectedAtom();
@@ -255,21 +236,16 @@ void EditorUI::winRender()
 		if (sceneRTId == 0)
 		{
 			sceneRTId = r->createRenderTarget((int)avail.x, (int)avail.y);
-			if (editorCam) editorCam->renderTarget = sceneRTId; // editor cam draws here
+			if (editorCam) editorCam->renderTarget = sceneRTId;
 		}
 		else
 		{
-			r->resizeRenderTarget(sceneRTId, (int)avail.x, (int)avail.y); // match the panel
+			r->resizeRenderTarget(sceneRTId, (int)avail.x, (int)avail.y);
 		}
 		nuke::Screen::Set((int)avail.x, (int)avail.y);   // the editor's "game screen" = the viewport panel
 
-		// --- PIE possess: which camera drives the viewport RT this frame ---------------------------
-		// Playing with the toolbar switch on "Game Camera" (default, UE-style possess): the world's
-		// main camera (World::GetMainCamera — Main flag, else first) takes the viewport; the editor
-		// camera stops rendering. Everything is re-resolved EVERY frame from the live world — scripts
-		// can destroy/spawn cameras and PIE Stop reloads the world, so no Camera* is ever cached.
-		// While possessed the viewport is a pure game view: gizmos/icons/editor picking/camera
-		// controls are suspended (they are editor-camera-ray based); Stop returns them instantly.
+		// PIE possess: pick the camera driving the viewport RT. Re-resolved EVERY frame from the live
+		// world — scripts spawn/destroy cameras and Stop reloads it, so never cache a Camera*.
 		nuke::Camera* driveCam = editorCam;
 		{
 			AppInstance* papp = AppInstance::GetSingleton();
@@ -277,9 +253,7 @@ void EditorUI::winRender()
 				if (nuke::Camera* mc = papp->currentWorld->GetMainCamera())
 					if (mc->targetTexGuid.empty())   // a RenderTexture camera keeps its own target
 						driveCam = mc;
-			// Exactly ONE camera owns the viewport RT: strip it from every other camera (covers the
-			// editor cam while possessed, the previous game camera after a switch/destroy, and
-			// snapshot-restored cameras after Stop).
+			// Exactly ONE camera may own the viewport RT — strip it from every other camera.
 			std::function<void(bc::list<nuke::Atom*>&)> strip = [&](bc::list<nuke::Atom*>& gos)
 			{
 				for (nuke::Atom* at : gos)
@@ -297,9 +271,8 @@ void EditorUI::winRender()
 		uint64_t tex = r->getRenderTargetTexture(sceneRTId);
 		if (tex)
 		{
-			ImGui::Image((ImTextureID)tex, avail); // the live scene viewport
-			// Drag from the browser onto the scene: a material/texture drops ONTO the object under the
-			// cursor; anything else (prefab/mesh/world) spawns into the scene.
+			ImGui::Image((ImTextureID)tex, avail);
+			// Drop: material/texture applies to the atom under the cursor, anything else spawns.
 			if (ImGui::BeginDragDropTarget())
 			{
 				if (const ImGuiPayload* dp = ImGui::AcceptDragDropPayload("NUKE_ASSET"))
@@ -310,7 +283,7 @@ void EditorUI::winRender()
 					std::transform(dext.begin(), dext.end(), dext.begin(), ::tolower);
 					if (dext == ".numat" || dext == ".nutex")
 					{
-						// Pick with the camera that ACTUALLY renders the image (game cam while possessed).
+						// Must pick with the camera that ACTUALLY renders the image (game cam while possessed).
 						if (nuke::Atom* hit = PickAtScreen(driveCam, ImGui::GetItemRectMin(), ImGui::GetItemRectSize(), ImGui::GetMousePos()))
 							DropAssetOnAtom(hit, dpath);
 					}
@@ -318,12 +291,8 @@ void EditorUI::winRender()
 				}
 				ImGui::EndDragDropTarget();
 			}
-			// Tell the runtime GUI (NukeGUI) to draw INTO this viewport RT + map input to its rect.
-			// uiX/uiY are consumed against iRender::getCursorPos = GLFW coords RELATIVE TO THE
-			// MAIN WINDOW'S CLIENT AREA, but GetItemRectMin is ImGui SCREEN space (multi-viewport:
-			// absolute desktop coords) — subtract the main viewport origin or every game-UI click
-			// and Input.MouseX lands offset by the window position. (A game view dragged out to
-			// its own OS window can't map main-window cursor coords — known limitation.)
+			// Runtime GUI target + input rect. uiX/uiY are compared against GLFW coords relative to
+			// the main window's client area, so the main viewport origin MUST be subtracted here.
 			ImVec2 imin = ImGui::GetItemRectMin();
 			ImVec2 vpos = ImGui::GetMainViewport()->Pos;
 			AppInstance* app = AppInstance::GetSingleton();
@@ -331,27 +300,26 @@ void EditorUI::winRender()
 			app->uiX = (int)(imin.x - vpos.x); app->uiY = (int)(imin.y - vpos.y);
 			app->uiW = (int)avail.x; app->uiH = (int)avail.y;
 
-			// Invisible-entity icons (edit mode): drawn UNDER the camera preview and the gizmo.
-			// Suspended in the possessed game view (their rays/rects are editor-camera based).
+			// Entity icons must draw before the camera preview and the gizmo (edit mode only).
 			if (!possessed) DrawEntityIcons(imin, avail);
 			else            iconHits.clear();   // no stale clickable rects from the edit view
 		}
 		else
 			ImGui::Text("No scene texture.");
 
-		// --- selected-camera preview: a small overlay in the viewport's bottom-right ---
+		// Selected-camera preview overlay (bottom-right of the viewport).
 		if (previewCam) { previewCam->renderTarget = 0; previewCam = nullptr; }   // release last frame's
 		{
 			Atom* sel = AppInstance::GetSingleton()->selectedInHieararchy;
 			Camera* selCam = sel ? sel->GetComponent<Camera>() : nullptr;
-			if (selCam && !selCam->enabled) selCam = nullptr;   // disabled camera: no preview (it renders nothing)
+			if (selCam && !selCam->enabled) selCam = nullptr;   // disabled camera renders nothing
 			if (tex && selCam && selCam != editorCam && selCam != driveCam)   // the driving camera IS the big image
 			{
 				uint64_t ptex = 0;
 				if (!selCam->targetTexGuid.empty())
 				{
-					// RenderTexture camera: it already renders into its own RT (World::Render) — preview that
-					// directly. Do NOT hijack renderTarget to camPreviewRT (that would steal it from the RT).
+					// RenderTexture camera already owns an RT — preview it directly; reassigning
+					// renderTarget here would steal the target from the RenderTexture.
 					if (nuke::Texture* rtx = ResDB::getSingleton()->GetTexture(selCam->targetTexGuid))
 						if (rtx->rtId) ptex = r->getRenderTargetTexture(rtx->rtId);
 					previewCam = nullptr;
@@ -364,7 +332,7 @@ void EditorUI::winRender()
 					ptex = r->getRenderTargetTexture(camPreviewRT);
 				}
 
-				ImVec2 imax = ImGui::GetItemRectMax();  // bottom-right of the scene image
+				ImVec2 imax = ImGui::GetItemRectMax();
 				ImVec2 pv(256, 144), pad(12, 12);
 				ImVec2 p0(imax.x - pv.x - pad.x, imax.y - pv.y - pad.y);
 				ImVec2 p1(p0.x + pv.x, p0.y + pv.y);
@@ -377,24 +345,15 @@ void EditorUI::winRender()
 			}
 		}
 
-		// --- WaterRiver spline handles: the control points are draggable right in the viewport.
-		// The water module already draws the spline + wire spheres while the atom is selected
-		// (its OnRender Overlay phase); here every point gets a screen-space circular handle.
-		// LMB-drag moves the point in the camera-facing plane through its grab position
-		// (Shift = the world XZ plane instead); the whole gesture is ONE undo entry (the
-		// entire `points` vector before/after). Ctrl+Click a handle deletes the point (a
-		// river keeps at least 2); Ctrl+Click near the drawn spline appends one at the
-		// clicked spot. Runs BEFORE the transform gizmo so a hot handle can mute it. -------
+		// WaterRiver spline handles: LMB-drag moves a point (Shift = world XZ plane), Ctrl+Click
+		// deletes it or appends near the spline. Must run BEFORE the transform gizmo so a hot
+		// handle can mute it; the whole gesture is one undo entry.
 		s_riverGizmoHot = false;
 		{
 			AppInstance* wapp = AppInstance::GetSingleton();
 			Atom* wsel = wapp->selectedInHieararchy;
-			// The WaterRiver TYPE lives in the water plugin DLL — the editor has ZERO compile-time
-			// knowledge of it. Find the component by its reflected type NAME (content compare:
-			// Component::name is a char* set in the ctor — == would compare pointers across DLLs
-			// and never hit, same rule as the entity icons), then reach the LIVE `points` vector
-			// through the reflection schema. Type or field missing (plugin not loaded) = no
-			// handles, silently.
+			// The WaterRiver type lives in the water plugin DLL: find it by type-name CONTENT
+			// (pointer compare fails across DLLs) and reach `points` through reflection.
 			nuke::Component* riv = nullptr;
 			std::vector<float>* rvPts = nullptr;
 			if (wsel && wapp->playState == 0)
@@ -405,8 +364,8 @@ void EditorUI::winRender()
 					for (nuke::Field& rf : rti->fields)
 						if (rf.name == "points" && rf.type == nuke::FT::FloatList && rf.addr)
 							{ rvPts = (std::vector<float>*)rf.addr(riv); break; }
-			// Drag state survives frames; the component pointer doubles as an identity check so a
-			// selection/world change mid-drag ABORTS instead of writing into a different river.
+			// The stored component pointer is an identity check: a selection/world change mid-drag
+			// must abort instead of writing into a different river.
 			static bool rvDragging = false; static int rvDragIdx = -1; static void* rvDragRiv = nullptr;
 			static std::vector<float> rvBefore;    // the whole vector at drag start (undo capture)
 			static Vector3 rvAnchor(0, 0, 0);      // dragged point's world pos at grab (plane anchor)
@@ -422,7 +381,7 @@ void EditorUI::winRender()
 					glm::vec3((float)ge.x, (float)ge.y, (float)ge.z),
 					glm::vec3((float)(ge.x + gf.x), (float)(ge.y + gf.y), (float)(ge.z + gf.z)),
 					glm::vec3((float)gu.x, (float)gu.y, (float)gu.z));
-				glm::mat4 gp = EditorCamProj(editorCam, aspect);   // the icons'/gizmo's exact view/proj
+				glm::mat4 gp = EditorCamProj(editorCam, aspect);
 				auto toScreen = [&](const Vector3& w, ImVec2& out) -> bool
 				{
 					glm::vec4 c = gp * gv * glm::vec4((float)w.x, (float)w.y, (float)w.z, 1.0f);
@@ -431,7 +390,7 @@ void EditorUI::winRender()
 					             rmin.y + (0.5f - c.y / c.w * 0.5f) * vsz.y);
 					return true;
 				};
-				// Mouse ray from the SAME view (persp/ortho branches, matching PickAtScreen).
+				// Mouse ray must use the SAME view/branches as PickAtScreen.
 				ImVec2 mp = ImGui::GetIO().MousePos;
 				auto mouseRay = [&](Vector3& ro, Vector3& rdir)
 				{
@@ -454,8 +413,7 @@ void EditorUI::winRender()
 					}
 				};
 
-				// Control points: atom-local -> world (world = pos + rot * local; rivers ignore
-				// atom scale — same rule as the river's own Rebuild).
+				// Control points atom-local -> world; rivers ignore atom scale (as does their Rebuild).
 				Vector3 P = riv->transform->globalPosition();
 				Quaternion Q = riv->transform->globalRotation();
 				Quaternion Qc(-Q.x, -Q.y, -Q.z, Q.w);   // conjugate: world -> atom-local
@@ -477,9 +435,8 @@ void EditorUI::winRender()
 						if (dx * dx + dy * dy < 8.0f * 8.0f) { hover = i; break; }
 					}
 
-				// One undo entry per gesture: restore/set the WHOLE points vector, resolved at
-				// undo time by atom id + type NAME + reflected field (pointers dangle across
-				// undo-recreated atoms, and the type itself stays plugin-side).
+				// One undo entry per gesture, resolved at undo time by atom id + type name +
+				// reflected field: component pointers dangle across undo-recreated atoms.
 				long aid = wsel->id.id;
 				auto pushPointsUndo = [&](const std::vector<float>& before, const std::vector<float>& after)
 				{
@@ -499,15 +456,12 @@ void EditorUI::winRender()
 					PushUndo("Edit river points",
 						[set, aid, before]{ set(aid, before); },
 						[set, aid, after ]{ set(aid, after ); });
-					// The generic selected-atom settler (TrackUndo) must not ALSO record this
-					// gesture: drop its in-progress edit and adopt the post-edit state as the
-					// idle baseline (same idiom as the settings panels).
+					// TrackUndo must not ALSO record this gesture: drop its in-progress edit and
+					// adopt the post-edit state as the idle baseline.
 					editing = false; editAtomId = 0;
 					idleAtomId = aid; idleSnap = SaveAtomToString(wsel); idleSnapValid = true;
 				};
 
-				// Ctrl+Click: delete the point under the cursor, or — near the drawn spline —
-				// append a new point at the end of the list at the clicked ground height.
 				bool rvClickDone = false;
 				if (!rvDragging && ImGui::IsItemHovered() && !ImGuizmo::IsUsing() &&
 				    ImGui::GetIO().KeyCtrl && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
@@ -521,10 +475,8 @@ void EditorUI::winRender()
 					}
 					else if (hover < 0 && n >= 2)
 					{
-						// Near the drawn spline? The module draws a Catmull-Rom through the
-						// points — walk the same curve here (subdivided per segment; click
-						// precision doesn't need the module's exact centripetal resample) and
-						// test the click against its projection.
+						// Hit-test against the same Catmull-Rom the module draws (coarse subdivision
+						// is enough for click precision).
 						bool nearSpline = false;
 						auto cpAt = [&](int i) -> const Vector3& { return wpos[std::min(std::max(i, 0), n - 1)]; };
 						for (int seg = 0; seg + 1 < n && !nearSpline; ++seg)
@@ -545,8 +497,7 @@ void EditorUI::winRender()
 						}
 						if (nearSpline)
 						{
-							// Append at the clicked spot on the horizontal plane through the LAST
-							// point — the natural "keep extending the river" height.
+							// Append on the horizontal plane through the LAST point.
 							Vector3 ro, rd; mouseRay(ro, rd);
 							if (fabs(rd.y) > 1e-8)
 							{
@@ -567,8 +518,6 @@ void EditorUI::winRender()
 					}
 				}
 
-				// Drag lifecycle: grab on a plain LMB press over a handle; a selection/world
-				// switch mid-drag aborts; release records the single undo entry.
 				if (!rvDragging && !rvClickDone && hover >= 0 && !ImGui::GetIO().KeyCtrl &&
 				    ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
 				{
@@ -584,8 +533,7 @@ void EditorUI::winRender()
 				}
 				if (rvDragging && rvDragIdx >= 0 && rvDragIdx < n)
 				{
-					// Drag plane: perpendicular to the camera forward, through the point's
-					// world position at grab time; Shift = the world XZ (horizontal) plane.
+					// Drag plane faces the camera through the grab position; Shift = world XZ.
 					Vector3 ro, rd; mouseRay(ro, rd);
 					Vector3 pn = ImGui::GetIO().KeyShift ? Vector3(0, 1, 0) : gf;
 					double denom = rd.x * pn.x + rd.y * pn.y + rd.z * pn.z;
@@ -604,7 +552,6 @@ void EditorUI::winRender()
 				}
 				s_riverGizmoHot = (hover >= 0) || rvDragging || rvClickDone;
 
-				// Handles on the viewport overlay: filled dot + dark outline; amber when hot.
 				ImDrawList* dl = ImGui::GetWindowDrawList();
 				for (int i = 0; i < n; ++i)
 				{
@@ -631,12 +578,8 @@ void EditorUI::winRender()
 				ImVec2 gsz   = ImGui::GetItemRectSize();
 				ImGuizmo::SetRect(grmin.x, grmin.y, gsz.x, gsz.y);
 
-				// Build view/proj on the editor side in glm column-major, in the SAME
-				// convention as the renderer (Diligent: left-handed, depth 0..1), so the
-				// gizmo overlays the rendered image and ImGuizmo gets valid input.
-				// Feed ImGuizmo the renderer's EXACT view/proj (Diligent: row-major, LH,
-				// depth 0..1) so screen<->world matches the image precisely — per-axis
-				// scale needs an exact ray, and ImGuizmo then detects handedness right.
+				// ImGuizmo needs the renderer's EXACT view/proj (LH, depth 0..1) — per-axis
+				// scale needs an exact ray, and handedness detection depends on it.
 				float gview[16], gproj[16];
 				{
 					Transform* gcam = editorCam->transform;
@@ -647,8 +590,7 @@ void EditorUI::winRender()
 						glm::vec3((float)ge.x, (float)ge.y, (float)ge.z),
 						glm::vec3((float)(ge.x + gf.x), (float)(ge.y + gf.y), (float)(ge.z + gf.z)),
 						glm::vec3((float)gu.x, (float)gu.y, (float)gu.z));
-					glm::mat4 gp = EditorCamProj(editorCam, gaspect);   // persp/ortho blended (matches the render)
-					// ImGuizmo uses ROW convention, glm uses COLUMN — transpose all matrices.
+					glm::mat4 gp = EditorCamProj(editorCam, gaspect);
 					memcpy(gview, glm::value_ptr(gv), sizeof(gview));   // glm passed directly (no transpose)
 					memcpy(gproj, glm::value_ptr(gp), sizeof(gproj));
 				}
@@ -656,11 +598,8 @@ void EditorUI::winRender()
 				Transform& gtt = gsel->GetTransform();
 				if (!ImGuizmo::IsUsing())   // resync from the object only when NOT dragging
 				{
-					// Build the gizmo model from the atom's GLOBAL transform (matches the rendered image +
-					// the selection outline, which also use global). The outline/render uses globalPosition/
-					// Rotation/Scale, so the gizmo must too — otherwise a parented atom's gizmo sits at its
-					// LOCAL coords (wrong place). NOTE this engine's parenting is non-standard (position is
-					// additive, scale component-wise) — the write-back below inverts it.
+					// Gizmo model must come from the GLOBAL transform (as the render/outline do) or a
+					// parented atom's gizmo lands at local coords; the write-back below inverts it.
 					Vector3 gP = gtt.globalPosition(); Quaternion gR = gtt.globalRotation(); Vector3 gS = gtt.globalScale();
 					glm::mat4 gm = glm::translate(glm::mat4(1.0f), glm::vec3((float)gP.x, (float)gP.y, (float)gP.z))
 					             * glm::mat4_cast(glm::quat((float)gR.w, (float)gR.x, (float)gR.y, (float)gR.z))
@@ -675,15 +614,12 @@ void EditorUI::winRender()
 				float gsnapv   = (gop == ImGuizmo::TRANSLATE) ? 0.5f : (gop == ImGuizmo::ROTATE) ? 15.0f : 0.1f;
 				float gsnap[3] = { gsnapv, gsnapv, gsnapv };
 				float* gsnapPtr = ImGui::GetIO().KeyCtrl ? gsnap : nullptr;   // hold Ctrl to snap
-				// A hot river-point handle owns the mouse: the gizmo draws muted and ignores input
-				// (Enable is sticky — restore it right after the call).
+				// ImGuizmo::Enable is sticky — restore it right after Manipulate.
 				ImGuizmo::Enable(!s_riverGizmoHot);
 				ImGuizmo::Manipulate(gview, gproj, gop, gmode, gizmoMatrix, nullptr, gsnapPtr);
 				ImGuizmo::Enable(true);
 				if (ImGuizmo::IsUsing())
 				{
-					// Decompose the manipulated GLOBAL matrix, then convert back to LOCAL using this
-					// engine's parenting rules (position additive, rotation quat-composed, scale multiplied).
 					glm::mat4 nm = glm::make_mat4(gizmoMatrix);
 					glm::vec3 nS, nT, nSkew; glm::vec4 nPersp; glm::quat nR;
 					if (glm::decompose(nm, nS, nR, nT, nSkew, nPersp) &&
@@ -693,7 +629,6 @@ void EditorUI::winRender()
 						if (nS.x < 1e-3f && nS.x > -1e-3f) nS.x = 1e-3f;
 						if (nS.y < 1e-3f && nS.y > -1e-3f) nS.y = 1e-3f;
 						if (nS.z < 1e-3f && nS.z > -1e-3f) nS.z = 1e-3f;
-						// Write the manipulated WORLD pose; Transform::SetGlobal converts it to local.
 						gtt.SetGlobal(Vector3(nT.x, nT.y, nT.z),
 						              Quaternion(nR.x, nR.y, nR.z, nR.w),
 						              Vector3(nS.x, nS.y, nS.z));
@@ -702,10 +637,8 @@ void EditorUI::winRender()
 			}
 		}
 
-		// --- Canvas 2D rect gizmo: corner + EDGE handles so specific sides stretch (not the whole
-		// rect at once). Works for WorldSpace rects (world units) and screen-space canvases on their
-		// editor plane (1 ref px = 1/ppu world units). Dragging writes Canvas width/height and shifts the centre so the
-		// opposite side stays put. ------------------------------------------------------------------
+		// Canvas 2D rect gizmo: corner + edge handles write Canvas width/height and shift the
+		// centre so the opposite side stays put (screen-space canvases scale 1 ref px = 1/ppu).
 		s_canvasGizmoHot = false;
 		{
 			AppInstance* capp = AppInstance::GetSingleton();
@@ -820,7 +753,6 @@ void EditorUI::winRender()
 					}
 				}
 
-				// Draw the handles on the viewport overlay (filled = hovered/dragged).
 				ImDrawList* dl = ImGui::GetWindowDrawList();
 				for (int i = 0; i < 8; ++i)
 				{
@@ -834,20 +766,17 @@ void EditorUI::winRender()
 			}
 		}
 
-		// Viewport camera control (while hovering the image):
-		//   RMB drag = orbit/look, MMB drag = pan, wheel = dolly.
-		// Suspended while possessed — the game owns the mouse/keys there, and the editor
-		// camera isn't the one on screen (its rays would pick against the wrong view).
+		// Camera control while hovering the image: RMB = orbit/look, MMB = pan, wheel = dolly.
+		// Suspended while possessed — the game owns the mouse and the editor camera isn't on screen.
 		if (!possessed && editorCam && editorCam->transform && ImGui::IsItemHovered())
 		{
 			ImGuiIO& io = ImGui::GetIO();
 			Transform* t = editorCam->transform;
 			const float rotSpeed = 0.005f, panSpeed = 0.01f, zoomSpeed = 0.5f;
 
-			// Foliage paint brush (7.4): armed from the Foliage inspector while a Foliage layer
-			// is selected. Hover previews the brush circle on the surface under the cursor;
-			// LMB (held) paints/erases along the stroke, stepped by half the brush radius so
-			// holding still doesn't stack instances. Consumes the click — no deselect.
+			// Foliage paint brush, armed from the Foliage inspector. LMB paints/erases along the
+			// stroke, stepped by half the radius so holding still doesn't stack instances; it also
+			// consumes the click so painting never deselects.
 			bool foliagePainting = false;
 			if (foliageBrush != 0)
 			{
@@ -875,9 +804,7 @@ void EditorUI::winRender()
 					if (hit && dist > 0.0f && dist < 1e29f)
 					{
 						Vector3 hp(o.x + dir.x * dist, o.y + dir.y * dist, o.z + dir.z * dist);
-						// Brush preview PROJECTED onto the surface: sample the terrain height
-						// under each point of the circle (short vertical rays) and connect —
-						// the ring hugs slopes and steps instead of floating as a flat disc.
+						// Brush ring is projected onto the surface by a short down-ray per segment.
 						{
 							const Color bc = foliageBrush == 1 ? Color(0.4, 1.0, 0.5, 1.0) : Color(1.0, 0.45, 0.35, 1.0);
 							const int kSeg = 32;
@@ -916,15 +843,13 @@ void EditorUI::winRender()
 				}
 			}
 
-			// Left-click: pick the object under the cursor (null = deselect).
-			// Skip if the gizmo is being interacted with, so dragging it doesn't deselect.
+			// Left-click picks (null = deselect); skipped while any gizmo/handle owns the mouse.
 			if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGuizmo::IsUsing() && !ImGuizmo::IsOver() && !s_canvasGizmoHot && !s_riverGizmoHot && !foliagePainting)
 			{
 				ImVec2 rmin = ImGui::GetItemRectMin();
 				ImVec2 sz   = ImGui::GetItemRectSize();
 				ImVec2 mp   = io.MousePos;
-				// Entity icons first (topmost wins): invisible entities have no mesh, the
-				// scene ray can't hit them — their icon IS their clickable body.
+				// Icons are tested before the ray: mesh-less entities have no other clickable body.
 				Atom* iconPick = nullptr;
 				for (auto it = iconHits.rbegin(); it != iconHits.rend(); ++it)
 					if (mp.x >= it->first.x && mp.x <= it->first.z && mp.y >= it->first.y && mp.y <= it->first.w)
@@ -950,9 +875,8 @@ void EditorUI::winRender()
 				}
 			}
 
-			// Sync the orbit angles from the camera when the drag STARTS. Derive them from the FORWARD
-			// vector (unambiguous) — NOT EulerDeg(), whose quat->euler recompute after a load uses a
-			// different order/range and drops roll, which made the first rotation snap to a bogus angle.
+			// Sync orbit angles at drag start from the FORWARD vector, never EulerDeg(): its
+			// quat->euler recompute uses a different order/range and drops roll.
 			if (ImGui::IsMouseClicked(ImGuiMouseButton_Right))
 			{
 				Vector3 f = t->direction();
@@ -981,7 +905,7 @@ void EditorUI::winRender()
 			if (io.MouseWheel != 0.0f)
 				t->position += t->direction() * (double)(io.MouseWheel * zoomSpeed);
 
-			// Free-flight: hold RMB + WASD (Q/E = down/up, Shift = faster), Unity/UE-style.
+			// Free-flight: hold RMB + WASD (Q/E = down/up, Shift = faster).
 			if (ImGui::IsMouseDown(ImGuiMouseButton_Right))
 			{
 				float fly = 5.0f * io.DeltaTime;
@@ -996,9 +920,8 @@ void EditorUI::winRender()
 		}
 	}
 
-	// Infinite-look capture manager: runs EVERY viewport frame (outside the hover gates), so a
-	// release is never missed. NoMouseCursorChange stops the imgui backend from re-arming the
-	// OS cursor every frame while the renderer holds it in the captured (disabled) mode.
+	// Must run EVERY viewport frame (outside the hover gates) or a release is missed.
+	// NoMouseCursorChange stops the imgui backend re-arming the OS cursor while it is captured.
 	{
 		AppInstance* app = AppInstance::GetSingleton();
 		const bool down = ImGui::IsMouseDown(ImGuiMouseButton_Right) || ImGui::IsMouseDown(ImGuiMouseButton_Middle);

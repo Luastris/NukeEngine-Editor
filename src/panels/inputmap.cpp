@@ -1,12 +1,5 @@
-// inputmap panel — the .nuinput ASSET editor body (opened from the browser like .numat/.nutex, in its
-// own native window via winAssetEditors). Full CRUD on the input model: actions (name/type/delete),
-// contexts (name/priority/active/delete) and bindings (controls + modifiers with PRESS-TO-BIND,
-// parallel/sequential combos, phase, value modifiers, trigger timing, delete). Edits the window's model
-// copy (w.inActions / w.inContexts); Save writes the file AND applies it to the live system.
-//
-// Layout language: actions = a striped table; each binding = a COLLAPSIBLE compact card (framed tree
-// node whose header summarizes the binding: "Move — Key.W (Held)"), and inside the card the value
-// options + trigger timing live in ONE labeled table row — no free-floating widget soup.
+// .nuinput asset editor body: CRUD over actions, contexts and bindings.
+// Edits the window's model copy (w.inActions / w.inContexts); Save writes the file and applies it live.
 #include <editor/editorui.h>
 #include <input/Input.h>
 #include <boost/filesystem.hpp>
@@ -24,10 +17,10 @@ using nuke::InputContext;
 using nuke::InputPhase;
 using nuke::ActionValueType;
 
-// ---- press-to-bind state (keyed by window path so multiple open .nuinput editors don't cross-capture) --
-static std::string s_lWin;                 // path of the listening window ("" = nobody listening)
+// ---- press-to-bind state, keyed by window path so open editors don't cross-capture ----
+static std::string s_lWin;                 // listening window ("" = nobody listening)
 static int s_lC = -1, s_lB = -1, s_lSlot = -1, s_lKind = 0;   // ctx / binding / slot (-1 = append) / kind (0 ctl, 1 mod)
-static std::vector<std::string> s_lBase;   // controls already active when listening began (ignored)
+static std::vector<std::string> s_lBase;   // controls already active when listening began
 
 static const char* kPhases[] = { "Pressed", "Held", "Released", "Tap", "LongPress", "DoublePress" };
 
@@ -43,9 +36,7 @@ static void startListen(const std::string& win, int c, int b, int slot, int kind
 static void stopListen() { s_lWin.clear(); s_lC = s_lB = s_lSlot = -1; }
 static bool listeningOn(const std::string& win, int c, int b, int slot, int kind)
 { return s_lWin == win && s_lC == c && s_lB == b && s_lSlot == slot && s_lKind == kind; }
-// The first control that became active since listening started and wasn't already held (Mouse.X/Y etc.
-// sit in the baseline -> ignored). Works at edit time because the desktop provider feeds raw controls
-// from its GLFW callbacks whether or not the world is ticking.
+// First control that became active since listening started; baseline controls (Mouse.X/Y) are ignored.
 static std::string capturePressed()
 {
 	for (const std::string& id : Input::ListControls())
@@ -54,8 +45,7 @@ static std::string capturePressed()
 	return std::string();
 }
 
-// One control/modifier chip list: [Key.W ×] [Key.S ×] [+]. Full-height buttons, uniform with the
-// rest of the row. Returns true if the list changed.
+// One control/modifier chip list: [Key.W x] [Key.S x] [+]. Returns true if the list changed.
 static bool drawChips(const std::string& win, int ci, int bi, int kind, std::vector<std::string>& ids)
 {
 	bool changed = false;
@@ -106,13 +96,13 @@ void EditorUI::SaveInputAsset(AssetEditorWin& w)
 	std::string js = InputMapJson(w);
 	{ bfs::ofstream f{ bfs::path(w.path) }; if (f) f << js; }
 	nuke::Input::InputMapData m; m.actions = w.inActions; m.contexts = w.inContexts;
-	nuke::Input::ApplyMap(m);   // live: a running PIE/game reflects the edited map immediately
+	nuke::Input::ApplyMap(m);   // a running PIE/game picks up the edited map immediately
 	std::cout << "[editor]\tsaved input map -> " << w.path << std::endl;
 }
 
 void EditorUI::DrawInputEditor(AssetEditorWin& w)
 {
-	// Press-to-bind: capture into the listening slot (this window only).
+	// Press-to-bind: capture into the listening slot of this window only.
 	if (s_lWin == w.path && s_lB >= 0)
 	{
 		if (ImGui::IsKeyPressed(ImGuiKey_Escape)) stopListen();
@@ -131,7 +121,7 @@ void EditorUI::DrawInputEditor(AssetEditorWin& w)
 		}
 	}
 
-	if (ImGui::Button(ICON_LC_PLAY " Apply to game"))   // push to live without a file write (test in PIE)
+	if (ImGui::Button(ICON_LC_PLAY " Apply to game"))   // push to live without a file write
 	{ nuke::Input::InputMapData m; m.actions = w.inActions; m.contexts = w.inContexts; nuke::Input::ApplyMap(m); }
 	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Apply the edited map to the running game without saving the file");
 	ImGui::SameLine();
@@ -139,7 +129,7 @@ void EditorUI::DrawInputEditor(AssetEditorWin& w)
 	ImGui::TextDisabled("%d action(s), %d context(s)", (int)w.inActions.size(), (int)w.inContexts.size());
 	ImGui::Spacing();
 
-	// ---- ACTIONS: a compact striped table (Name | Type | delete) ---------------------------------------
+	// ---- Actions: Name | Type | delete ----
 	if (ImGui::CollapsingHeader("Actions", ImGuiTreeNodeFlags_DefaultOpen))
 	{
 		ImGui::Spacing();
@@ -176,7 +166,7 @@ void EditorUI::DrawInputEditor(AssetEditorWin& w)
 	}
 	ImGui::Spacing();
 
-	// ---- CONTEXTS + BINDINGS ----------------------------------------------------------------------------
+	// ---- Contexts + bindings ----
 	int delC = -1;
 	for (int ci = 0; ci < (int)w.inContexts.size(); ++ci)
 	{
@@ -193,7 +183,6 @@ void EditorUI::DrawInputEditor(AssetEditorWin& w)
 			ImGui::Indent(6.0f);
 			ImGui::Spacing();
 
-			// Context settings row: Name / Priority, delete on the right.
 			ImGui::AlignTextToFramePadding(); ImGui::TextDisabled("Name"); ImGui::SameLine();
 			char cn[64]; strncpy(cn, ctx.name.c_str(), sizeof(cn) - 1); cn[sizeof(cn) - 1] = 0;
 			ImGui::SetNextItemWidth(180);
@@ -207,8 +196,6 @@ void EditorUI::DrawInputEditor(AssetEditorWin& w)
 			if (trashRight("delctx")) delC = ci;
 			ImGui::Spacing();
 
-			// Bindings: COLLAPSIBLE compact cards. The header line is the summary ("Move — Key.W (Held)");
-			// expanded, the card shows the editable rows + ONE labeled options/timing table.
 			int delB = -1;
 			for (int bi = 0; bi < (int)ctx.bindings.size(); ++bi)
 			{
@@ -228,7 +215,7 @@ void EditorUI::DrawInputEditor(AssetEditorWin& w)
 				bool open = ImGui::TreeNodeEx("##bind",
 				                              ImGuiTreeNodeFlags_Framed | ImGuiTreeNodeFlags_SpanAvailWidth | ImGuiTreeNodeFlags_AllowOverlap,
 				                              "%s", sum.c_str());
-				// Trash overlaps the right end of the header frame.
+				// Trash overlaps the right end of the header frame (AllowOverlap above).
 				ImGui::SameLine();
 				float tx = ImGui::GetWindowContentRegionMax().x - 30.0f;
 				if (tx > ImGui::GetCursorPosX()) ImGui::SetCursorPosX(tx);
@@ -236,13 +223,12 @@ void EditorUI::DrawInputEditor(AssetEditorWin& w)
 
 				if (open)
 				{
-					// What the action's type is drives which option columns make sense below.
+					// The action's type drives which option columns appear below.
 					ActionValueType atype = ActionValueType::Bool;
 					for (const InputAction& a : w.inActions) if (a.name == b.action) { atype = a.type; break; }
 
 					ImGui::Spacing();
-					// Label | content table: a fixed label column can NEVER overlap the widgets,
-					// whatever the tree indent or font is (SameLine(x) with a hardcoded x could).
+					// Fixed label column instead of SameLine(x): survives any tree indent or font size.
 					ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(6, 3));
 					if (ImGui::BeginTable("##bindrows", 2, ImGuiTableFlags_SizingFixedFit))
 					{
@@ -281,7 +267,6 @@ void EditorUI::DrawInputEditor(AssetEditorWin& w)
 					}
 					ImGui::PopStyleVar();
 
-					// Options + timing: ONE labeled table row — every value under its own header.
 					const bool showAxis = (atype == ActionValueType::Axis2);
 					const bool showVal  = (atype != ActionValueType::Bool);
 					int cols = 5 + (showAxis ? 1 : 0) + (showVal ? 3 : 0);   // Consume + 4 timings (+ Axis) (+ Scale/Dead/Invert)

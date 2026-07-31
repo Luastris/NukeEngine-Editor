@@ -1,20 +1,20 @@
 // toolbar panel — EditorUI method definitions (translation unit).
 #include <editor/editorui.h>
 #include <API/Model/Light.h>
-#include <API/Model/Time.h>   // PIE enter/exit resets the game-speed scale
-#include <API/Model/Collider.h>   // primitives spawn with a matching collider by default
+#include <API/Model/Time.h>
+#include <API/Model/Collider.h>
 #include <API/Model/Environment.h>
 #include <API/Model/ReflectionProbe.h>
 #include <API/Model/Sprite.h>
 #include <API/Model/Canvas.h>
 #include <API/Model/Decal.h>
-#include <API/Model/Jobs.h>   // PumpMain each editor frame (2.4)
-#include <interface/AtomCreators.h>   // registered atom templates ("+" menu, module types)
-#include <reflect/Reflect.h>          // Registry_All: creator components by TYPE NAME
-#include <iostream>                   // missing-type log line
-#include <algorithm>          // std::find (creator categories)
-#include <cstring>            // strcmp (NUKE_PACKAGE_MOD=<name> dev hook)
-#include <nlohmann/json.hpp>  // atom-clipboard envelope (copy/paste)
+#include <API/Model/Jobs.h>
+#include <interface/AtomCreators.h>   // registered atom templates for the "+" menu
+#include <reflect/Reflect.h>          // Registry_All: creator components by type name
+#include <iostream>
+#include <algorithm>
+#include <cstring>
+#include <nlohmann/json.hpp>
 using json = nlohmann::json;
 
 // ---- toolbar ----
@@ -33,8 +33,6 @@ bool EditorUI::ToolBtn(const char* icon, const char* tip, bool active, float w)
 	return clicked;
 }
 
-// Where a freshly-created object lands: on the surface the editor camera looks at (ray hit), else a
-// fixed distance straight ahead — so new atoms appear in view instead of at the world origin.
 Vector3 EditorUI::SpawnPos()
 {
 	AppInstance* app = AppInstance::GetSingleton();
@@ -52,7 +50,7 @@ Vector3 EditorUI::SpawnPos()
 Atom* EditorUI::FinishSpawn(Atom* atom)
 {
 	AppInstance* app = AppInstance::GetSingleton();
-	atom->GetTransform().position = SpawnPos();   // in front of the camera / on the looked-at surface
+	atom->GetTransform().position = SpawnPos();
 	app->currentWorld->Add(atom);
 	app->selectedInHieararchy = atom;
 	RecordAdd(atom);
@@ -70,8 +68,7 @@ void EditorUI::SpawnPrimitive(const char* atomName, const char* guid)
 	atom->AddComponent(mr);
 	mr->meshGuid = guid;
 	mr->mesh = ResDB::getSingleton()->GetMesh(guid);
-	// Every primitive ships with a MATCHING collider by default — a spawned floor/wall/
-	// prop must just work with physics, characters and camera probes (remove if unwanted).
+	// Each primitive gets a collider matching its mesh dimensions.
 	nuke::Collider* col = new nuke::Collider();
 	const std::string g = guid;
 	if      (g == "builtin:sphere")   col->shape = nuke::Collider::S_Sphere;    // r 0.5 = the mesh
@@ -107,7 +104,7 @@ void EditorUI::SpawnCamera()
 {
 	Atom* atom = new Atom("Camera");
 	Camera* c = new Camera();
-	c->renderer = AppInstance::GetSingleton()->render;   // share the active renderer (avoids re-init / null deref)
+	c->renderer = AppInstance::GetSingleton()->render;   // share the active renderer
 	atom->AddComponent(c);
 	FinishSpawn(atom);
 }
@@ -116,8 +113,7 @@ void EditorUI::SpawnCamera()
 void EditorUI::Toolbar()
 {
 	ImGuiViewport* vp = ImGui::GetMainViewport();
-	// Keep WindowPadding pushed across the WHOLE window scope (Begin..End) so the
-	// top and bottom padding match — otherwise the row sticks to the top edge.
+	// ImGui: WindowPadding must stay pushed across the whole Begin..End scope, else the row sticks to the top edge.
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8, 6));
 	float barH = ImGui::GetFrameHeight() + 12.0f;
 	ImGuiWindowFlags flags = ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
@@ -171,9 +167,8 @@ void EditorUI::Toolbar()
 			if (ImGui::MenuItem(ICON_LC_CLOUD_SUN " Environment")) SpawnEnvironment();
 			if (ImGui::MenuItem(ICON_LC_GLOBE " Reflection Probe")) SpawnReflectionProbe();
 
-			// REGISTERED atom templates (interface/AtomCreators.h): engine systems and MODULES
-			// add their own entries with NO editor linkage — components are created through
-			// reflection by TYPE NAME. Grouped by category, appended after the built-ins.
+			// Registered atom templates (AtomCreators): components created via reflection by
+			// type name, grouped by category and appended after the built-ins.
 			{
 				std::vector<std::string> cats;
 				for (const nuke::AtomCreator& ac : nuke::AtomCreators())
@@ -191,7 +186,7 @@ void EditorUI::Toolbar()
 							std::cout << "[editor]\t\tatom creator '" << ac.label << "': component type '"
 							          << tn << "' is not registered (module not loaded?)" << std::endl;
 					}
-					FinishSpawn(a);   // ray-place at SpawnPos + add to world + select + undo record
+					FinishSpawn(a);
 				};
 				for (const std::string& cat : cats)
 				{
@@ -224,7 +219,7 @@ void EditorUI::Toolbar()
 		float centerW = bw * 4 + st.ItemSpacing.x * 3;
 		ImGui::SameLine();
 		ImGui::SetCursorPosX((winW - centerW) * 0.5f);
-		// PIE over a half-loaded boot world would snapshot (and later restore) a partial scene.
+		// PIE on a half-loaded world would snapshot (and later restore) a partial scene.
 		ImGui::BeginDisabled(bootLoading != 0);
 		if (ToolBtn(ICON_LC_PLAY, "Play", app->playState == 1, bw))
 		{
@@ -232,9 +227,7 @@ void EditorUI::Toolbar()
 			{
 				pieSnapshot  = app->currentWorld->SaveToString();
 				pieWorldPath = app->currentWorldPath;
-				// A fresh PIE session starts at NORMAL speed — a leftover Game.SetTimeScale
-				// from the previous session (slow-mo, freeze) must not leak in.
-				Time::getSingleton()->scale = 1.0;
+				Time::getSingleton()->scale = 1.0;   // a leftover SetTimeScale must not leak into a fresh session
 			}
 			app->playState = 1;
 		}
@@ -247,33 +240,23 @@ void EditorUI::Toolbar()
 		if (ToolBtn(ICON_LC_SQUARE, "Stop", app->playState == 0, bw))
 		{
 			const bool wasPlaying = app->playState != 0;
-			// Leave play mode BEFORE the restore: LoadFromString's teardown carries persistent
-			// atoms only while playing — PIE-born persistent atoms must NOT leak into the
-			// restored EDIT scene (Ctrl+S would write them into the world file).
+			// Leave play mode BEFORE the restore: LoadFromString's teardown keeps persistent
+			// atoms only while playing, so PIE-born ones would leak into the edit scene.
 			app->playState = 0;
 			if (wasPlaying && !pieSnapshot.empty())
 			{
-				// Remember the selection by id — LoadFromString recreates every atom (the old
-				// pointer dies), so re-resolve it by its stable id on the restored scene.
+				// LoadFromString recreates every atom — re-resolve the selection by stable id.
 				long selId = app->selectedInHieararchy ? app->selectedInHieararchy->id.id : 0;
 				app->selectedInHieararchy = nullptr;
-				app->currentWorld->LoadFromString(pieSnapshot);   // restore scene on stop
-				app->currentWorldPath = pieWorldPath;             // ...and the edit target (a script's
-				                                                  // Game.LoadWorld must not leak past Stop)
+				app->currentWorld->LoadFromString(pieSnapshot);
+				app->currentWorldPath = pieWorldPath;             // a script's Game.LoadWorld must not leak past Stop
 				if (selId) app->selectedInHieararchy = app->currentWorld->GetById(selId);
 			}
-			// A game script may have locked/hidden the cursor (Input.SetCursorMode) —
-			// stopping play must hand the editor a normal cursor back, always.
-			if (app->render) app->render->setCursorMode(0);
-			// ...and the game-speed setting dies with the session: edit mode runs at 1x.
+			if (app->render) app->render->setCursorMode(0);   // a script may have locked/hidden the cursor
 			Time::getSingleton()->scale = 1.0;
-			// ...and an in-flight Game.LoadWorldAsync must not survive into edit mode
-			// (activating a staged game world over the restored edit scene).
-			app->CancelWorldLoadAsync();
+			app->CancelWorldLoadAsync();   // a staged async world must not activate over the restored edit scene
 		}
-		// PIE possess switch (UE-style): Game Camera = play through World::GetMainCamera (the one
-		// flagged Main, else the world's first camera); Editor Camera = keep the free-fly view.
-		// Editor-only — the player always plays through the game camera rule.
+		// PIE possess switch: Game Camera = World::GetMainCamera; Editor Camera = keep the free-fly view.
 		ImGui::SameLine();
 		if (ToolBtn(pieUseEditorCam ? ICON_LC_EYE : ICON_LC_VIDEO,
 		            pieUseEditorCam ? "PIE view: Editor Camera (click: play through the game's Main Camera)"
@@ -300,28 +283,25 @@ void EditorUI::Toolbar()
 
 void EditorUI::Draw()
 {
-	// ImGuizmo::BeginFrame opens its own transparent fullscreen "gizmo" window as the
-	// default canvas. It's a FLOATING window — with ConfigViewportsNoAutoMerge it would
-	// get its own OS window. Pin it to the main viewport: the actual gizmo drawing goes
-	// through SetDrawlist() into the Render panel anyway (works in any viewport).
+	// ImGuizmo's own fullscreen canvas window is floating: pin it to the main viewport so
+	// ConfigViewportsNoAutoMerge doesn't give it its own OS window.
 	ImGui::SetNextWindowViewport(ImGui::GetMainViewport()->ID);
 	ImGuizmo::BeginFrame();   // must come right after ImGui::NewFrame (done by NukeUI)
 
-	nuke::Time::getSingleton()->NewFrame();   // real frame delta/elapsed (scripts & systems)
+	nuke::Time::getSingleton()->NewFrame();
 
-	nuke::Jobs::PumpMain();   // deliver background-job results to the game thread (2.4)
+	nuke::Jobs::PumpMain();   // deliver background-job results to the game thread
 
 	if (!projectHubMode)
-		PumpBootLoad();   // background project load: pipelines/world staging + async-load pump (edit mode)
+		PumpBootLoad();   // background project load + the async-world pump (edit mode)
 
-	// DEV HOOKS (3.2 packaging tests): NUKE_PACKAGE=1 fires Package Project ~2.5 s after
-	// boot, NUKE_PACKAGE_MOD=1 fires Package Mod — headless verification without clicks.
+	// Dev hooks: env vars fire packaging/build/play actions a few seconds after boot.
 	{
 		static int pkgDelay = -2;
 		if (pkgDelay == -2) { const char* e = std::getenv("NUKE_PACKAGE"); pkgDelay = (e && *e == '1') ? 150 : -1; }
 		if (pkgDelay > 0 && --pkgDelay == 0) PackageProject();
 		static int modDelay = -2;
-		static std::string modHookName;   // NUKE_PACKAGE_MOD=<name> picks the mod's name; "1" = fallbacks
+		static std::string modHookName;   // NUKE_PACKAGE_MOD=<name>; "1" = fallbacks
 		if (modDelay == -2)
 		{
 			const char* e = std::getenv("NUKE_PACKAGE_MOD");
@@ -329,8 +309,7 @@ void EditorUI::Draw()
 			if (modDelay > 0 && strcmp(e, "1") != 0) modHookName = e;
 		}
 		if (modDelay > 0 && --modDelay == 0) PackageMod(modHookName);
-		// NUKE_GM_NEW=<Name>: scaffold a C++ game module ~2 s after boot; NUKE_GM_BUILD=1:
-		// fire Build & Reload Game Modules (6.0) — headless verification without clicks.
+		// NUKE_GM_NEW=<Name>: scaffold a C++ game module; NUKE_GM_BUILD=1: Build & Reload Game Modules.
 		static int gmNewDelay = -2;
 		static std::string gmNewName;
 		if (gmNewDelay == -2)
@@ -343,8 +322,7 @@ void EditorUI::Draw()
 		static int gmBuildDelay = -2;
 		if (gmBuildDelay == -2) { const char* e = std::getenv("NUKE_GM_BUILD"); gmBuildDelay = (e && *e == '1') ? 180 : -1; }
 		if (gmBuildDelay > 0 && --gmBuildDelay == 0) BuildGameModules();
-		// NUKE_PLAY=1: enter PIE ~4 s after boot (headless play verification — scripts,
-		// physics, audio all run their real play paths without a click).
+		// NUKE_PLAY=1: enter PIE ~4 s after boot.
 		static int playDelay = -2;
 		if (playDelay == -2) { const char* e = std::getenv("NUKE_PLAY"); playDelay = (e && *e == '1') ? 250 : -1; }
 		if (playDelay > 0 && --playDelay == 0)
@@ -358,9 +336,8 @@ void EditorUI::Draw()
 			app->playState = 1;
 			std::cout << "[editor]\t\tNUKE_PLAY hook: entering PIE" << std::endl;
 		}
-		// NUKE_OPEN_PROJECT=<path> exercises the New/Open Project switch (relaunch + close).
-		// The child INHERITS the env var — skip when the target is already open, else the
-		// spawned editor would relaunch itself forever.
+		// NUKE_OPEN_PROJECT=<path>: the child inherits the env var, so skip when the target
+		// is already open — otherwise the spawned editor relaunches itself forever.
 		static int swDelay = -2;
 		static std::string swPath;
 		if (swDelay == -2)
@@ -374,9 +351,8 @@ void EditorUI::Draw()
 		if (swDelay > 0 && --swDelay == 0) RequestProjectSwitch(swPath);
 	}
 
-	// PROJECT HUB (booted with no project): the hub IS the whole UI — no menu, no toolbar,
-	// no panels, no world logic. Its popups (New Project, unsaved-switch guard) draw here
-	// because the normal frame body below never runs.
+	// Project hub (booted with no project): the hub is the whole UI, so its popups draw
+	// here — the normal frame body below never runs.
 	if (projectHubMode)
 	{
 		ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport(), ImGuiDockNodeFlags_PassthruCentralNode);
@@ -386,34 +362,32 @@ void EditorUI::Draw()
 		return;
 	}
 
-	// Hot-reload shaders + materials/textures edited on disk (~twice a second; cheap mtime checks).
-	// Gated during the boot load: the content scan is still WRITING ResDB on a worker.
+	// Hot-reload shaders + assets edited on disk. Not while booting: the content scan is
+	// still writing ResDB on a worker.
 	if (!bootLoading && (++hotReloadTick % 30) == 0)
 	{
 		ResDB::getSingleton()->HotReloadShaders(AppInstance::GetSingleton()->render);
 		ResDB::getSingleton()->HotReloadAssets(AppInstance::GetSingleton()->render);
 	}
 
-	// PIE: while playing, run game logic (component Update) each frame. The fixed-step
-	// update (physics + Component::FixedUpdate) runs on AppInstance's fixed-frequency
-	// thread — gated on playState internally, independent of the frame rate.
+	// PIE: run per-frame game logic while playing. The fixed-step update runs on
+	// AppInstance's fixed-frequency thread, gated on playState internally.
 	if (AppInstance::GetSingleton()->playState == 1)
 		AppInstance::GetSingleton()->currentWorld->Update();
 
-	// Restore the selection saved in editor_state.json once the world is fully in (by stable id) —
-	// resolving against the still-growing boot world would silently drop the saved selection.
+	// Restore the saved selection only once the world is fully loaded — resolving it against
+	// a still-growing world would drop it.
 	if (pendingSelectId && !bootLoading)
 	{
 		if (Atom* a = AppInstance::GetSingleton()->currentWorld->GetById(pendingSelectId))
 			AppInstance::GetSingleton()->selectedInHieararchy = a;
 		pendingSelectId = 0;
 	}
-	// Order matters: main menu, then the toolbar side-bar, then the dock space —
-	// each reserves viewport work-area for the next, so panels sit below both bars.
+	// Order matters: menu, toolbar, status bar, then the dock space — each reserves
+	// viewport work-area for the next.
 	EditorMenu();
 	Toolbar();
-	StatusBarPanel();   // bottom side-bar reserves its strip before the dock space
-	// Full-window dock space so panels can be docked/tabbed/split (sticky).
+	StatusBarPanel();
 	// PassthruCentralNode leaves the centre transparent for the scene viewport.
 	ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport(), ImGuiDockNodeFlags_PassthruCentralNode);
 	window_flags = 0; // panels are dockable/movable now
@@ -423,7 +397,7 @@ void EditorUI::Draw()
 	winSettings();        // Project Settings window (default world + hotkeys)
 	winWorldSettings();   // World Settings window (global shadows etc., saved in the .nuworld)
 	winPreferences();     // engine-wide Preferences (external editor etc., %APPDATA% scope)
-	winTextEditor();      // Text editor (2.2): opened from the browser / asset inspector
+	winTextEditor();      // Text editor: opened from the browser / asset inspector
 	winAssetEditors();    // Asset editors: material / mesh / prefab windows
 	DrawSaveAsPopup();    // "Save World As" modal
 	DrawNewProjectPopup();      // "New Project" modal (File menu)
@@ -445,9 +419,8 @@ void EditorUI::Draw()
 	{
 		for (auto& pt : pendingPluginToggle)
 		{
-			// PHASE_BOOT providers (the renderer) can't be swapped live: enabling one only
-			// persists the choice — it becomes the project's provider on next start. A live
-			// boot provider can't be turned OFF either (the engine can't run without it).
+			// PHASE_BOOT providers can't be swapped live: enabling one only persists the
+			// choice for next start, and a live one can't be turned off at all.
 			if (pt.first->phase() == nuke::PHASE_BOOT)
 			{
 				if (pt.second && *pt.first->provides())
@@ -478,8 +451,7 @@ static int  AtomIndex(World* w, Atom* a)
 void EditorUI::PushUndo(const std::string& label, std::function<void()> undoFn, std::function<void()> redoFn,
                         bool worldEdit)
 {
-	// Non-world commands (file ops, settings, asset tweaks) inherit the current world
-	// serial: they sit on the stack without flipping the world's dirty state.
+	// Non-world commands inherit the current world serial, so they don't flip the dirty state.
 	const long ws = worldEdit ? ++editSerial : WorldEditSerial();
 	undoStack.push_back({ std::move(undoFn), std::move(redoFn), label, ws });
 	if (undoStack.size() > 200) undoStack.erase(undoStack.begin());
@@ -491,9 +463,8 @@ void EditorUI::ResetUndo() { undoStack.clear(); redoStack.clear(); editing = fal
 
 void EditorUI::Undo()
 {
-	// Focused editor WINDOWS own their history: a text editor's widget handles Ctrl+Z
-	// itself (do nothing here — a scene undo underneath it would be destructive);
-	// an asset editor routes to ITS per-window snapshot stack.
+	// Focused editor windows own their history: text widgets handle Ctrl+Z themselves,
+	// asset editors route to their per-window snapshot stack.
 	if (textFocused >= 0) return;
 	if (aeFocused >= 0 && aeFocused < (int)assetEds.size()) { AssetEditorUndo(assetEds[aeFocused]); return; }
 	if (AppInstance::GetSingleton()->playState != 0) return;   // not during PIE
@@ -518,8 +489,8 @@ void EditorUI::Redo()
 	idleSnapValid = false;   // atoms just changed under the selection
 }
 
-// Undo primitive for atom deltas: replace the atom (by id) with the given serialized state at a
-// placement (parentId 0 = root). Empty json = remove the atom.
+// Replace the atom (by id) with the given serialized state at a placement (parentId 0 = root).
+// Empty json = remove the atom.
 void EditorUI::ApplyAtomState(long id, long parentId, int index, const std::string& json)
 {
 	World* w = AppInstance::GetSingleton()->currentWorld;
@@ -529,8 +500,6 @@ void EditorUI::ApplyAtomState(long id, long parentId, int index, const std::stri
 	editing = false; editAtomId = 0;                                      // don't re-capture this change
 }
 
-// Detect a settled edit of the SELECTED atom (inspector widget or gizmo): capture before on the first
-// active frame, push one delta command when it deactivates. Other change kinds use PushUndo/RecordChange.
 void EditorUI::TrackUndo()
 {
 	AppInstance* app = AppInstance::GetSingleton();
@@ -540,9 +509,8 @@ void EditorUI::TrackUndo()
 	Atom* sel = app->selectedInHieararchy;
 	long  selId = sel ? sel->id.id : 0;
 
-	// Flush the in-progress edit when manipulation ends, OR when focus jumps straight to a DIFFERENT widget
-	// (clicking prop B while A is still active — no idle frame between — would otherwise merge both props into
-	// one undo step). The gizmo isn't an ImGui item (activeId 0), so don't treat it as a widget change.
+	// Also flush when focus jumps straight to a DIFFERENT widget: with no idle frame between,
+	// both props would merge into one undo step. The gizmo isn't an ImGui item (activeId 0).
 	bool focusChanged = editing && active && !ImGuizmo::IsUsing() && activeId != editActiveId;
 	std::string flushedAfter;
 	if (editing && (!active || focusChanged))
@@ -563,9 +531,8 @@ void EditorUI::TrackUndo()
 			}
 		}
 	}
-	// Begin a fresh edit. "before" = the state from BEFORE this edit: when chaining straight from another
-	// widget, the just-flushed "after"; otherwise the last idle snapshot (true pre-edit state — dodges the
-	// slider's click-to-position jump that a same-frame snapshot would already include).
+	// "before" = the just-flushed "after" when chaining from another widget, else the last idle
+	// snapshot — a same-frame snapshot would already include a slider's click-to-position jump.
 	if (active && !editing)
 	{
 		editing      = true;
@@ -575,10 +542,8 @@ void EditorUI::TrackUndo()
 		else if (selId && selId == idleAtomId && !idleSnap.empty()) editBefore = idleSnap;
 		else                                                editBefore = sel ? SaveAtomToString(sel) : std::string();
 	}
-	// While nothing is being manipulated, keep a valid snapshot of the selected atom — the
-	// correct "before" for the NEXT edit. Refreshed ON DEMAND only (selection change, or an
-	// edit invalidated it): serializing the subtree EVERY frame froze the editor when a big
-	// prefab root was selected.
+	// Idle snapshot of the selected atom = the "before" for the NEXT edit. Refreshed on demand
+	// only (selection change / invalidation): serializing a big subtree every frame is too slow.
 	if (!active)
 	{
 		if (!flushedAfter.empty())   // reuse the flush's serialization — it IS the fresh state
@@ -613,8 +578,7 @@ void EditorUI::RecordReparent(Atom* a, long oldParent, int oldIndex, const std::
 	World* w = AppInstance::GetSingleton()->currentWorld;
 	long id = a->id.id, newParent = AtomParentId(a); int newIndex = AtomIndex(w, a);
 	if (oldParent == newParent && oldIndex == newIndex) return;
-	// Two snapshots: keep-world rewrote the locals on reparent, so undo needs the pre-move state
-	// (old-parent-relative) and redo the post-move state — one shared JSON restores a wrong pose.
+	// Two snapshots: keep-world rewrote the locals, so a single shared JSON would restore the wrong pose.
 	std::string json = SaveAtomToString(a);
 	PushUndo("Reparent " + a->GetName(),
 		[this, id, oldParent, oldIndex, beforeJson]{ ApplyAtomState(id, oldParent, oldIndex, beforeJson); },
@@ -644,15 +608,14 @@ void EditorUI::DeleteSelectedAtom()
 }
 
 // ---- atom clipboard (copy / cut / paste / duplicate) ----
-// Atoms travel as a JSON ENVELOPE on the OS clipboard: paste works across two running editors,
-// and stray clipboard text can never be mistaken for an atom. Only the pasted ROOT gets a
-// uniquified name — children are namespaced by their parent.
+// Atoms travel as a JSON envelope on the OS clipboard, so stray clipboard text is never
+// mistaken for an atom. Only the pasted root gets a uniquified name.
 
 static std::string AtomClipEnvelope(const std::string& atomJson)
 { return std::string("{\"nukeClipboard\":\"atom\",\"atom\":") + atomJson + "}"; }
 
 // "Box" -> "Box (2)" when a sibling at the destination already holds the name (first free N).
-// An existing counter is stripped first, so duplicating "Box (2)" yields "Box (3)", never "Box (2) (2)".
+// The existing counter is stripped first: "Box (2)" -> "Box (3)", not "Box (2) (2)".
 static void UniquifySiblingName(World* w, Atom* a, long parentId)
 {
 	Atom* parent = parentId ? w->GetById(parentId) : nullptr;
@@ -661,7 +624,7 @@ static void UniquifySiblingName(World* w, Atom* a, long parentId)
 	{ for (Atom* s : lst) if (s && s != a && s->GetName() == n) return true; return false; };
 	if (!taken(a->GetName())) return;
 	std::string base = StripNameCounter(a->GetName());
-	for (int n = 2; ; ++n)   // terminates: sibling list is finite, so some N is always free
+	for (int n = 2; ; ++n)
 	{
 		std::string cand = base + " (" + std::to_string(n) + ")";
 		if (!taken(cand)) { a->SetName(cand); return; }
@@ -698,8 +661,7 @@ void EditorUI::PasteAtom()
 	if (j.is_discarded() || j.value("nukeClipboard", std::string()) != "atom" || !j.contains("atom")) return;
 	Atom* a = CloneAtomFromString(j["atom"].dump());
 	if (!a) return;
-	// Placement: sibling AFTER the selection (same parent — the copy lands where you look);
-	// nothing selected -> end of the root level.
+	// Placement: sibling after the selection; nothing selected -> end of the root level.
 	World* w = app->currentWorld;
 	Atom* sel = app->selectedInHieararchy;
 	long parentId = 0; int index = -1;

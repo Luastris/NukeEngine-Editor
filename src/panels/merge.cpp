@@ -1,9 +1,5 @@
-// merge panel — disk<->editor conflict resolution for the open world.
-//
-// Pure structural TREE (no JSON shown): World -> atoms -> children atoms -> components -> props.
-// Every node has an Editor + a Disk checkbox; checking a parent toggles its whole subtree (recursive).
-// Atoms/children matched by id, components by type+id; leaves are individual params (human values only).
-// Save (enabled at 0 unresolved) applies the chosen sides onto the editor world, writes it, reloads.
+// Disk<->editor conflict resolution for the open world, as a structural tree with per-node side choice.
+// Atoms/children are matched by id, components by type+id; Save applies the chosen sides and reloads.
 #include <editor/editorui.h>
 #include <nlohmann/json.hpp>
 #include <boost/filesystem/fstream.hpp>
@@ -51,7 +47,6 @@ std::string human(const json& v, bool present)
 	return "...";
 }
 
-// forward
 std::vector<MergeNode> DiffInto(const json& ed, const json& dk, const std::string& base);
 
 bool DiffValue(const std::string& label, const std::string& path,

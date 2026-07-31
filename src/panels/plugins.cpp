@@ -1,6 +1,6 @@
-// plugins panel — EditorUI method definitions (translation unit).
+// Plugin manager panel: filterable module list plus per-plugin details and settings.
 #include <editor/editorui.h>
-#include "nukeui.h"   // DocWindow: detachable panels (task #137)
+#include "nukeui.h"   // DocPanel: detachable panels
 #include <algorithm>
 #include <cctype>
 #include <set>
@@ -35,7 +35,7 @@ void EditorUI::PluginMGRWindow()
 	{
 		auto& mods = nuke::GetModules();
 
-		// Distinct services present in the pool -> the filter combo (All / Utility / <service>...).
+		// Filter combo entries: All / Utility / one per distinct service in the pool.
 		std::set<std::string> services;
 		for (auto& m : mods)
 			if (m && *m->provides()) services.insert(m->provides());
@@ -59,7 +59,7 @@ void EditorUI::PluginMGRWindow()
 		                         : pluginServiceFilter == 1 ? "utility"
 		                         : combo[pluginServiceFilter];
 
-		// Left: the plugin list (one list for everything — service-ness is just a badge).
+		// Left: plugin list.
 		ImGui::BeginChild("pluglist", ImVec2(260, 0), ImGuiChildFlags_Borders);
 		int idx = 0;
 		for (auto& mod : mods)   // shared pool, single instance in the engine DLL
@@ -70,12 +70,11 @@ void EditorUI::PluginMGRWindow()
 
 			const char* service = mod->provides();
 			const bool  isBoot  = mod->phase() == nuke::PHASE_BOOT;
-			// A boot provider "checked" state shows the PROJECT CHOICE (what runs next start),
-			// not just what is live now — that's how a pending restart-switch stays visible.
+			// A boot provider shows the project choice (what runs next start), not what is live now.
 			bool on = mod->loaded;
 			if (isBoot && *service && serviceChoices.count(service))
 				on = (serviceChoices[service] == mod->moduleFile);
-			if (ImGui::Checkbox("##en", &on))   // applied + persisted after the frame
+			if (ImGui::Checkbox("##en", &on))   // deferred: applied after the frame, never mid-iteration
 				pendingPluginToggle.push_back({ mod.get(), on });
 
 			ImGui::SameLine();
@@ -100,7 +99,7 @@ void EditorUI::PluginMGRWindow()
 
 		ImGui::SameLine();
 
-		// Right: selected plugin details + its inline settings panel.
+		// Right: selected plugin details.
 		ImGui::BeginChild("plugdetails", ImVec2(0, 0));
 		if (selectedPlugin)
 		{
@@ -142,7 +141,7 @@ void EditorUI::PluginMGRWindow()
 			if (selectedPlugin->loaded && selectedPlugin->HasSettings())
 			{
 				ImGui::SeparatorText("Settings");
-				selectedPlugin->Settings();   // plugin draws its settings inline (a panel here)
+				selectedPlugin->Settings();   // plugin draws its own settings inline
 			}
 		}
 		else

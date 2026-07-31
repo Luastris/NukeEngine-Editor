@@ -1,20 +1,16 @@
-// Asset editors (user request on top of 2.2): each material / mesh / prefab opens its
-// OWN window with a live 3D view and type-specific editing, saving back to the asset
-// file. Built on POOLED preview scenes — tiny worlds (sky + shadowless sun + one mesh
-// atom + camera into an own RT) that render through the hook BEFORE the live scene, so
-// their lights/sky/TLAS never taint the viewport. Pooled because the render seam has no
-// destroyRenderTarget: closing an editor returns its scene for reuse.
+// Per-asset editor windows (material / mesh / prefab / texture / input map), each with a
+// live 3D view backed by a pooled preview world rendered before the main scene.
 #include <editor/editorui.h>
 #include <API/Model/Material.h>
-#include <API/Model/Texture.h>   // Sprite Slicer (.nutex): grid/margin/spacing + SpriteCellRect
+#include <API/Model/Texture.h>
 #include <API/Model/Light.h>
 #include <API/Model/Environment.h>
 #include <API/Model/Prefab.h>
-#include <API/Model/Audio.h>   // audio preview transport (Preview bus)
-#include <input/Input.h>       // .nuinput asset editor (ParseMapString/SerializeMap/ApplyMap)
-#include <interface/AssetCreators.h>   // module-supplied asset editors (AssetEditorForExt)
-#include "nukeui.h"                     // NukeUI host windows (editor-owned detached editors)
-#include "imgui_internal.h"             // MovingWindow/ClearActiveID — drag-out detach (task #135)
+#include <API/Model/Audio.h>
+#include <input/Input.h>
+#include <interface/AssetCreators.h>   // module-supplied asset editors
+#include "nukeui.h"                     // NukeUI host windows for detached editors
+#include "imgui_internal.h"             // MovingWindow/ClearActiveID — drag-out detach
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -22,22 +18,20 @@
 #endif
 #include <boost/filesystem.hpp>
 #include <boost/filesystem/fstream.hpp>
-#include <iterator>   // istreambuf_iterator (read the .nuinput file)
+#include <iterator>
 #define GLM_ENABLE_EXPERIMENTAL
-#include <glm/gtx/matrix_decompose.hpp>   // prefab gizmo: decompose the manipulated matrix
+#include <glm/gtx/matrix_decompose.hpp>
 #include <glm/gtc/type_ptr.hpp>
 namespace bfs = boost::filesystem;
 
-// Sprite-slice metadata helpers (defined lower, near the slicer) — forward-declared so the undo/redo
-// handlers above the definitions can use them.
+// Sprite-slice metadata helpers, defined near the slicer below.
 static EditorUI::SpriteMeta SnapMeta(const nuke::Texture* t);
 static void ApplyMeta(nuke::Texture* t, const EditorUI::SpriteMeta& m);
 static void SlicerApplyLive(nuke::Texture* t);
 
-// ---------------------------------------------------------------------------
-// Preview-scene pool
-// ---------------------------------------------------------------------------
+// --- Preview-scene pool ----------------------------------------------------
 
+// Take a free pooled preview world, creating one (RT + env/sun/mesh/camera) if needed.
 EditorUI::PreviewWorld* EditorUI::AcquirePreview()
 {
 	for (PreviewWorld* s : pvPool)
@@ -54,7 +48,7 @@ EditorUI::PreviewWorld* EditorUI::AcquirePreview()
 	s->rt = r->createRenderTarget(384, 384);
 	s->world = new World();
 	s->world->name = "Asset Preview";
-	s->world->auxiliary = true;   // skip global heavy passes (RT TLAS) — see World::Render
+	s->world->auxiliary = true;   // skip global heavy passes (RT TLAS)
 
 	Atom* env = new Atom("PreviewEnv");
 	env->AddComponent(new Environment());
@@ -63,7 +57,7 @@ EditorUI::PreviewWorld* EditorUI::AcquirePreview()
 	Atom* sun = new Atom("PreviewSun");
 	Light* l = new Light();
 	l->type = Light::Directional;
-	l->castShadows = false;      // no shadow passes for previews
+	l->castShadows = false;
 	sun->AddComponent(l);
 	sun->GetTransform().SetEulerDeg(Vector3(50, -30, 0));
 	s->world->Add(sun);
@@ -84,10 +78,10 @@ EditorUI::PreviewWorld* EditorUI::AcquirePreview()
 	return s;
 }
 
+// Return a preview world to the pool, clearing the staged mesh/material.
 void EditorUI::ReleasePreview(PreviewWorld* s)
 {
 	if (!s) return;
-	// Strip what the user staged; the scene skeleton (env/sun/mesh atom/camera) is reused.
 	s->mr->mesh = nullptr;
 	s->mr->meshGuid.clear();
 	s->mr->matGuid.clear();
@@ -116,7 +110,6 @@ static void SubtreeBounds(nuke::Atom* a, nuke::Vector3& c, float& r, bool& any)
 			if (!any) { c = wc; r = lr; any = true; }
 			else
 			{
-				// grow the sphere to include the new one
 				const double ddx = wc.x - c.x, ddy = wc.y - c.y, ddz = wc.z - c.z;
 				const float d = (float)std::sqrt(ddx * ddx + ddy * ddy + ddz * ddz);
 				const float nr = std::max(r, d + lr);
@@ -135,22 +128,18 @@ void EditorUI::FramePreview(PreviewWorld& s, Atom* subtree)
 	else         SubtreeBounds(s.meshAtom, c, r, any);
 	s.center = any ? c : Vector3(0, 0, 0);
 	s.radius = any ? std::max(r, 0.01f) : 1.0f;
-	s.dist = 0.0f;   // re-derive from radius on next draw
+	s.dist = 0.0f;   // re-derived from radius on next draw
 }
 
 void EditorUI::DrawPreviewImage(PreviewWorld& s, ImVec2 size)
 {
 	iRender* r = AppInstance::GetSingleton()->render;
-	// NOTE: Camera::Init fills `transform`, NOT `atom` — check/use the transform.
+	// Camera::Init fills `transform`, not `atom`.
 	if (!r || !s.cam || !s.cam->transform) return;
-	// The hosting OS window is minimized: draw nothing, resize nothing, render nothing —
-	// iconified sizes would churn the RT (and its per-camera buffers) for no one to see.
 	if (ImGuiViewport* vp = ImGui::GetWindowViewport())
-		if (vp->Flags & ImGuiViewportFlags_IsMinimized) return;
+		if (vp->Flags & ImGuiViewportFlags_IsMinimized) return;   // minimized: skip, iconified sizes churn the RT
 
-	// Auto-frame ONCE per staging (dist == 0): put the camera on the orbit sphere
-	// looking at the bounds center. Afterwards the camera is FREE — the transform
-	// persists and the viewport-style controls below move it.
+	// Auto-frame once per staging (dist == 0); afterwards the camera is driven by the controls below.
 	if (s.dist <= 0.0f)
 	{
 		s.dist = s.radius / std::tan((float)s.cam->fov * 0.5f * 0.01745329252f) * 1.5f;
@@ -164,23 +153,19 @@ void EditorUI::DrawPreviewImage(PreviewWorld& s, ImVec2 size)
 		ft.SetEulerDeg(Vector3(fp * 57.29577951308232, fyw * 57.29577951308232, 0.0));
 	}
 
-	// Fill EXACTLY the given rect (any aspect) — no fixed square, no dead space.
 	float pw = size.x, ph = size.y;
 	if (pw < 64.0f) pw = 64.0f;
 	if (ph < 64.0f) ph = 64.0f;
 
-	// The RT follows the on-screen size, but QUANTIZED (16px grid) and DEBOUNCED
-	// (stable for several frames): resizing every frame shows a permanently EMPTY
-	// texture (the world fills it only on the NEXT frame's render pass) and churns
-	// GPU resources hard — an ImGui scrollbar flicker used to oscillate the size at
-	// 60 Hz, black preview + dynamic-heap exhaustion included.
+	// RT size follows the rect but quantized (16px) and debounced: a per-frame resize
+	// leaves the texture empty (the world fills it only next frame) and churns GPU memory.
 	const int qw = std::max(64, ((int)pw + 15) / 16 * 16);
 	const int qh = std::max(64, ((int)ph + 15) / 16 * 16);
 	if (qw != s.rtW || qh != s.rtH)
 	{
 		if (qw == s.wantW && qh == s.wantH) ++s.wantFrames;
 		else { s.wantW = qw; s.wantH = qh; s.wantFrames = 1; }
-		if (s.wantFrames >= 5 || s.rtW <= 0)   // settled (or first ever size): apply
+		if (s.wantFrames >= 5 || s.rtW <= 0)   // settled (or first size)
 		{
 			r->resizeRenderTarget(s.rt, qw, qh);
 			s.rtW = qw; s.rtH = qh;
@@ -191,27 +176,21 @@ void EditorUI::DrawPreviewImage(PreviewWorld& s, ImVec2 size)
 	uint64_t tex = r->getRenderTargetTexture(s.rt);
 	if (!tex) return;
 
-	// A PLAIN Image, like the scene viewport: it has no interactive identity, so
-	// ImGuizmo can grab clicks over it (an InvisibleButton here used to steal them —
-	// the gizmo never activated). Window-dragging from content is off globally
-	// (ConfigWindowsMoveFromTitleBarOnly), so hover-based orbit is safe.
+	// Must stay a plain Image (no InvisibleButton): an interactive item here steals clicks from ImGuizmo.
 	const ImVec2 p0 = ImGui::GetCursorScreenPos();
-	s.rectMin = p0; s.rectSize = ImVec2(pw, ph);   // the gizmo overlay targets this rect
-	// Show the top-left (pw x ph) region of the (quantized) RT — 1:1 pixels, no squash.
+	s.rectMin = p0; s.rectSize = ImVec2(pw, ph);   // gizmo overlay targets this rect
+	// Show the top-left pw x ph region of the quantized RT — 1:1 pixels.
 	const ImVec2 uv1(std::min(1.0f, pw / (float)s.rtW), std::min(1.0f, ph / (float)s.rtH));
 	ImGui::Image((ImTextureID)tex, ImVec2(pw, ph), ImVec2(0, 0), uv1);
 	ImGuiIO& io = ImGui::GetIO();
 	if (ImGui::IsItemHovered())
 	{
-		// The MAIN VIEWPORT's camera controls, scaled to the asset's size:
-		//   RMB drag = look, MMB drag = pan, wheel = dolly, RMB + WASD/QE = fly (Shift faster).
-		// LMB stays free for the gizmo and for picking (prefab editor).
+		// RMB = look, MMB = pan, wheel = dolly, RMB + WASD/QE = fly; LMB stays free for the gizmo/picking.
 		Transform* t = s.cam->transform;
 		const float k = std::max(0.2f, s.radius);
 		const float rotSpeed = 0.005f, panSpeed = 0.0025f * k, zoomSpeed = 0.25f * k;
 
-		// Sync the look angles from the camera when the RMB drag STARTS (derived from
-		// FORWARD — same idiom as the viewport, avoids euler-recompute snaps).
+		// Re-derive yaw/pitch from forward on drag start; recomputing from eulers snaps.
 		if (ImGui::IsMouseClicked(ImGuiMouseButton_Right))
 		{
 			Vector3 f = t->direction();
@@ -236,8 +215,7 @@ void EditorUI::DrawPreviewImage(PreviewWorld& s, ImVec2 size)
 		if (io.MouseWheel != 0.0f)
 			t->position += t->direction() * (double)(io.MouseWheel * zoomSpeed);
 
-		// Free-flight while RMB is held (Unity/UE-style, like the scene viewport).
-		if (ImGui::IsMouseDown(ImGuiMouseButton_Right))
+		if (ImGui::IsMouseDown(ImGuiMouseButton_Right))   // free flight
 		{
 			float fly = 2.5f * k * io.DeltaTime;
 			if (io.KeyShift) fly *= 3.0f;
@@ -253,22 +231,16 @@ void EditorUI::DrawPreviewImage(PreviewWorld& s, ImVec2 size)
 	s.visible = true;   // ask the render hook to draw this scene this frame
 }
 
-// ---------------------------------------------------------------------------
-// Asset editor windows
-// ---------------------------------------------------------------------------
+// --- Asset editor windows --------------------------------------------------
 
 static const char* kPreviewMeshGuid[] = { "builtin:sphere", "builtin:cube", "builtin:plane" };
 
-static nuke::Atom* FindInSubtree(nuke::Atom* a, long id);   // defined below (used by the tree)
+static nuke::Atom* FindInSubtree(nuke::Atom* a, long id);
 
-// ---------------------------------------------------------------------------
-// Per-window undo/redo (prefab = subtree JSON snapshots, material = clones)
-// ---------------------------------------------------------------------------
-
+// Per-window undo/redo: prefabs use subtree JSON snapshots, materials use clones.
 static const size_t kAeUndoCap = 64;
 
-// Swap the live prefab subtree for a snapshot (ids are preserved by the atom
-// serializer, so the selection survives when the atom still exists).
+// Replace the live prefab subtree with a snapshot; atom ids survive, so the selection does.
 static void RestorePrefabState(EditorUI::AssetEditorWin& w, const std::string& json)
 {
 	if (w.prefabRoot) w.pv->world->RemoveAtomById((long)w.prefabRoot->id.id);
@@ -279,14 +251,10 @@ static void RestorePrefabState(EditorUI::AssetEditorWin& w, const std::string& j
 		if (!FindInSubtree(w.prefabRoot, w.prefabSelId))
 			w.prefabSelId = (long)w.prefabRoot->id.id;
 	}
-	w.dirty = true;   // restored state differs from the file (editedNow NOT raised: this IS undo)
+	w.dirty = true;   // editedNow deliberately not raised: this IS undo
 }
 
-// ---------------------------------------------------------------------------
-// Animation preview (3.1): a per-window mini-PIE — the ▶ toggle ticks the
-// subtree's Animators; ■ swaps the pre-play snapshot back (transform animation
-// mutates atom transforms, skinning swaps MeshRenderer meshes — both restored).
-// ---------------------------------------------------------------------------
+// --- Animation preview: a per-window mini-PIE ticking the subtree's Animators.
 
 static bool SubtreeHasAnimator(nuke::Atom* a)
 {
@@ -315,7 +283,7 @@ void EditorUI::ToggleAnimPreview(AssetEditorWin& w)
 	if (!w.animPlay)
 	{
 		if (!w.prefabRoot) return;
-		w.animSnap = nuke::SaveAtomToString(w.prefabRoot);   // pose/structure before play
+		w.animSnap = nuke::SaveAtomToString(w.prefabRoot);   // pose + structure before play
 		w.animPlay = true;
 	}
 	else
@@ -323,7 +291,7 @@ void EditorUI::ToggleAnimPreview(AssetEditorWin& w)
 		w.animPlay = false;
 		if (!w.animSnap.empty())
 		{
-			const bool wasDirty = w.dirty;   // restoring the pre-play state is NOT an edit
+			const bool wasDirty = w.dirty;   // restoring the pre-play pose is not an edit
 			RestorePrefabState(w, w.animSnap);
 			w.dirty = wasDirty;
 			w.animSnap.clear();
@@ -338,7 +306,7 @@ static void RestoreMaterialState(EditorUI::AssetEditorWin& w, nuke::Material* sn
 	w.mat = snap->Clone();
 	if (w.pv->mr->mat) delete w.pv->mr->mat;
 	w.pv->mr->mat = w.mat->Clone();   // live preview follows
-	w.dirty = true;   // (editedNow NOT raised: this IS undo/redo)
+	w.dirty = true;   // editedNow deliberately not raised: this IS undo/redo
 }
 
 void EditorUI::AssetEditorUndo(AssetEditorWin& w)
@@ -434,7 +402,7 @@ uint64_t EditorUI::UploadTexPreview(nuke::Texture* t, int cap, int& outW, int& o
 	return r->createTexture2D(rgba.data(), pw, ph);
 }
 
-// Sprite-slice metadata <-> its snapshot struct (single place that lists the fields).
+// Sprite-slice metadata <-> snapshot struct (the one place that lists the fields).
 static EditorUI::SpriteMeta SnapMeta(const nuke::Texture* t)
 {
 	return { t->spriteColumns, t->spriteRows,
@@ -450,8 +418,7 @@ static void ApplyMeta(nuke::Texture* t, const EditorUI::SpriteMeta& m)
 	t->sliceLeft = m.sl; t->sliceRight = m.sr; t->sliceTop = m.st; t->sliceBottom = m.sb;
 	t->nineSlice = m.nine;
 }
-// Mirror the edited slice metadata onto the live ResDB texture so scene sprites re-slice immediately
-// (int fields only — no pixel re-upload, no cache invalidation).
+// Mirror edited slice metadata onto the live ResDB texture so sprites re-slice immediately.
 static void SlicerApplyLive(nuke::Texture* t)
 {
 	if (!t || t->guid.empty()) return;
@@ -459,7 +426,7 @@ static void SlicerApplyLive(nuke::Texture* t)
 		if (live != t) ApplyMeta(live, SnapMeta(t));
 }
 
-// Call AFTER committing a slice change: records the pre-change baseline (w.idleS) then re-baselines.
+// Call after committing a slice change: records the pre-change baseline, then re-baselines.
 void EditorUI::SlicerPushUndo(AssetEditorWin& w)
 {
 	if (!w.tex) return;
@@ -470,6 +437,7 @@ void EditorUI::SlicerPushUndo(AssetEditorWin& w)
 	SlicerApplyLive(w.tex);
 }
 
+// Open (or focus) the editor window for an asset file, dispatching on its extension.
 void EditorUI::OpenAssetEditor(const std::string& path)
 {
 	for (AssetEditorWin& w : assetEds)
@@ -478,13 +446,11 @@ void EditorUI::OpenAssetEditor(const std::string& path)
 	std::string ext = bfs::path(path).extension().string();
 	for (char& c : ext) c = (char)std::tolower((unsigned char)c);
 	const bool isAudio = (ext == ".ogg" || ext == ".wav" || ext == ".mp3" || ext == ".flac");
-	// MODULE-supplied editors first: the module that registered a file type registers its
-	// editor too (RegisterAssetEditor — e.g. NukeTilemapEditor owns .nutile). The editor
-	// core stays format-blind about plugin types.
+	// Module-supplied editors win: a module that registers a file type also registers its editor.
 	if (const auto* open = nuke::AssetEditorForExt(ext)) { (*open)(path); return; }
 	if (ext != ".numat" && ext != ".numesh" && ext != ".nuprefab" && ext != ".nutex" && ext != ".nuinput" && !isAudio) return;
 
-	if (ext == ".nuinput")   // gameplay input map: pure data CRUD — no 3D scene, edits + saves the file
+	if (ext == ".nuinput")   // input map: pure data CRUD, no 3D scene
 	{
 		AssetEditorWin w;
 		w.path = path; w.ext = ext; w.wantFocus = true; w.detached = detachAssetEditors;
@@ -497,7 +463,7 @@ void EditorUI::OpenAssetEditor(const std::string& path)
 		return;
 	}
 
-	if (isAudio)   // audio preview: no 3D scene — just the file path + a Preview-bus voice
+	if (isAudio)   // audio preview: file path + a Preview-bus voice
 	{
 		AssetEditorWin w;
 		w.path = path; w.ext = ext; w.wantFocus = true; w.detached = detachAssetEditors;
@@ -505,16 +471,14 @@ void EditorUI::OpenAssetEditor(const std::string& path)
 		return;
 	}
 
-	if (ext == ".nutex")   // Sprite Slicer: 2D — no preview scene, just an owned texture + a GPU preview
+	if (ext == ".nutex")   // Sprite Slicer: 2D, no preview scene
 	{
 		AssetEditorWin w;
 		w.path = path; w.ext = ext; w.wantFocus = true; w.detached = detachAssetEditors;
 		w.tex = nuke::Texture::LoadFromFile(path);
 		if (!w.tex) return;
-		if (w.tex->usage != nuke::Texture::UsageSprite) w.tex->usage = nuke::Texture::UsageSprite;  // opening it in the slicer implies it IS a sprite
+		if (w.tex->usage != nuke::Texture::UsageSprite) w.tex->usage = nuke::Texture::UsageSprite;  // slicing implies sprite usage
 		w.texPreview = UploadTexPreview(w.tex, 2048, w.texPrevW, w.texPrevH);
-		// (destroyTexture2D defers destruction INSIDE the renderer now — a destroyed handle's view
-		// stays alive until no in-flight draw data can reference it, so handle reuse can't collide.)
 		w.slFirst = 0; w.slCount = w.tex->SpriteCount();
 		w.idleS = SnapMeta(w.tex);
 		assetEds.push_back(std::move(w));
@@ -533,7 +497,7 @@ void EditorUI::OpenAssetEditor(const std::string& path)
 		if (!w.mat) { ReleasePreview(w.pv); return; }
 		w.pv->mr->meshGuid = kPreviewMeshGuid[0];
 		w.pv->mr->mesh = db->GetMesh(kPreviewMeshGuid[0]);
-		w.pv->mr->matGuid.clear();                 // the preview draws OUR editing copy
+		w.pv->mr->matGuid.clear();                 // preview draws our editing copy
 		w.pv->mr->mat = w.mat->Clone();
 		w.idleM = w.mat->Clone();                  // undo baseline
 		FramePreview(*w.pv, nullptr);
@@ -551,7 +515,7 @@ void EditorUI::OpenAssetEditor(const std::string& path)
 	{
 		w.prefabRoot = nuke::LoadPrefab(path);
 		if (!w.prefabRoot) { ReleasePreview(w.pv); return; }
-		w.pv->mr->mesh = nullptr;                  // the skeleton mesh atom stays empty
+		w.pv->mr->mesh = nullptr;                  // skeleton mesh atom stays empty
 		w.pv->world->Add(w.prefabRoot);
 		w.prefabSelId = (long)w.prefabRoot->id.id;
 		w.idleP = nuke::SaveAtomToString(w.prefabRoot);   // undo baseline
@@ -560,15 +524,13 @@ void EditorUI::OpenAssetEditor(const std::string& path)
 	assetEds.push_back(std::move(w));
 }
 
-// --- dashed helpers for the slicer grid overlay ---
+// Dashed line for the slicer grid overlay.
 static void DashLine(ImDrawList* dl, ImVec2 a, ImVec2 b, ImU32 col, float th, float dash, float gap)
 {
 	float dx = b.x - a.x, dy = b.y - a.y, len = sqrtf(dx * dx + dy * dy);
 	if (len < 0.001f) return;
 	float step = dash + gap;
-	// HARD safety: a very long line would emit thousands of segments -> a single UI draw list past 65535
-	// verts overflows the renderer's 16-bit index buffer -> GPU reads OOB -> device removed. Callers clip
-	// to the canvas first, but if anything slips through, fall back to a solid line (2 verts).
+	// Too many segments would push the draw list past 65535 verts and overflow ImGui's 16-bit indices.
 	if (len / step > 4096.0f) { dl->AddLine(a, b, col, th); return; }
 	float ux = dx / len, uy = dy / len;
 	for (float d = 0; d < len; d += step)
@@ -577,8 +539,7 @@ static void DashLine(ImDrawList* dl, ImVec2 a, ImVec2 b, ImU32 col, float th, fl
 		dl->AddLine(ImVec2(a.x + ux * d, a.y + uy * d), ImVec2(a.x + ux * e, a.y + uy * e), col, th);
 	}
 }
-// Dashed axis-aligned rectangle, each edge CLIPPED to [cmin,cmax] (and culled if outside) so the segment
-// count is bounded by the visible canvas, never by the zoom level.
+// Dashed AABB rect with each edge clipped to [cmin,cmax], bounding segment count by the canvas, not the zoom.
 static void DashRect(ImDrawList* dl, ImVec2 p0, ImVec2 p1, ImVec2 cmin, ImVec2 cmax, ImU32 col, float th)
 {
 	if (p0.x > p1.x) { float t = p0.x; p0.x = p1.x; p1.x = t; }
@@ -592,10 +553,8 @@ static void DashRect(ImDrawList* dl, ImVec2 p0, ImVec2 p1, ImVec2 cmin, ImVec2 c
 	if (p1.x >= cmin.x && p1.x <= cmax.x && cb > ct) DashLine(dl, ImVec2(p1.x, ct), ImVec2(p1.x, cb), col, th, 6, 4);
 }
 
-// Sprite Slicer body (mode 0): a GIMP-style 2D editor for the sheet. Left = properties (drag OR type),
-// centre = the sheet under a real ruler with draggable margin edges + grid lines, right = live cell preview.
-// All cell geometry comes from Texture::SpriteCellRect (shared with the runtime SpriteAnimator), so what you
-// mark here is exactly what plays. View auto-fits (adapts to window resize) until you zoom/pan.
+// Sprite Slicer body: properties on the left, ruler + sheet canvas in the centre, cell preview on the right.
+// Cell geometry comes from Texture::SpriteCellRect, shared with the runtime SpriteAnimator.
 void EditorUI::DrawSpriteSlicer(AssetEditorWin& w)
 {
 	nuke::Texture* t = w.tex;
@@ -614,12 +573,12 @@ void EditorUI::DrawSpriteSlicer(AssetEditorWin& w)
 	ImGui::SetNextItemWidth(150);
 	const char* modes[] = { "Sprite Slicer", "Nine-Slice" };
 	ImGui::Combo("##mode", &w.slMode, modes, IM_ARRAYSIZE(modes));
-	const bool nineMode = (w.slMode == 1);   // drag the 9-slice borders instead of the grid
+	const bool nineMode = (w.slMode == 1);   // drag 9-slice borders instead of the grid
 	ImGui::SameLine(); ImGui::TextDisabled("%d x %d px", t->width, t->height);
 	ImGui::SameLine(); if (ImGui::SmallButton("Fit")) w.slUserView = false;
 	ImGui::Separator();
 
-	// advance the preview clock (used by both the canvas highlight and the right preview)
+	// advance the preview clock
 	int nCells = t->SpriteCount();
 	if (w.slFirst < 0) w.slFirst = 0; if (w.slFirst >= nCells) w.slFirst = nCells - 1;
 	if (w.slCount < 1) w.slCount = 1; if (w.slCount > nCells - w.slFirst) w.slCount = nCells - w.slFirst;
@@ -630,7 +589,7 @@ void EditorUI::DrawSpriteSlicer(AssetEditorWin& w)
 	int activeCell = w.slFirst + (w.slCount > 0 ? (w.slCur % w.slCount) : 0);
 	int ax0 = 0, ay0 = 0, acw = 0, ach = 0; bool haveActive = t->SpriteCellRect(activeCell, ax0, ay0, acw, ach);
 
-	// ===== LEFT: properties (labels left, drag-to-scrub or double-click to type) =====
+	// ===== LEFT: properties =====
 	ImGui::BeginChild("sl_props", ImVec2(232, 0), ImGuiChildFlags_ResizeX | ImGuiChildFlags_Borders);
 	auto Row = [&](const char* label, int* v, int lo, int hi){
 		ImGui::TableNextRow();
@@ -697,7 +656,7 @@ void EditorUI::DrawSpriteSlicer(AssetEditorWin& w)
 		PadRow("Pad L", &w.slPadL); PadRow("Pad R", &w.slPadR); PadRow("Pad T", &w.slPadT); PadRow("Pad B", &w.slPadB);
 		ImGui::EndTable();
 	}
-	}   // !nineMode (animation/mirror sections)
+	}   // !nineMode
 	clampGrid();
 	ImGui::EndChild();
 
@@ -744,11 +703,11 @@ void EditorUI::DrawSpriteSlicer(AssetEditorWin& w)
 		float exL = (float)t->spriteMarginLeft, exR = (float)(t->width  - t->spriteMarginRight);
 		float eyT = (float)t->spriteMarginTop,  eyB = (float)(t->height - t->spriteMarginBottom);
 
-		// ---- draggable handles: outer margin edges + inner grid lines (spacing) ----
+		// ---- draggable handles: margin edges + grid lines ----
 		bool inArea = overArea || (w.slDrag != 0);
 		auto nearX = [&](float sx){ return fabsf(io.MousePos.x - sx) < 5.0f && io.MousePos.y > c0.y && io.MousePos.y < c0.y + csz.y; };
 		auto nearY = [&](float sy){ return fabsf(io.MousePos.y - sy) < 5.0f && io.MousePos.x > c0.x && io.MousePos.x < c0.x + csz.x; };
-		int hover = 0;   // 1..4 outer L/R/T/B, 5 spacingX, 6 spacingY; NINE-SLICE mode: 7..10 slice L/R/T/B
+		int hover = 0;   // 1..4 margin L/R/T/B, 5 spacingX, 6 spacingY, 7..10 nine-slice L/R/T/B
 		if (w.slDrag == 0 && inArea) {
 			if (nineMode)
 			{
@@ -791,7 +750,7 @@ void EditorUI::DrawSpriteSlicer(AssetEditorWin& w)
 		}
 		if (w.slDrag && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) { SlicerPushUndo(w); w.slDrag = 0; }
 
-		// ---- draw sheet + grid (clipped to the image area) ----
+		// ---- draw sheet + grid ----
 		dl->PushClipRect(ia0, ImVec2(ia0.x + iaW, ia0.y + iaH), true);
 		ImVec2 ip1 = ImVec2(sX((float)t->width), sY((float)t->height));
 		if (w.texPreview) dl->AddImage((ImTextureID)w.texPreview, ip0, ip1);
@@ -800,7 +759,7 @@ void EditorUI::DrawSpriteSlicer(AssetEditorWin& w)
 		for (int i = 0; i < cnt; ++i) {
 			int x0,y0,cw,ch; if (!t->SpriteCellRect(i, x0, y0, cw, ch)) continue;
 			ImVec2 p0 = ImVec2(sX((float)x0), sY((float)y0)), p1 = ImVec2(sX((float)(x0 + cw)), sY((float)(y0 + ch)));
-			if (p1.x < ia0.x || p0.x > ia0.x + iaW || p1.y < ia0.y || p0.y > ia0.y + iaH) continue;   // cull off-screen cells (bounds vertex count)
+			if (p1.x < ia0.x || p0.x > ia0.x + iaW || p1.y < ia0.y || p0.y > ia0.y + iaH) continue;   // cull off-screen cells: bounds the vertex count
 			if (i == activeCell) dl->AddRect(p0, p1, IM_COL32(255, 210, 60, 255), 0, 0, 2.0f);
 			else                 DashRect(dl, p0, p1, ia0, ImVec2(ia0.x + iaW, ia0.y + iaH), IM_COL32(60, 200, 255, 170), 1.0f);
 			if (w.slShowMirror) {
@@ -818,14 +777,14 @@ void EditorUI::DrawSpriteSlicer(AssetEditorWin& w)
 			dl->AddLine(ImVec2(sX(0), T), ImVec2(sX((float)t->width), T), sc, th);
 			dl->AddLine(ImVec2(sX(0), B), ImVec2(sX((float)t->width), B), sc, th);
 		}
-		ImU32 edge = IM_COL32(255, 140, 40, 220);   // outer margin frame (solid, brighter than the cell grid)
+		ImU32 edge = IM_COL32(255, 140, 40, 220);   // outer margin frame
 		dl->AddLine(ImVec2(sX(exL), sY(eyT)), ImVec2(sX(exL), sY(eyB)), edge, 1.5f);
 		dl->AddLine(ImVec2(sX(exR), sY(eyT)), ImVec2(sX(exR), sY(eyB)), edge, 1.5f);
 		dl->AddLine(ImVec2(sX(exL), sY(eyT)), ImVec2(sX(exR), sY(eyT)), edge, 1.5f);
 		dl->AddLine(ImVec2(sX(exL), sY(eyB)), ImVec2(sX(exR), sY(eyB)), edge, 1.5f);
 		dl->PopClipRect();
 
-		// ---- rulers: strips OUTSIDE the image clip; tick labels live HERE, never on the sheet ----
+		// ---- rulers: strips outside the image clip; tick labels live here, not on the sheet ----
 		ImU32 rbg = IM_COL32(28, 28, 28, 255), rtick = IM_COL32(150, 150, 150, 255), rtxt = IM_COL32(205, 205, 205, 255);
 		dl->AddRectFilled(c0, ImVec2(c0.x + csz.x, c0.y + RT), rbg);
 		dl->AddRectFilled(c0, ImVec2(c0.x + RL, c0.y + csz.y), rbg);
@@ -841,26 +800,25 @@ void EditorUI::DrawSpriteSlicer(AssetEditorWin& w)
 		{ int a = (int)((c0.y + RT - ip0.y) / z); if (a < 0) a = 0; int b = (int)((c0.y + csz.y - ip0.y) / z) + 1; if (b > t->height) b = t->height;
 		for (int py = (a / step) * step; py <= b; py += step) { float y = sY((float)py); if (y < c0.y + RT) continue; dl->AddLine(ImVec2(c0.x + RL - 5, y), ImVec2(c0.x + RL, y), rtick); snprintf(buf, 16, "%d", py); dl->AddText(ImVec2(c0.x + 2, y + 1), rtxt, buf); } }
 		dl->PopClipRect();
-		// draggable handle marks on the rulers at the outer margin edges
+		// handle marks on the rulers at the margin edges
 		auto handleX = [&](float sx){ if (sx > c0.x + RL) dl->AddTriangleFilled(ImVec2(sx - 4, c0.y), ImVec2(sx + 4, c0.y), ImVec2(sx, c0.y + RT), edge); };
 		auto handleY = [&](float sy){ if (sy > c0.y + RT) dl->AddTriangleFilled(ImVec2(c0.x, sy - 4), ImVec2(c0.x, sy + 4), ImVec2(c0.x + RL, sy), edge); };
 		handleX(sX(exL)); handleX(sX(exR)); handleY(sY(eyT)); handleY(sY(eyB));
 	}
 	ImGui::EndChild();
 
-	// ===== RIGHT: live cell preview (nine-slice mode: a STRETCHED preview built from the 9 patches) =====
+	// ===== RIGHT: live cell preview (nine-slice mode: stretched preview from the 9 patches) =====
 	ImGui::SameLine();
 	ImGui::BeginChild("sl_prev", ImVec2(0, 0), ImGuiChildFlags_Borders);
 	if (nineMode)
 	{
 		ImGui::TextDisabled("Stretch preview");
-		static float s_pw = 2.0f, s_ph = 1.5f;   // preview stretch factors (edit-session UI state)
+		static float s_pw = 2.0f, s_ph = 1.5f;   // preview stretch factors
 		ImGui::SetNextItemWidth(-1); ImGui::SliderFloat("##pw", &s_pw, 0.25f, 4.0f, "W x%.2f");
 		ImGui::SetNextItemWidth(-1); ImGui::SliderFloat("##ph", &s_ph, 0.25f, 4.0f, "H x%.2f");
 		if (w.texPreview && t->width > 0 && t->height > 0)
 		{
-			// Fit the stretched rect into the panel, then compose 9 sub-images: corners keep their
-			// pixel size (scaled by the fit), edges stretch one axis, the centre both.
+			// Corners keep their pixel size, edges stretch on one axis, the centre on both.
 			ImVec2 av = ImGui::GetContentRegionAvail();
 			float outW = t->width * s_pw, outH = t->height * s_ph;
 			float fitP = 1.0f;
@@ -872,7 +830,7 @@ void EditorUI::DrawSpriteSlicer(AssetEditorWin& w)
 			ImVec2 p0 = ImGui::GetCursorScreenPos();
 			ImDrawList* pdl = ImGui::GetWindowDrawList();
 			float xs[4] = { 0, bl, dw - br, dw };
-			float ys[4] = { 0, bt, dh - bb, dh };   // screen top -> bottom
+			float ys[4] = { 0, bt, dh - bb, dh };
 			float us[4] = { 0, (float)t->sliceLeft / t->width, 1.0f - (float)t->sliceRight / t->width, 1.0f };
 			float vs[4] = { 0, (float)t->sliceTop / t->height, 1.0f - (float)t->sliceBottom / t->height, 1.0f };
 			for (int cxi = 0; cxi < 3; ++cxi)
@@ -911,8 +869,7 @@ void EditorUI::DrawPrefabTree(AssetEditorWin& w, Atom* a)
 	bool openNode = ImGui::TreeNodeEx(a->GetName().c_str(), tf);
 	if (ImGui::IsItemClicked()) w.prefabSelId = (long)a->id.id;
 
-	// Drag to reparent (within THIS prefab window; world pose is preserved below — core Reparent
-	// is pure link surgery and never touches transforms).
+	// Drag to reparent within this prefab window; the world pose is preserved.
 	if (a != w.prefabRoot && ImGui::BeginDragDropSource())
 	{
 		long id = (long)a->id.id;
@@ -926,11 +883,10 @@ void EditorUI::DrawPrefabTree(AssetEditorWin& w, Atom* a)
 		{
 			long dragId = *(const long*)p->Data;
 			Atom* dragged = FindInSubtree(w.prefabRoot, dragId);
-			// no-op for self / own descendant (that would detach the subtree into itself)
+			// reparenting onto self or a descendant would detach the subtree into itself
 			bool insideDragged = dragged && FindInSubtree(dragged, (long)a->id.id) != nullptr;
 			if (dragged && dragged != a && !insideDragged)
 			{
-				// Keep the WORLD pose across the parent change (same behaviour as the main hierarchy).
 				Transform& mt = dragged->GetTransform();
 				Vector3 wp = mt.globalPosition(); Quaternion wr = mt.globalRotation(); Vector3 ws = mt.globalScale();
 				w.pv->world->Reparent(dragged, a);
@@ -941,7 +897,7 @@ void EditorUI::DrawPrefabTree(AssetEditorWin& w, Atom* a)
 		ImGui::EndDragDropTarget();
 	}
 
-	// Structure ops (applied AFTER the walk — mutating mid-iteration corrupts the lists).
+	// Structure ops are deferred: mutating the atom lists mid-walk corrupts them.
 	if (ImGui::BeginPopupContextItem("##atomctx"))
 	{
 		if (ImGui::MenuItem(ICON_LC_PLUS " Add Child")) w.pendingAddParentId = (long)a->id.id;
@@ -966,8 +922,7 @@ static nuke::Atom* FindInSubtree(nuke::Atom* a, long id)
 	return nullptr;
 }
 
-// Name + transform + reflected components of one prefab atom — with component
-// add/remove, so the prefab is EDITABLE, not just viewable. Returns true when edited.
+// Name, transform and reflected components of one prefab atom, with add/remove. True when edited.
 bool EditorUI::DrawPrefabAtomEditor(AssetEditorWin& w, Atom* a)
 {
 	bool edited = false;
@@ -997,7 +952,7 @@ bool EditorUI::DrawPrefabAtomEditor(AssetEditorWin& w, Atom* a)
 		ImGui::PushID(c);
 		bool keep = true;
 		bool openHdr = ImGui::CollapsingHeader(ti->name.c_str(), &keep, ImGuiTreeNodeFlags_DefaultOpen);
-		if (!keep) toRemove = c;   // the header's close button = remove component
+		if (!keep) toRemove = c;   // header close button = remove component
 		if (openHdr)
 		{
 			bool en = c->enabled;
@@ -1008,14 +963,13 @@ bool EditorUI::DrawPrefabAtomEditor(AssetEditorWin& w, Atom* a)
 	}
 	if (toRemove)
 	{
-		// Edit-time removal (same as the inspector): NOT Destroy() — that's the runtime hook.
+		// Edit-time removal: not Destroy(), which is the runtime hook.
 		a->components.remove(toRemove);
 		delete toRemove;
 		edited = true;
 	}
 
-	// Add any registered, create-able Component type (incl. plugin ones) — same rules
-	// as the scene inspector.
+	// Add any registered, create-able Component type, plugin types included.
 	ImGui::Separator();
 	if (ImGui::Button(ICON_LC_PLUS " Add Component"))
 		ImGui::OpenPopup("prefab_addcomp");
@@ -1041,15 +995,10 @@ bool EditorUI::DrawPrefabAtomEditor(AssetEditorWin& w, Atom* a)
 void EditorUI::winAssetEditors()
 {
 	aeFocused = -1;   // recomputed below; EditorUI::Undo/Redo route by it
-	// NEW detachable DOCUMENT windows (text editor, module editors) follow the same
-	// preference as the asset editors.
 	NukeUI::DocDetachDefault(detachAssetEditors);
 
-	// NORMAL DOCKING, tear-off half (D3D fallback only — with NATIVE viewports imgui
-	// detaches windows itself): the user drags an asset editor's title bar PAST the
-	// main-window edge -> the window detaches into a host OS window that keeps following
-	// the cursor (the drag continues seamlessly). Releasing it back over the main window
-	// re-docks it at the drop point (HostDockDrop, consumed in the loop below).
+	// Tear-off (D3D fallback only; native viewports let imgui detach): dragging a title bar
+	// past the main-window edge hands the drag to a host OS window. Re-dock lands in HostDockDrop.
 	if (!NukeUI::NativeViewportsActive())
 	if (ImGuiContext* g = ImGui::GetCurrentContext())
 		if (g->MovingWindow && g->MovingWindow->RootWindow)
@@ -1057,9 +1006,8 @@ void EditorUI::winAssetEditors()
 			const char* tag = strstr(g->MovingWindow->RootWindow->Name, "###ae:");
 			const ImVec2 m  = ImGui::GetMousePos();
 			const ImVec2 ds = ImGui::GetIO().DisplaySize;
-			// Torn off when the cursor CLEARLY left the window (margin, e.g. onto another
-			// monitor) — or when it is pinned against the VIRTUAL-SCREEN edge (a maximized
-			// main window clamps the cursor there, so "past the edge" is unreachable).
+			// Tear off when the cursor clearly left the window, or is pinned against the
+			// virtual-screen edge (a maximized main window makes "past the edge" unreachable).
 			const float out = 12.0f;
 			const bool left = m.x < -out || m.y < -out || m.x >= ds.x + out || m.y >= ds.y + out;
 			bool clamped = false;
@@ -1085,19 +1033,14 @@ void EditorUI::winAssetEditors()
 	for (int i = 0; i < (int)assetEds.size(); ++i)
 	{
 		AssetEditorWin& w = assetEds[i];
-		// "Dock back" pressed inside the host window last frame: a host can't destroy
-		// itself from within its own content tick, so the request lands here.
+		// "Dock back" from the host window: a host cannot destroy itself inside its own content tick.
 		if (w.wantDock)
 		{
 			if (w.host) { NukeUI::HostDestroy(w.host); w.host = nullptr; }
 			w.detached = false; w.wantDock = false; w.wantFocus = true;
 		}
-		// NATIVE viewports (Vulkan): imgui owns embedding/detaching — no forced modes.
-		// DETACHED mode below is the D3D fallback only (PER WINDOW; the preference is the
-		// default for newly opened editors): an EDITOR-OWNED OS window (NukeUI host, the
-		// Godot model) — we create a borderless GLFW window ourselves, imgui draws into it
-		// through its own context, pixels arrive via the GDI blit (the imgui multi-viewport
-		// platform-window path raced DXGI into device removal).
+		// Detached mode is the D3D fallback only: an editor-owned borderless GLFW window with its
+		// own ImGui context, blitted via GDI (imgui's multi-viewport path races DXGI into device removal).
 		if (w.detached && !NukeUI::NativeViewportsActive())
 		{
 			if (!w.host)
@@ -1120,17 +1063,14 @@ void EditorUI::winAssetEditors()
 						}
 				});
 			}
-			// Tear-off: the host was born mid-drag — it picks the drag up and rides the
-			// cursor until the user lets go (release back over the main window = re-dock).
+			// Host born mid-drag: it picks the drag up and rides the cursor until release.
 			if (w.dragOut) { NukeUI::HostBeginDrag(w.host, 220.0f, 12.0f); w.dragOut = false; }
-			// Content-window flags mirror the docked window: dirty dot + the same
-			// no-scrollbar rule for preview editors (see the docked path below).
+			// Content-window flags mirror the docked window.
 			{
 				const bool isInputH = (w.ext == ".nuinput");
 				NukeUI::HostSetContentFlags(w.host, (w.dirty ? ImGuiWindowFlags_UnsavedDocument : 0)
 				    | (isInputH ? 0 : (ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)));
 			}
-			// Dropped back onto the main window: re-dock at the drop point.
 			float dropX = 0, dropY = 0;
 			if (NukeUI::HostDockDrop(w.host, &dropX, &dropY))
 			{
@@ -1141,42 +1081,37 @@ void EditorUI::winAssetEditors()
 			if (!NukeUI::HostAlive(w.host)) w.open = false;   // OS close button
 			if (!w.open && w.dirty)
 			{
-				w.open = true;                // keep it until the user answers (modal below)
+				w.open = true;                // keep it until the modal below is answered
 				aeCloseConfirm = i;
 			}
-			continue;                          // content is drawn by the host tick, not here
+			continue;                          // content is drawn by the host tick
 		}
 		if (w.wantFocus) { ImGui::SetNextWindowFocus(); w.wantFocus = false; }
 		if (w.hasDrop)
 		{
-			// Re-docked by drag: appear right where the user dropped it (title bar under
-			// the cursor), floating — from there normal imgui docking (drag onto panels /
-			// dock nodes with the usual preview overlays) takes over.
+			// Re-docked by drag: appear floating at the drop point, then normal imgui docking takes over.
 			w.hasDrop = false;
 			ImGui::SetNextWindowViewport(ImGui::GetMainViewport()->ID);
 			ImGui::SetNextWindowPos(ImVec2(ImMax(0.0f, w.dropX - 220.0f), ImMax(0.0f, w.dropY - 10.0f)), ImGuiCond_Always);
 		}
 		else if (!NukeUI::NativeViewportsActive())
 		{
-			// PIN to the main viewport (D3D fallback only): imgui remembers a previously-
-			// detached screen position and would silently auto-spawn an OS window again —
-			// the fallback must never leave the main window on its own. With NATIVE
-			// viewports leaving the main window is exactly what windows are ALLOWED to do.
+			// Pin to the main viewport: without native viewports imgui would re-spawn an OS
+			// window from a remembered detached position, which the D3D fallback must never do.
 			ImGui::SetNextWindowViewport(ImGui::GetMainViewport()->ID);
 			ImVec2 wp = ImGui::GetMainViewport()->WorkPos;
 			ImGui::SetNextWindowPos(ImVec2(wp.x + 80.0f, wp.y + 80.0f), ImGuiCond_Appearing);
 		}
-		const bool isSlicer = (w.ext == ".nutex");   // 2D Sprite Slicer — no 3D scene, but not audio either
-		const bool isInput  = (w.ext == ".nuinput"); // gameplay input map — pure data CRUD, no scene
-		const bool isAudio = !w.pv && !isSlicer && !isInput;   // audio previews are the only OTHER sceneless editors
+		const bool isSlicer = (w.ext == ".nutex");
+		const bool isInput  = (w.ext == ".nuinput");
+		const bool isAudio = !w.pv && !isSlicer && !isInput;
 		ImGui::SetNextWindowSize(isAudio ? ImVec2(420.0f, 170.0f)
 		                                 : ImVec2(w.ext == ".nuprefab" ? 900.0f : (isSlicer ? 760.0f : (isInput ? 820.0f : 420.0f)), 640.0f), ImGuiCond_FirstUseEver);
 		const char* icon = isAudio ? ICON_LC_MUSIC : isSlicer ? ICON_LC_GRID_2X2 : isInput ? ICON_LC_SETTINGS_2
 		                 : w.ext == ".numat" ? ICON_LC_PALETTE : (w.ext == ".numesh" ? ICON_LC_BOX : ICON_LC_PACKAGE);
 		std::string title = std::string(icon) + " " + bfs::path(w.path).filename().string() + "###ae:" + w.path;
-		// No window scrollbars for PREVIEW editors: the 3D/image view is sized to the free space and
-		// a flickering scrollbar would oscillate that size every frame (children scroll themselves).
-		// Pure-form editors (.nuinput) have flowing content and DO scroll like a normal window.
+		// Preview editors get no scrollbars: they size to free space, so a flickering scrollbar
+		// would oscillate that size every frame. Form editors (.nuinput) scroll normally.
 		ImGuiWindowFlags wf = window_flags | (w.dirty ? ImGuiWindowFlags_UnsavedDocument : 0)
 		                    | (isInput ? 0 : (ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse));
 		if (ImGui::Begin(title.c_str(), &w.open, wf))
@@ -1184,7 +1119,7 @@ void EditorUI::winAssetEditors()
 		ImGui::End();
 		if (!w.open && w.dirty)
 		{
-			w.open = true;               // keep the window until the user answers
+			w.open = true;               // keep the window until the modal is answered
 			aeCloseConfirm = i;
 		}
 	}
@@ -1230,7 +1165,7 @@ void EditorUI::winAssetEditors()
 			delete w.idleM;
 			for (Material* m : w.undoM) delete m;
 			for (Material* m : w.redoM) delete m;
-			if (w.texPreview)   // destruction is deferred INSIDE the renderer (centralized GPU trash)
+			if (w.texPreview)   // destruction is deferred inside the renderer's GPU trash
 			{
 				if (iRender* r = AppInstance::GetSingleton()->render) r->destroyTexture2D(w.texPreview);
 				w.texPreview = 0;
@@ -1242,20 +1177,16 @@ void EditorUI::winAssetEditors()
 		}
 }
 
-// The full content of ONE asset editor (everything the old inline Begin..End body did).
-// Shared by both hosts: the docked/floating imgui window in the MAIN context, and the
-// EDITOR-OWNED OS window (NukeUI host, detached mode) whose content callback calls this
-// inside its own ImGui context.
+// Body of one asset editor window, shared by the docked imgui window and the detached host window.
 void EditorUI::DrawAssetEditorBody(int i)
 {
 	AssetEditorWin& w = assetEds[i];
-	// Type flags (recomputed; the docked path also computes them for sizing).
 	const bool isSlicer = (w.ext == ".nutex");
 	const bool isInput  = (w.ext == ".nuinput");
 	const bool isAudio  = !w.pv && !isSlicer && !isInput;
 	(void)isAudio;
 			const bool focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
-			if (focused) aeFocused = i;   // Ctrl+Z/Ctrl+Y route to THIS window's history
+			if (focused) aeFocused = i;   // Ctrl+Z/Ctrl+Y route to this window's history
 			bool wantSave = false;
 			if (w.ext != ".numesh" && !isAudio)
 			{
@@ -1263,7 +1194,6 @@ void EditorUI::DrawAssetEditorBody(int i)
 				ImGui::SameLine();
 				if (ImGui::SmallButton(ICON_LC_UNDO_2 " Revert"))
 				{
-					// Reload the asset from disk into this editor.
 					if (w.ext == ".numat" && w.mat)
 					{
 						delete w.mat; w.mat = nuke::Material::LoadFromFile(w.path);
@@ -1303,7 +1233,7 @@ void EditorUI::DrawAssetEditorBody(int i)
 
 			if (w.ext == ".numat" && w.mat)
 			{
-				// Left: the material fields. Right: the 3D view fills EVERYTHING else.
+				// Left: material fields. Right: the 3D view fills the rest.
 				ImGui::BeginChild("##matfields", ImVec2(430, 0), ImGuiChildFlags_ResizeX | ImGuiChildFlags_Borders);
 				const char* meshes[] = { "Sphere", "Cube", "Plane" };
 				ImGui::SetNextItemWidth(140);
@@ -1318,8 +1248,7 @@ void EditorUI::DrawAssetEditorBody(int i)
 					if (DrawFields(w.mat, ti))
 					{
 						w.dirty = true; w.editedNow = true;
-						// live preview: swap in a fresh clone of the edited material
-						if (w.pv->mr->mat) delete w.pv->mr->mat;
+						if (w.pv->mr->mat) delete w.pv->mr->mat;   // live preview: fresh clone
 						w.pv->mr->mat = w.mat->Clone();
 					}
 				ImGui::EndChild();
@@ -1336,7 +1265,7 @@ void EditorUI::DrawAssetEditorBody(int i)
 						m->aabbMax[0] - m->aabbMin[0], m->aabbMax[1] - m->aabbMin[1], m->aabbMax[2] - m->aabbMin[2]);
 				}
 				else ImGui::TextDisabled("Mesh is not in the resource DB.");
-				DrawPreviewImage(*w.pv, ImGui::GetContentRegionAvail());   // everything below the stats line
+				DrawPreviewImage(*w.pv, ImGui::GetContentRegionAvail());
 			}
 			else if (isSlicer && w.tex)
 			{
@@ -1344,7 +1273,7 @@ void EditorUI::DrawAssetEditorBody(int i)
 			}
 			else if (w.ext == ".nuprefab" && w.prefabRoot)
 			{
-				// Deferred tree ops (queued by the tree's context menu last frame).
+				// Deferred tree ops queued by the tree's context menu.
 				if (w.pendingAddParentId)
 				{
 					if (Atom* parent = FindInSubtree(w.prefabRoot, w.pendingAddParentId))
@@ -1375,7 +1304,6 @@ void EditorUI::DrawAssetEditorBody(int i)
 				ImGui::BeginChild("##pright", ImVec2(0, 0), ImGuiChildFlags_None,
 				                  ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 				{
-					// The SAME tool buttons as the main toolbar (icons + active highlight).
 					const float tbw = 34.0f;
 					if (ToolBtn(ICON_LC_MOUSE_POINTER, "Select (Q)", w.gizmoOp == 0, tbw)) w.gizmoOp = 0; ImGui::SameLine();
 					if (ToolBtn(ICON_LC_MOVE,          "Move (W)",   w.gizmoOp == 1, tbw)) w.gizmoOp = 1; ImGui::SameLine();
@@ -1385,8 +1313,7 @@ void EditorUI::DrawAssetEditorBody(int i)
 					            w.gizmoWorld ? "World space (X)" : "Local space (X)", false, tbw))
 						w.gizmoWorld = !w.gizmoWorld;
 
-					// Animation preview (3.1): ▶ ticks the subtree's Animators (mini-PIE for
-					// this window only); ■ restores the pose snapshot taken at play start.
+					// Animation preview: play ticks the subtree's Animators, stop restores the snapshot.
 					if (SubtreeHasAnimator(w.prefabRoot))
 					{
 						ImGui::SameLine();
@@ -1397,8 +1324,7 @@ void EditorUI::DrawAssetEditorBody(int i)
 					}
 					if (w.animPlay) TickAnimPreview(w);
 
-					// The VIEWPORT's hotkeys, scoped to this window: Q/W/E/R tools, X space,
-					// F frame selection, Del delete atom. Not while typing or flying (RMB+WASD).
+					// Viewport hotkeys scoped to this window; suppressed while typing or flying.
 					if ((ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)
 					     || ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows))
 					    && !ImGui::GetIO().WantTextInput && !ImGui::IsMouseDown(ImGuiMouseButton_Right))
@@ -1411,7 +1337,7 @@ void EditorUI::DrawAssetEditorBody(int i)
 						if (ImGui::IsKeyPressed(ImGuiKey_F))
 						{
 							Atom* fs = FindInSubtree(w.prefabRoot, w.prefabSelId);
-							FramePreview(*w.pv, fs ? fs : w.prefabRoot);   // frame selection (or all)
+							FramePreview(*w.pv, fs ? fs : w.prefabRoot);   // frame selection, else all
 						}
 						if (ImGui::IsKeyPressed(ImGuiKey_Delete)
 						    && w.prefabSelId && w.prefabSelId != (long)w.prefabRoot->id.id)
@@ -1423,16 +1349,16 @@ void EditorUI::DrawAssetEditorBody(int i)
 					if (av.y - edH < 160.0f) edH = std::max(120.0f, av.y * 0.45f);
 					DrawPreviewImage(*w.pv, ImVec2(av.x, av.y - edH - 8.0f));
 
-					// Transform gizmo over the 3D view (same conventions as the scene viewport).
+					// Transform gizmo over the 3D view.
 					Atom* sel = FindInSubtree(w.prefabRoot, w.prefabSelId);
-					w.pv->gizmoBusy = false;   // set below inside the gizmo's ID scope
+					w.pv->gizmoBusy = false;   // set below, inside the gizmo's ID scope
 					if (sel && w.gizmoOp != 0 && w.pv->cam && w.pv->cam->transform
 					    && w.pv->rectSize.x > 1.0f && w.pv->rectSize.y > 1.0f)
 					{
 						ImGuizmo::SetOrthographic(false);
 						ImGuizmo::SetDrawlist();
 						ImGuizmo::SetRect(w.pv->rectMin.x, w.pv->rectMin.y, w.pv->rectSize.x, w.pv->rectSize.y);
-						ImGuizmo::PushID(w.path.c_str());   // several gizmos may run per frame (viewport + windows)
+						ImGuizmo::PushID(w.path.c_str());   // several gizmos may run per frame
 
 						float gview[16], gproj[16];
 						{
@@ -1450,7 +1376,7 @@ void EditorUI::DrawAssetEditorBody(int i)
 							memcpy(gproj, glm::value_ptr(gp), sizeof(gproj));
 						}
 						Transform& gtt = sel->GetTransform();
-						if (!ImGuizmo::IsUsing())   // resync from the atom only when NOT dragging
+						if (!ImGuizmo::IsUsing())   // resync from the atom only when not dragging
 						{
 							Vector3 gP = gtt.globalPosition(); Quaternion gR = gtt.globalRotation(); Vector3 gS = gtt.globalScale();
 							glm::mat4 gm = glm::translate(glm::mat4(1.0f), glm::vec3((float)gP.x, (float)gP.y, (float)gP.z))
@@ -1460,7 +1386,6 @@ void EditorUI::DrawAssetEditorBody(int i)
 						}
 						ImGuizmo::OPERATION gop = (w.gizmoOp == 1) ? ImGuizmo::TRANSLATE
 						                        : (w.gizmoOp == 2) ? ImGuizmo::ROTATE : ImGuizmo::SCALE;
-						// World/local space + Ctrl-snap — the viewport's conventions exactly.
 						ImGuizmo::MODE gmode = (gop != ImGuizmo::SCALE && w.gizmoWorld) ? ImGuizmo::WORLD : ImGuizmo::LOCAL;
 						float snapv   = (gop == ImGuizmo::TRANSLATE) ? 0.5f : (gop == ImGuizmo::ROTATE) ? 15.0f : 0.1f;
 						float snap[3] = { snapv, snapv, snapv };
@@ -1482,14 +1407,12 @@ void EditorUI::DrawAssetEditorBody(int i)
 								w.dirty = true; w.editedNow = true;
 							}
 						}
-						// Queried INSIDE the ID scope (accurate here); consumed below and
-						// by the next frame's input handling.
+						// Must be queried inside the ID scope to be accurate.
 						w.pv->gizmoBusy = ImGuizmo::IsUsing() || ImGuizmo::IsOver();
 						ImGuizmo::PopID();
 					}
 
-					// LMB picking, like the scene viewport: ray from the preview camera
-					// through the click point -> nearest prefab atom with a mesh.
+					// LMB picking: ray from the preview camera through the click point.
 					if (w.pv->cam && w.pv->cam->transform && !w.pv->gizmoBusy
 					    && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
 					{
@@ -1511,8 +1434,7 @@ void EditorUI::DrawAssetEditorBody(int i)
 							            f.y + ndcx * thf * aspect * rr.y + ndcy * thf * uu.y,
 							            f.z + ndcx * thf * aspect * rr.z + ndcy * thf * uu.z);
 							Atom* hit = w.pv->world->Pick(o, dir);
-							// Only atoms of THIS prefab are selectable (the pick could
-							// return preview-scene furniture in theory).
+							// Only atoms of this prefab are selectable; the pick can return scene furniture.
 							if (hit && FindInSubtree(w.prefabRoot, (long)hit->id.id))
 								w.prefabSelId = (long)hit->id.id;
 							else if (!hit)
@@ -1530,7 +1452,7 @@ void EditorUI::DrawAssetEditorBody(int i)
 				}
 				ImGui::EndChild();
 			}
-			else if (isAudio)   // audio preview: transport on the Preview bus (never game-paused)
+			else if (isAudio)   // transport on the Preview bus, never game-paused
 			{
 				const bool playing = nuke::Audio::IsPlaying((double)w.audioVoice);
 				if (!nuke::Audio::Available())
@@ -1564,9 +1486,8 @@ void EditorUI::DrawAssetEditorBody(int i)
 				}
 			}
 			else if (isInput)
-				DrawInputEditor(w);   // actions / contexts / bindings CRUD + press-to-bind (edits w.in*)
+				DrawInputEditor(w);   // actions / contexts / bindings CRUD, edits w.in*
 
-			// Save (button or Ctrl+S while focused).
 			if (focused && ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S, false)) wantSave = true;
 			if (wantSave)
 			{
@@ -1574,13 +1495,12 @@ void EditorUI::DrawAssetEditorBody(int i)
 				else if (w.ext == ".nuprefab" && w.prefabRoot) { nuke::SavePrefab(w.prefabRoot, w.path); w.dirty = false; }
 				else if (isSlicer && w.tex)                    { w.tex->SaveToFile(w.path); SlicerApplyLive(w.tex); w.dirty = false; }
 				else if (isInput)                              { SaveInputAsset(w); w.dirty = false; }
-				// (saved .numat hot-reloads into the scene via the existing mtime watcher)
 			}
 
-			// --- per-window undo latch: an edit BURST (drag, typing) becomes ONE entry ---
+			// Per-window undo latch: one edit burst (drag, typing) becomes one entry.
 			if (w.editedNow && !w.editing)
 			{
-				// Push the PRE-edit baseline; a new edit invalidates the redo branch.
+				// Push the pre-edit baseline; a new edit invalidates the redo branch.
 				if (w.ext == ".nuprefab" && !w.idleP.empty())
 				{
 					w.undoP.push_back(w.idleP);
@@ -1604,7 +1524,7 @@ void EditorUI::DrawAssetEditorBody(int i)
 			}
 			if (w.editing && !w.editedNow && !ImGui::IsAnyItemActive() && !(w.pv && w.pv->gizmoBusy))
 			{
-				// The burst settled: the CURRENT state becomes the next baseline.
+				// Burst settled: the current state becomes the next baseline.
 				w.editing = false;
 				if      (w.ext == ".nuprefab" && w.prefabRoot) w.idleP = nuke::SaveAtomToString(w.prefabRoot);
 				else if (w.ext == ".numat"    && w.mat)        { delete w.idleM; w.idleM = w.mat->Clone(); }

@@ -1,16 +1,5 @@
-// C++ GAME MODULES (Phase 6.0) — the native game workflow.
-//
-// A game on NukeEngine is a NUKEModule DLL: it links NukeEngine.lib, calls the full engine
-// API directly (no marshaling — Tilemap/Path/Jobs on hot paths), and registers reflected
-// components via nukegen module mode, so they appear in Add Component / the inspector /
-// world serialization / Lua+C# automatically. Sources live in <project>/source/<Name>/,
-// DLLs build into <project>/modules/ which the editor scans into the shared plugin pool.
-//
-// The REBUILD CYCLE (this file): a discovered DLL is file-locked for the session, so
-// Build & Reload first UNLOADS the project modules (components collapse to inert
-// UnknownComponent placeholders), then runs cmake configure+build on a Jobs worker with
-// the output streaming into the Console, then re-discovers and re-enables the fresh DLLs —
-// the placeholders restore into live components. Refused while playing.
+// C++ game modules: scaffold, discovery and the build-and-reload cycle for the
+// NUKEModule DLLs in <project>/source -> <project>/modules.
 #include <editor/editorui.h>
 #include <interface/Modular.h>
 #include <API/Model/Jobs.h>
@@ -42,9 +31,8 @@ void EditorUI::CreateGameModuleScaffold(const std::string& name)
 	bfs::create_directories(src, ec);
 	bfs::create_directories(proj / "modules", ec);
 
-	// The engine repo root, captured at scaffold time from the running editor
-	// (<root>/NukeEngine/x64/<cfg>/NukeEngine-Editor.exe). Overridable in the CMake cache
-	// (NUKE_ENGINE_ROOT) when the project moves to another machine.
+	// Engine repo root derived from the editor's cwd (<root>/NukeEngine/x64/<cfg>);
+	// overridable through the NUKE_ENGINE_ROOT cache entry.
 	const bfs::path engineRoot = bfs::absolute(bfs::current_path(ec)).parent_path().parent_path().parent_path();
 
 	{
@@ -117,20 +105,9 @@ void EditorUI::CreateGameModuleScaffold(const std::string& name)
 	{
 		bfs::ofstream f(src / (name + ".cpp"), std::ios::binary);
 		f <<
-"// " << name << " — a NATIVE C++ game module for NukeEngine.\n"
-"//\n"
-"// THE PERF MODEL (why the game is C++): write SYSTEMS, not per-atom logic. One component\n"
-"// (a *System) owns FLAT arrays of game data and ticks them with Jobs::ParallelFor across\n"
-"// every core; atoms/sprites are only the thin presentation of that data. Engine systems\n"
-"// (Tilemap, Path, Rand, Noise, Events) are direct C++ calls here — no script marshaling.\n"
-"//\n"
-"// Reflected components (NUKE_CLASS + [[nuke::prop]]/[[nuke::func]]) appear in the editor's\n"
-"// Add Component menu, the inspector, world saves and the Lua/C# bindings automatically.\n"
-"//\n"
-"// DEBUGGING: attach Visual Studio to NukeEngine-Editor.exe (or NukePlayer.exe) — this\n"
-"// module's PDB sits next to the DLL; breakpoints work as usual. Rebuild from the editor:\n"
-"// Project > Build & Reload Game Modules (the editor unloads the DLL first, so the build\n"
-"// can overwrite it, then hot-swaps it back in — no editor restart).\n"
+"// " << name << " — a native C++ game module. Reflected components (NUKE_CLASS +\n"
+"// [[nuke::prop]]/[[nuke::func]]) reach the Add Component menu, the inspector, world saves\n"
+"// and the script bindings automatically. Rebuild: Project > Build & Reload Game Modules.\n"
 "#include <interface/NUKEEInteface.h>\n"
 "#include <interface/AppInstance.h>\n"
 "#include <API/Model/World.h>\n"
@@ -172,8 +149,8 @@ void EditorUI::CreateGameModuleScaffold(const std::string& name)
 "\tvoid Destroy() override { Events::Unsubscribe(subId); subId = 0; }\n"
 "\tvoid Update() override\n"
 "\t{\n"
-"\t\t// Per-frame game logic. dt = Time::Delta() (speed-scaled). Heavy per-entity work\n"
-"\t\t// belongs in flat arrays + Jobs::ParallelFor, not per-atom components.\n"
+"\t\t// Per-frame logic; dt = Time::Delta(). Heavy per-entity work belongs in flat\n"
+"\t\t// arrays + Jobs::ParallelFor, not per-atom components.\n"
 "\t}\n"
 "\tvoid FixedUpdate() override {}\n"
 "\tvoid Pause() override {}\n"
@@ -182,9 +159,7 @@ void EditorUI::CreateGameModuleScaffold(const std::string& name)
 "\tlong long subId = 0;\n"
 "};\n"
 "\n"
-"// A NATIVE orbit camera — follows `target` and orbits it from the \"Look\" action with\n"
-"// exponential position damping (same pattern as the Lua/C# OrbitCamera examples).\n"
-"// Put it on the CAMERA atom; set `target` to the followed atom's name.\n"
+"// Orbit camera: put it on the CAMERA atom, point `target` at the followed atom.\n"
 "class OrbitCamera : public Component\n"
 "{\n"
 "\tNUKE_CLASS(OrbitCamera, Component)\n"
@@ -371,9 +346,6 @@ void EditorUI::CreateGameModuleScaffold(const std::string& name)
 
 // ---- discovery -----------------------------------------------------------------------------
 
-// Pull <project>/modules DLLs into the shared pool. A module seen for the FIRST time is
-// auto-enabled and added to the project's plugin list (a game module is wanted by
-// definition); ones already in the list follow it (the Plugins window toggle persists).
 void EditorUI::DiscoverProjectModules()
 {
 	boost::system::error_code ec;
@@ -391,11 +363,6 @@ void EditorUI::DiscoverProjectModules()
 		const bool listed = std::find(enabledPlugins.begin(), enabledPlugins.end(), m->moduleFile) != enabledPlugins.end();
 		if (!listed && pluginListLoaded)
 		{
-			// Diagnostic: this is the only boot-time single push into the plugin list — name
-			// the module loudly (a corrupted pool entry once smuggled binary garbage into the
-			// saved .nuproj here).
-			std::cout << "[editor]\t\tproject module first sight: file='" << m->moduleFile
-			          << "' path='" << m->modulePath << "' title='" << m->title << "'" << std::endl;
 			enabledPlugins.push_back(m->moduleFile);   // first sight: wanted by definition
 			SaveProject();
 		}
@@ -422,8 +389,7 @@ void EditorUI::BuildGameModules()
 		std::cout << "[gamemodule]\tno <project>/source — create one with Project > New C++ Game Module" << std::endl;
 		return;
 	}
-	// source/ may hold several modules without a top-level CMakeLists: synthesize one that
-	// add_subdirectory()s every child with a CMakeLists (kept up to date on every build).
+	// Regenerate the top-level CMakeLists every build: source/ may gain modules at any time.
 	if (!bfs::exists(srcDir / "CMakeLists.txt", ec) || true)
 	{
 		bfs::ofstream f(srcDir / "CMakeLists.txt", std::ios::binary);
@@ -434,8 +400,8 @@ void EditorUI::BuildGameModules()
 				f << "add_subdirectory(\"" << it->path().filename().string() << "\")\n";
 	}
 
-	// UNLOCK: the project DLLs must leave the pool before the build can overwrite them.
-	// (Also drop the plugin window's selection — a held shared_ptr keeps the file locked.)
+	// The project DLLs must leave the pool before the build can overwrite them — including the
+	// plugin window's selection, whose held shared_ptr keeps the file locked.
 	selectedPlugin = nullptr; selectedPluginIndex = -1;
 	std::set<std::string> unloaded;
 	{
@@ -508,8 +474,7 @@ void EditorUI::BuildGameModules()
 		{
 			StatusBar::Remove("gmbuild");
 			std::cout << "[gamemodule]\tbuild " << (ok ? "OK" : "FAILED") << std::endl;
-			// Re-discover + re-enable the fresh DLLs either way (a failed build keeps the
-			// old DLLs on disk — reloading them restores the session).
+			// Re-discover either way: a failed build leaves the old DLLs to reload.
 			DiscoverProjectModules();
 		});
 	});

@@ -1,34 +1,30 @@
 // inspector panel — EditorUI method definitions (translation unit).
 #include <editor/editorui.h>
-#include "nukeui.h"   // DocWindow: detachable panels (task #137)
-#include <API/Model/Camera.h>   // restrict the PostProcess component to camera atoms
-#include <API/Model/CharacterController.h>   // Fit To Mesh inspector button
-#include <API/Model/Foliage.h>               // Foliage Fill/Clear + paint brush controls (7.4)
+#include "nukeui.h"   // DocPanel: detachable panels
+#include <API/Model/Camera.h>
+#include <API/Model/CharacterController.h>
+#include <API/Model/Foliage.h>
 #include <API/Model/StatusBar.h>
-#include <API/Model/Package.h>  // packed session: pickers list pak/mod content too (3.2)
-#include <interface/Services.h> // csclass picker: enumerate scripting providers
-#include <service/iScript.h>    // csclass picker: the C# backend lists its Electron classes
+#include <API/Model/Package.h>  // pickers list pak/mod content too
+#include <interface/Services.h> // csclass picker: scripting providers
+#include <service/iScript.h>
 #include <set>
-#include <memory>                // chroma-key undo snapshots (shared_ptr pixel blobs)
-#include <cmath>                 // curve widget: tangent handle geometry (sqrtf/fabsf)
-#include <API/Model/Texture.h>  // asset inspector: .nutex usage/info
-#include <API/Model/Material.h> // asset inspector: .numat fields
-#include <API/Model/Light.h>       // asset preview world: sun
-#include <API/Model/Environment.h> // asset preview world: sky/ambient
-#include <API/Model/Layers.h>      // render layers: atom Layer combo + camera Layer Mask
-#include <API/Model/Canvas.h>      // Anchors block: canvas-child detection + units
-#include <API/Model/RectAnchor.h>  // Anchors block: per-side anchors storage
-#include <API/Model/Sprite.h>      // Anchors block: element size for distance capture
-#include <functional>              // AtomRef picker: recursive hierarchy walk
-#include <interface/AssetCreators.h>   // module-supplied asset editors (AssetEditorForExt)
+#include <memory>
+#include <cmath>
+#include <API/Model/Texture.h>
+#include <API/Model/Material.h>
+#include <API/Model/Light.h>
+#include <API/Model/Environment.h>
+#include <API/Model/Layers.h>
+#include <API/Model/Canvas.h>
+#include <API/Model/RectAnchor.h>
+#include <API/Model/Sprite.h>
+#include <functional>
+#include <interface/AssetCreators.h>   // module-supplied asset editors
 #include <boost/filesystem.hpp>
 namespace bfs = boost::filesystem;
 
-// ---------------------------------------------------------------------------
-// Inspector's asset 3D preview — one POOLED preview scene (see asseteditor.cpp for
-// the pool: sky + shadowless sun + one mesh atom + camera into an own RT), staged
-// with whatever the browser has selected.
-// ---------------------------------------------------------------------------
+// Asset 3D preview — stages the browser's selection into a pooled preview scene (pool: asseteditor.cpp).
 
 void EditorUI::StageAssetPreview(const std::string& path, const std::string& ext)
 {
@@ -61,12 +57,10 @@ void EditorUI::DrawAssetPreview3D(const std::string& path, const std::string& ex
 	if (!inspPv || !inspPv->mr || !inspPv->mr->mesh) return;
 	float side = ImGui::GetContentRegionAvail().x;
 	if (side > 384.0f) side = 384.0f;
-	DrawPreviewImage(*inspPv, ImVec2(side, side));   // inline thumbnail: square
+	DrawPreviewImage(*inspPv, ImVec2(side, side));
 }
 
-// Render hook (main.cpp), BEFORE the live scene: draw EVERY preview scene that was shown
-// this frame (inspector + open asset editors); the live scene then re-pushes its own
-// lights/sky/TLAS, so nothing leaks into the viewport image.
+// Must run BEFORE the live scene renders: the live scene then re-pushes its lights/sky/TLAS.
 void EditorUI::RenderAssetPreview(iRender* r)
 {
 	if (!r) return;
@@ -78,15 +72,13 @@ void EditorUI::RenderAssetPreview(iRender* r)
 	}
 }
 
-// Layer-mask multi-select: an int bitmask over nuke::Layers drawn as a named dropdown
-// (Everything / Nothing / per-layer checkboxes). Used by every [[nuke::prop(widget="layers")]]
-// field via DrawFields — components never get a raw numeric box for a mask.
+// Draws an int layer bitmask as an Everything/Nothing/per-layer dropdown. Returns true if changed.
 static bool DrawLayerMaskCombo(const char* id, int& mask)
 {
 	bool changed = false;
 	unsigned int m = (unsigned int)mask;
 	std::string shown = (m == 0xFFFFFFFFu) ? "Everything" : (m == 0 ? "Nothing" : "Mixed");
-	if (m != 0xFFFFFFFFu && m != 0)   // count the named picks for a nicer summary
+	if (m != 0xFFFFFFFFu && m != 0)
 	{
 		int bits = 0; std::string one;
 		for (int i = 0; i < 32; ++i)
@@ -128,7 +120,6 @@ void EditorUI::CamComponent(Camera* cam)
 	ImGui::DragFloat("Far", &cam->_far);
 	ImGui::Checkbox("Free mode", &cam->freeMode);
 
-	// Render-layer mask: which layers this camera draws (named multi-select over nuke::Layers).
 	DrawLayerMaskCombo("Layer Mask", cam->layerMask);
 }
 
@@ -147,16 +138,13 @@ static bool EndsWithCI(const std::string& s, const char* suf)
 		if (tolower((unsigned char)s[s.size() - n + i]) != tolower((unsigned char)suf[i])) return false;
 	return true;
 }
-// Audio clips are PLAIN files in content (no wrapper asset) — every format the audio
-// service decodes. Referenced by content-relative path, exactly like scripts.
+// Audio clips are plain content files (no wrapper asset), referenced by content-relative path.
 static bool IsAudioExt(std::string e)
 {
 	for (char& c : e) c = (char)tolower((unsigned char)c);
 	return e == ".ogg" || e == ".wav" || e == ".mp3" || e == ".flac";
 }
-// "file:<ext>" kinds: a GENERIC by-extension content-file picker (value = content-relative
-// path, like script/audio). Any module-owned file type gets a real picker by declaring
-// `asset="file:.nutile"` on its reflected string prop — no per-type editor-core hardcode.
+// `asset="file:<ext>"` kinds: generic by-extension content-file picker; value = content-relative path.
 static bool IsFileKind(const std::string& kind) { return kind.rfind("file:", 0) == 0; }
 static std::string FileKindExt(const std::string& kind)
 {
@@ -164,7 +152,7 @@ static std::string FileKindExt(const std::string& kind)
 	for (char& c : e) c = (char)tolower((unsigned char)c);
 	return e;
 }
-// Does a dropped file path match the field's asset kind? (rejects everything else)
+// True if a dropped file path matches the field's asset kind.
 static bool KindMatchesFile(const std::string& kind, const std::string& path)
 {
 	std::string e = bfs::path(path).extension().string();
@@ -194,16 +182,14 @@ bool EditorUI::AssetPicker(const char* label, std::string& guid, const std::stri
 	ResDB* db = ResDB::getSingleton();
 	bool changed = false;
 
-	// Display name = the asset's FILE name (so it tracks renames); fall back to the internal name for
-	// built-ins that have no file. Shaders are keyed by name, so just show that.
+	// Display name = the asset's FILE name so it tracks renames; internal name for file-less built-ins.
 	auto disp = [&](const std::string& g) -> std::string {
 		if (g.empty()) return "(none)";
 		if (kind == "script" || kind == "audio" || IsFileKind(kind)) return bfs::path(g).stem().string();   // value is a content-relative path
 		if (kind == "shader" || kind == "postshader") { Shader* s = db->GetShader(g); return s ? s->name : g; }
 		std::string p = db->PathForGuid(g);
 		if (!p.empty()) return bfs::path(p).stem().string();
-		// No file path (built-ins, pak-loaded assets): the internal name, never an empty
-		// label (an empty Selectable renders an invisible row) — the guid as last resort.
+		// Never return an empty label: an empty Selectable renders as an invisible row.
 		std::string n;
 		if      (kind == "mesh")     { Mesh* m = db->GetMesh(g);         if (m) n = m->name; }
 		else if (kind == "material") { Material* m = db->GetMaterial(g); if (m) n = m->matName; }
@@ -249,7 +235,7 @@ bool EditorUI::AssetPicker(const char* label, std::string& guid, const std::stri
 	ImGui::SameLine(0, 2);
 	if (ImGui::Button(ICON_LC_ROTATE_CCW "##rst")) { guid = defGuid; changed = true; }   // reset to default
 	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Reset to default");
-	// Trailing label — skipped for hidden ids ("##..." would print literally; list rows pass those).
+	// Skip hidden ids: "##..." would print literally here.
 	if (label && label[0] && !(label[0] == '#' && label[1] == '#')) { ImGui::SameLine(0, 6); ImGui::TextUnformatted(label); }
 
 	if (ImGui::BeginPopup("##assetpop"))
@@ -275,8 +261,7 @@ bool EditorUI::AssetPicker(const char* label, std::string& guid, const std::stri
 		else if (kind == "bonemap")  for (BoneMap* b : db->boneMaps) { if (b) item(b->guid, disp(b->guid)); }
 		else if (kind == "csclass")
 		{
-			// C# script classes: the LOADED game assembly's Electron classes, straight from
-			// the scripting seam (the C# backend enumerates them) — nobody types names.
+			// Electron classes come from the loaded game assembly via the scripting seam.
 			bool any = false;
 			for (nuke::iScript* sv : nuke::GetServices<nuke::iScript>())
 			{
@@ -319,8 +304,7 @@ bool EditorUI::AssetPicker(const char* label, std::string& guid, const std::stri
 					seen.insert(low);
 					item(rel, bfs::path(rel).stem().string());
 				}
-			// Packed session (3.2): plain content files live in the mounted pak/mods, not on
-			// disk — list them through the Package layers too (dedup vs the overlay scan).
+			// Packed session: content files live in mounted paks, not on disk (dedup vs the disk scan).
 			if (nuke::Package::MountedCount() > 0)
 				for (const std::string& pr : nuke::Package::List("content/"))
 				{
@@ -338,9 +322,7 @@ bool EditorUI::AssetPicker(const char* label, std::string& guid, const std::stri
 	return changed;
 }
 
-// Register per-type custom inspector drawing. The generic loop draws reflected fields +
-// dynamic props for every component; overrides add type-specific UI on top (keyed by the
-// reflected type name). Plugins can extend this map for their own component types later.
+// Fills inspectorOverrides: extra type-specific UI drawn on top of the generic reflected fields.
 void EditorUI::RegisterInspectorOverrides()
 {
 	inspectorOverrides["MeshRenderer"] = [this](nuke::Component* c) {
@@ -354,8 +336,6 @@ void EditorUI::RegisterInspectorOverrides()
 	};
 	inspectorOverrides["CharacterController"] = [this](nuke::Component* c) {
 		auto* cc = static_cast<nuke::CharacterController*>(c);
-		// One click sizes + places the capsule from the sibling mesh's bounds (pivot,
-		// offset, height, radius) — no manual aligning against the visual.
 		if (ImGui::Button("Fit To Mesh", ImVec2(-FLT_MIN, 0)))
 		{
 			if (cc->FitToMesh()) worldDirty = true;
@@ -366,7 +346,6 @@ void EditorUI::RegisterInspectorOverrides()
 	};
 	inspectorOverrides["Foliage"] = [this](nuke::Component* c) {
 		auto* fol = static_cast<nuke::Foliage*>(c);
-		// Fill = full deterministic re-scatter by the rules; Clear wipes the layer.
 		const float half = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
 		if (ImGui::Button("Fill", ImVec2(half, 0)))
 		{
@@ -377,7 +356,6 @@ void EditorUI::RegisterInspectorOverrides()
 		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Re-scatter the whole surface by the rules (density/seed/masks).");
 		ImGui::SameLine();
 		if (ImGui::Button("Clear", ImVec2(half, 0))) { fol->ClearInstances(); worldDirty = true; }
-		// Brush: paint/erase strokes in the viewport while this layer stays selected.
 		bool paint = foliageBrush == 1, erase = foliageBrush == 2;
 		if (ImGui::Checkbox("Paint", &paint)) foliageBrush = paint ? 1 : 0;
 		ImGui::SameLine();
@@ -393,15 +371,13 @@ void EditorUI::RegisterInspectorOverrides()
 	};
 }
 
-// Animator: the serialized state machine, editable in place (states table + transitions +
-// entry). Every edit goes through the component's own mutators, so smJson (the persisted
-// form) stays in sync and saves with the world/prefab.
+// State-machine editor (entry, states, transitions). Edits go through the component's mutators
+// so the serialized smJson stays in sync.
 void EditorUI::DrawAnimatorInspector(nuke::Animator* an)
 {
 	an->EnsureSM();
 	ImGui::SeparatorText("State Machine");
 
-	// entry state combo
 	{
 		const char* cur = an->entryState.empty() ? "(none)" : an->entryState.c_str();
 		ImGui::SetNextItemWidth(160);
@@ -414,7 +390,6 @@ void EditorUI::DrawAnimatorInspector(nuke::Animator* an)
 		}
 	}
 
-	// states: name | clip picker | loop | speed | remove
 	std::string removeState;
 	for (auto& s : an->states)
 	{
@@ -447,7 +422,6 @@ void EditorUI::DrawAnimatorInspector(nuke::Animator* an)
 		worldDirty = true;
 	}
 
-	// transitions: from -> to | fade | remove
 	if (!an->transitions.empty()) ImGui::SeparatorText("Transitions");
 	std::pair<std::string, std::string> removeTr;
 	for (auto& from : an->transitions)
@@ -465,7 +439,6 @@ void EditorUI::DrawAnimatorInspector(nuke::Animator* an)
 		}
 	if (!removeTr.first.empty()) { an->RemoveTransition(removeTr.first, removeTr.second); worldDirty = true; }
 
-	// add transition: two state combos + fade
 	if (an->states.size() >= 2)
 	{
 		static std::string trFrom, trTo;
@@ -494,9 +467,8 @@ void EditorUI::DrawAnimatorInspector(nuke::Animator* an)
 	}
 }
 
-// PostProcess panel: the ordered chain of custom post-effect shaders. Each effect = a post-shader pick +
-// its params (parsed from the shader's PostParams), reorder + remove + add. Effects edit the runtime list
-// and Commit() back to the serialized field.
+// Ordered chain of post-effect shaders: pick, params, reorder, add/remove. Commit()s back to the
+// serialized field.
 void EditorUI::DrawPostProcessInspector(nuke::PostProcess* pp)
 {
 	ResDB* db = ResDB::getSingleton();
@@ -506,8 +478,7 @@ void EditorUI::DrawPostProcessInspector(nuke::PostProcess* pp)
 	int removeAt = -1, dragFrom = -1, dragTo = -1;
 	const ImGuiPayload* dpl = ImGui::GetDragDropPayload();
 	bool dndActive = dpl && dpl->IsDataType("PP_FX");
-	// Thin "insert before index N" zone on the top edge of a row (drag only; adds no layout height) — same
-	// technique as the hierarchy, so the drop position follows the cursor instead of always landing on top.
+	// "Insert before index N" zone straddling a row's top edge; restores the cursor so it adds no height.
 	auto gapZone = [&](int beforeIdx, ImVec2 mn, ImVec2 mx)
 	{
 		if (!dndActive) return;
@@ -550,9 +521,7 @@ void EditorUI::DrawPostProcessInspector(nuke::PostProcess* pp)
 			if (sh)
 				for (const nuke::ShaderProp& sp : sh->props)
 				{
-					// g_Nuke* = SYSTEM params (audio analysis / time), engine-filled per
-					// frame while packing the blob — never user-editable, so not drawn.
-					if (sp.name.compare(0, 6, "g_Nuke") == 0) continue;
+					if (sp.name.compare(0, 6, "g_Nuke") == 0) continue;   // system params, engine-filled
 					auto it = e.props.find(sp.name);
 					std::array<float, 4> val = (it != e.props.end()) ? it->second
 						: std::array<float, 4>{ sp.def[0], sp.def[1], sp.def[2], sp.def[3] };
@@ -570,7 +539,7 @@ void EditorUI::DrawPostProcessInspector(nuke::PostProcess* pp)
 		}
 		ImGui::PopID();
 	}
-	// Tail zone: drop below the last effect = move to the END of the chain.
+	// Tail zone: a drop below the last effect moves to the END of the chain.
 	if (dndActive && !pp->effects.empty())
 	{
 		ImVec2 mn = ImGui::GetCursorScreenPos();
@@ -583,8 +552,8 @@ void EditorUI::DrawPostProcessInspector(nuke::PostProcess* pp)
 			ImGui::EndDragDropTarget();
 		}
 	}
-	// Structural edits (add / remove / reorder) are undoable as one atom-subtree delta (the param drags are
-	// already covered by the active-widget edit detector; these are button/DnD clicks it can't see).
+	// Add/remove/reorder are undoable as one atom-subtree delta: the active-widget edit detector
+	// cannot see button/DnD clicks (it already covers the param drags).
 	nuke::Atom* owner = pp->atom;
 	World* w = AppInstance::GetSingleton()->currentWorld;
 	auto recordStructural = [&](const char* label, const std::function<void()>& mutate)
@@ -596,7 +565,7 @@ void EditorUI::DrawPostProcessInspector(nuke::PostProcess* pp)
 		mutate();
 		std::string after = nuke::SaveAtomToString(owner);
 		if (after == before) return;
-		editing = false; editAtomId = 0;   // this is its own command — don't double up with the auto detector
+		editing = false; editAtomId = 0;   // own command: suppress the auto edit-detector
 		PushUndo(label,
 			[this, id, parent, index, before]{ ApplyAtomState(id, parent, index, before); },
 			[this, id, parent, index, after ]{ ApplyAtomState(id, parent, index, after ); });
@@ -620,14 +589,13 @@ void EditorUI::DrawPostProcessInspector(nuke::PostProcess* pp)
 		recordStructural("Add effect", [&] { pp->effects.push_back(nuke::PostEffect{}); pp->Commit(); });
 }
 
-// MeshRenderer's custom panel: the selected material's sub-properties (shader/color/textures).
-// The mesh/material GUID fields themselves render as pickers via reflection (asset metadata).
+// Draws the selected material's sub-properties (shader/color/textures); the mesh/material GUID
+// fields themselves come from reflection.
 void EditorUI::DrawMeshRendererInspector(nuke::MeshRenderer* mr)
 {
 	ResDB* db = ResDB::getSingleton();
 	if (!mr->mesh || mr->mesh->guid != mr->meshGuid) mr->mesh = db->GetMesh(mr->meshGuid);
-	// Material picker changed -> (re)clone the asset into this object's OWNED instance. Editing the
-	// instance below never touches the original .numat asset.
+	// A changed picker re-clones the asset into an OWNED instance, so edits never touch the .numat.
 	std::string curMat = mr->mat ? mr->mat->guid : std::string();
 	if (curMat != mr->matGuid)
 	{
@@ -639,13 +607,10 @@ void EditorUI::DrawMeshRendererInspector(nuke::MeshRenderer* mr)
 	if (Material* m = mr->mat)
 	{
 		ImGui::SeparatorText("Material");
-		// Reflection-driven: shader + every PBR map (asset pickers) + color swatch + metallic/roughness/
-		// emissive — all from Material's [[nuke::prop]] schema, no per-field hardcode here.
 		if (DrawFields(m, m->GetType()))
 			m->Resolve();   // rebind shader/textures after an edit
 
-		// Shader params: schema from the instance's shader, VALUES on the instance (m->props),
-		// saved with the world. Unset shows the shader's default.
+		// Schema comes from the shader, values live on the instance (m->props); unset shows the default.
 		if (m->shader && !m->shader->props.empty())
 		{
 			ImGui::SeparatorText("Shader Params");
@@ -689,12 +654,10 @@ bool EditorUI::DrawFields(void* obj, nuke::TypeInfo* ti)
 		if (f.hidden) continue;   // serialized but not shown (e.g. script props JSON)
 		void* a = f.addr(obj);
 		const char* n = f.label.empty() ? f.name.c_str() : f.label.c_str();   // metadata display name
-		// Label BEFORE the field: draw the name, then the widget with a hidden id fills the rest of the
-		// row (ImGui's default puts the label AFTER the widget, which reads backwards).
+		// Label drawn manually BEFORE the widget; the widget takes a hidden id (ImGui puts labels after).
 		std::string hid = "##" + f.name; const char* w = hid.c_str();
 		ImGui::AlignTextToFramePadding();
 		ImGui::TextUnformatted(n);
-		// [[prop(tip="...")]] -> tooltip on the label AND on the widget (checked again after the switch)
 		bool tipHover = !f.tip.empty() && ImGui::IsItemHovered();
 		ImGui::SameLine(ImGui::GetContentRegionAvail().x * 0.42f);
 		ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
@@ -756,10 +719,7 @@ bool EditorUI::DrawFields(void* obj, nuke::TypeInfo* ti)
 		}
 		case nuke::FT::AtomRef:
 		{
-			// A reference to a live Atom: combo of the world's atoms (+ None) and a drag-drop
-			// target from the hierarchy. Stored as the pointer; serialization travels by stable id.
-			// The prop's asset= hint FILTERS the picker to atoms carrying that component (e.g.
-			// asset="Camera" lists only camera atoms) — drops of anything else are rejected too.
+			// The prop's asset= hint filters the picker (and drops) to atoms carrying that component.
 			Atom** slot = (Atom**)a;
 			auto passes = [&](Atom* at) -> bool
 			{
@@ -805,19 +765,11 @@ bool EditorUI::DrawFields(void* obj, nuke::TypeInfo* ti)
 		case nuke::FT::DoubleList:
 		case nuke::FT::StringList:
 		{
-			// Reflected std::vector<T>: the widget column shows "<N> [+]"; element rows follow
-			// full-width, each with move-up/move-down/remove. Element widgets mirror the scalar
-			// cases — a StringList with an asset= hint gets a real PICKER per row, not a text box.
-			// The FIELD NAME scopes the ID stack: row ids are per-index, and two list fields
-			// side by side would otherwise collide (row 0 of one == row 0 of the next).
+			// Reflected std::vector<T>: header row + per-element rows. The field name scopes the ID
+			// stack — row ids are per-index, so two lists side by side would otherwise collide.
 			ImGui::PushID(f.name.c_str());
-			// [[prop(widget="curve")]] on a float list: a BEZIER curve editor over
-			// (t, value, inTangent, outTangent) keys — the exact format/math the VFX runtime
-			// evaluates (cubic Hermite; tangents are dv/dt slopes the user shapes by hand).
-			// Click a key = select it + show its tangent HANDLES (drag them to bend the curve),
-			// drag a key to move it, double-click empty = add a key (auto tangent preserving
-			// the local shape), right-click a key = delete. Legacy (t,v)-pair data (odd
-			// stride) upgrades in place with smooth auto tangents, same as the runtime.
+			// [[prop(widget="curve")]] float list: cubic-Hermite keys (t, value, inTangent, outTangent),
+			// the same layout/math the VFX runtime evaluates. Legacy (t,v) pairs upgrade in place.
 			if (f.type == nuke::FT::FloatList && f.widget == "curve")
 			{
 				std::vector<float>* c = (std::vector<float>*)a;
@@ -834,10 +786,8 @@ bool EditorUI::DrawFields(void* obj, nuke::TypeInfo* ti)
 					}
 					c->swap(up); changed = true;
 				}
-				// keep keys sorted by t BEFORE anything evaluates/draws. Runs every frame except
-				// mid-drag of a key (indices must stay stable under the mouse) — the old
-				// "sort when changed after release" gate never fired (changed is per-frame and
-				// the release frame has no change), leaving fresh keys appended out of order.
+				// Sort keys by t before anything evaluates/draws — every frame EXCEPT mid-drag,
+				// where indices must stay stable under the mouse.
 				{
 					ImGuiStorage* sst = ImGui::GetStateStorage();
 					const bool keyDragging = sst->GetInt(ImGui::GetID("##curvedrag"), -1) >= 0 && ImGui::IsMouseDown(0);
@@ -878,9 +828,8 @@ bool EditorUI::DrawFields(void* obj, nuke::TypeInfo* ti)
 				for (size_t k = 0; k < nk; ++k) vmax = std::max(vmax, (*c)[k * 4 + 1]);
 				for (int sN = 0; sN <= 32; ++sN) vmax = std::max(vmax, eval(sN / 32.0f));
 				vmax *= 1.15f;
-				// While ANYTHING is being dragged the view scale FREEZES: a live-fitting vmax fed
-				// the growing value back through the mouse mapping — exponential runaway that
-				// dragged a key into the MILLIONS in one hold (poisoned a world's alpha curve).
+				// Freeze the view scale during any drag: a live-fitting vmax feeds the value back
+				// through the mouse mapping and runs away exponentially.
 				{
 					ImGuiStorage* stv = ImGui::GetStateStorage();
 					const ImGuiID vmaxId = ImGui::GetID("##curvevmax");
@@ -912,8 +861,7 @@ bool EditorUI::DrawFields(void* obj, nuke::TypeInfo* ti)
 					dl->AddLine(prev, cur, IM_COL32(120, 190, 255, 255), 1.6f);
 					prev = cur;
 				}
-				// interaction state (per-widget, in ImGui's storage): dragged key, selected
-				// key, dragged tangent handle (0 none / 1 in / 2 out).
+				// Per-widget interaction state in ImGui storage; handle: 0 none / 1 in / 2 out.
 				ImGuiStorage* st = ImGui::GetStateStorage();
 				const ImGuiID dragId = ImGui::GetID("##curvedrag");
 				const ImGuiID selId  = ImGui::GetID("##curvesel");
@@ -1017,10 +965,7 @@ bool EditorUI::DrawFields(void* obj, nuke::TypeInfo* ti)
 				ImGui::PopID();
 				break;
 			}
-			// [[prop(widget="gradient")]]: (t,r,g,b) stops as a PROPER gradient editor — the
-			// live bar with draggable stop MARKERS under it. Click an empty spot on the bar =
-			// add a stop with the color already there, drag a marker to move it, click a
-			// marker (no drag) = color picker popup, right-click a marker = delete.
+			// [[prop(widget="gradient")]] float list: (t,r,g,b) stops drawn as a bar with draggable markers.
 			if (f.type == nuke::FT::FloatList && f.widget == "gradient")
 			{
 				std::vector<float>* g4 = (std::vector<float>*)a;
@@ -1130,9 +1075,8 @@ bool EditorUI::DrawFields(void* obj, nuke::TypeInfo* ti)
 					else ImGui::CloseCurrentPopup();
 					ImGui::EndPopup();
 				}
-				// keep stops sorted by t EVERY frame nothing is being dragged (not just on
-				// changed — the release frame carries no change flag and would never sort);
-				// the color-edit popup only changes rgb, so indices stay stable while it is open
+				// Sort stops by t every frame nothing is dragged; the color popup only edits rgb,
+				// so indices stay stable while it is open.
 				if (st->GetInt(dragId, -1) < 0)
 				{
 					bool reordered = false;
@@ -1190,8 +1134,7 @@ bool EditorUI::DrawFields(void* obj, nuke::TypeInfo* ti)
 	return changed;
 }
 
-// Draw a component's dynamic props (e.g. a Lua script's exported vars). The component
-// supplies data only (DynamicProps/SetDynamicProp); all UI lives here in the editor.
+// Draws a component's dynamic props (e.g. a Lua script's exported vars) via DynamicProps/SetDynamicProp.
 void EditorUI::DrawDynamicProps(nuke::Component* cmp)
 {
 	std::vector<nuke::DynProp> props = cmp->DynamicProps();
@@ -1224,8 +1167,7 @@ void EditorUI::DrawDynamicProps(nuke::Component* cmp)
 		}
 		case nuke::NukeVar::Kind::AtomRef:
 		{
-			// A REFERENCE to a live atom by STABLE id — the picker (combo over the world +
-			// hierarchy drag-drop), same as reflected Atom* props. Never a text box.
+			// Reference to a live atom by stable id; same picker as reflected Atom* props.
 			World* w = AppInstance::GetSingleton()->currentWorld;
 			Atom* cur = (w && p.value.refId) ? w->GetById((long)p.value.refId) : nullptr;
 			const std::string curLabel = cur ? cur->name
@@ -1291,7 +1233,6 @@ bool EditorUI::EditV3(const char* rowLabel, double v[3])
 	return ch;
 }
 
-// Push this instance's current state into its prefab file (manual; overwrites the .nuprefab, keeps its guid).
 void EditorUI::ApplyToPrefab(Atom* a)
 {
 	if (!a || a->prefabGuid.empty()) return;
@@ -1301,8 +1242,7 @@ void EditorUI::ApplyToPrefab(Atom* a)
 	std::cout << "[editor]\tapplied instance to prefab " << path << std::endl;
 }
 
-// Revert this instance to the prefab's saved state (drops its individual overrides). Keeps the atom's
-// id + placement + prefab link; undoable as one delta. The old instance object is replaced.
+// Replaces the instance object but keeps its id + placement + prefab link. Undoable as one delta.
 void EditorUI::ResetToPrefab(Atom* a)
 {
 	if (!a || a->prefabGuid.empty()) return;
@@ -1325,7 +1265,6 @@ void EditorUI::ResetToPrefab(Atom* a)
 		[this, id, parent, index, after ]{ ApplyAtomState(id, parent, index, after ); });
 }
 
-// Remove a component from an atom, undoable (captures the atom subtree before/after as one delta).
 void EditorUI::RemoveComponent(Atom* a, Component* c)
 {
 	if (!a || !c) return;
@@ -1342,10 +1281,8 @@ void EditorUI::RemoveComponent(Atom* a, Component* c)
 		[this, id, parent, index, after ]{ ApplyAtomState(id, parent, index, after ); });
 }
 
-// Move a component to another atom (inspector header dragged onto a hierarchy row). The component
-// travels as a LIVE pointer — reflected props, material instances and runtime state all ride
-// along — only the owner back-references are rewired (Init is NOT re-run: its side effects
-// already happened on the source atom). Undo restores both atoms' subtrees as one command.
+// The component travels as a live pointer: only its owner back-references are rewired and Init is
+// NOT re-run. No-op on null / src == dst.
 void EditorUI::MoveComponent(Atom* src, Component* c, Atom* dst)
 {
 	if (!src || !c || !dst || src == dst) return;
@@ -1361,12 +1298,11 @@ void EditorUI::MoveComponent(Atom* src, Component* c, Atom* dst)
 	std::string sBefore = nuke::SaveAtomToString(src), dBefore = nuke::SaveAtomToString(dst);
 	src->components.remove(c);
 	dst->components.push_back(c);
-	c->transform = &dst->GetTransform();   // rewire the owner refs by hand: several Inits skip `atom`,
-	c->atom = dst;                         // so re-Init would leave it stale anyway
+	c->transform = &dst->GetTransform();   // rewired by hand: several Inits skip `atom`
+	c->atom = dst;
 	std::string sAfter = nuke::SaveAtomToString(src), dAfter = nuke::SaveAtomToString(dst);
-	editing = false; editAtomId = 0;   // suppress the auto edit-detector (this is its own command)
-	// ApplyAtomState re-creates a whole subtree by id, so when one atom contains the other the
-	// ANCESTOR must be re-applied first (the nested atom is then re-applied over its fresh copy).
+	editing = false; editAtomId = 0;   // own command: suppress the auto edit-detector
+	// ApplyAtomState re-creates a whole subtree by id: if one atom contains the other, apply the ANCESTOR first.
 	bool srcFirst = true;
 	for (Atom* p = src->parent; p; p = p->parent) if (p == dst) { srcFirst = false; break; }
 	PushUndo("Move component",
@@ -1387,15 +1323,13 @@ void EditorUI::winInspector()
 	if (!win->inspector) return;
 	NukeUI::DocPanel("panel:inspector", "Inspector", &win->inspector, window_flags, 380, 700, [this]()
 	{
-	// Boot load in progress: locked (a half-deserialized selection must not be edited).
-	if (bootLoading) { ImGui::TextDisabled("Loading project..."); return; }
+	if (bootLoading) { ImGui::TextDisabled("Loading project..."); return; }   // half-deserialized selection
 	if (auto sltd = AppInstance::GetSingleton()->selectedInHieararchy)
 	{
 		char name[128];
 		strncpy(name, sltd->GetName().c_str(), 127); name[127] = 0;
 		if (ImGui::InputText("Name", name, 128)) sltd->SetName(name);
 
-		// Render layer: which channel this atom renders on (cameras filter by their Layer Mask).
 		{
 			std::string cur = nuke::Layers::Name(sltd->layer);
 			if (cur.empty()) cur = "Layer " + std::to_string(sltd->layer);
@@ -1412,16 +1346,12 @@ void EditorUI::winInspector()
 				ImGui::EndCombo();
 			}
 			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Render channel (named in Project Settings > Layers); cameras pick what they draw via Layer Mask");
-			// Persistent (DontDestroyOnLoad): a ROOT atom flagged here survives GAME world
-			// switches during play — subtree, components and live script state carry over.
 			ImGui::SameLine();
 			bool prs = sltd->persistent;
 			if (ImGui::Checkbox("Persistent", &prs)) sltd->persistent = prs;
 			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Survive game world switches (Game.LoadWorld / async activation).\n"
 			                                              "Applies to ROOT atoms while PLAYING; children ride with their root.\n"
 			                                              "Editor world opens and savegame loads never carry atoms.");
-			// Whole-atom switch (SetActive pattern): off = the subtree neither updates, renders,
-			// receives events nor keeps physics bodies. TrackUndo captures the edit like any other.
 			ImGui::SameLine();
 			bool ena = sltd->enabled;
 			if (ImGui::Checkbox("Enabled", &ena)) sltd->enabled = ena;
@@ -1429,7 +1359,7 @@ void EditorUI::winInspector()
 			                                              "(updates, rendering, events, physics bodies).");
 		}
 
-		// Prefab instance bar: this atom IS an instance (a prefab with individual params). Manual sync only.
+		// Prefab instance bar — sync is manual in both directions.
 		if (!sltd->prefabGuid.empty())
 		{
 			std::string ppath = ResDB::getSingleton()->PathForGuid(sltd->prefabGuid);
@@ -1457,9 +1387,8 @@ void EditorUI::winInspector()
 		if (EditV3("Scale", s))
 		{ t.scale.x = s[0]; t.scale.y = s[1]; t.scale.z = s[2]; }
 
-		// --- Anchors (canvas children only): pin edges to canvas sides. Enabling a side captures the
-		// CURRENT distance; opposite pair enabled = the element stretches with the canvas. Backed by a
-		// RectAnchor component (auto-added on first enable); applied every frame by the world.
+		// Anchors (canvas children only): enabling a side captures the CURRENT distance. Backed by a
+		// RectAnchor component auto-added on first enable; the world applies it every frame.
 		{
 			nuke::Canvas* cvAnc = nullptr;
 			for (Atom* p = sltd->parent; p && !cvAnc; p = p->parent) cvAnc = p->GetComponent<nuke::Canvas>();
@@ -1467,7 +1396,7 @@ void EditorUI::winInspector()
 			{
 				ImGui::SeparatorText("Anchors");
 				nuke::RectAnchor* ra = sltd->GetComponent<nuke::RectAnchor>();
-				// Current geometry in canvas units (same conventions as the world's layout pass).
+				// Canvas units — must match the conventions of the world's layout pass.
 				const bool  world = (cvAnc->mode == nuke::CanvasMode::WorldSpace);
 				const float ppu = world ? 1.0f : (cvAnc->pixelsPerUnit > 0.01f ? cvAnc->pixelsPerUnit : 100.0f);
 				const float hw = cvAnc->width * 0.5f, hh = cvAnc->height * 0.5f;
@@ -1519,7 +1448,6 @@ void EditorUI::winInspector()
 			}
 		}
 
-		// Expand/Collapse all — affects the Components category AND every component header.
 		std::string atomName = sltd->GetName();
 		{
 			int force = -1;
@@ -1554,7 +1482,7 @@ void EditorUI::winInspector()
 				st = ImGui::CollapsingHeader(hdr.c_str());
 				if (!cmp->modOrigin.empty() && ImGui::IsItemHovered())
 					ImGui::SetTooltip("Added by mod: %s", cmp->modOrigin.c_str());
-				// Drag the header onto a hierarchy row to MOVE this component to that atom.
+				// Drag the header onto a hierarchy row to move this component to that atom.
 				if (ImGui::BeginDragDropSource())
 				{
 					CompDragPayload pay; pay.atomId = sltd->id.id; pay.compId = cmp->id.id;
@@ -1577,10 +1505,8 @@ void EditorUI::winInspector()
 					else
 					{
 						ImGui::Checkbox("Enabled", &cmp->enabled);
-						// Tick interval (6.8): Update() every Nth frame, staggered by component id.
-						// Anchored to the RIGHT edge. InputInt's item width covers the WHOLE widget
-						// (text box + both step buttons): 64 left a ~14px text box that collapsed to
-						// nothing on narrow panels — give the number itself real room.
+						// InputInt's item width covers the whole widget (text box + both step buttons),
+						// so the field must stay wide enough for the number on narrow panels.
 						{
 							const float fieldW = 110.0f;   // text box + [-][+] buttons
 							const float lblW   = ImGui::CalcTextSize("Tick every").x;
@@ -1603,7 +1529,6 @@ void EditorUI::winInspector()
 						DrawFields(cmp, cmp->GetType());   // auto fields from [[nuke::prop]] schema
 						DrawDynamicProps(cmp);             // dynamic props (e.g. Lua script vars)
 
-						// Per-type custom inspector drawing beyond the reflected fields (registered overrides).
 						if (nuke::TypeInfo* cti = cmp->GetType())
 						{
 							auto ov = inspectorOverrides.find(cti->name);
@@ -1618,11 +1543,7 @@ void EditorUI::winInspector()
 		// Apply a deferred component removal now that the component loop is done (can't mutate mid-iterate).
 		if (pendingCompDel) { RemoveComponent(pendingCompAtom, pendingCompDel); pendingCompDel = nullptr; pendingCompAtom = nullptr; }
 
-		// Add any registered, create-able Component type (incl. ones added by plugins).
-		// The list keeps GROWING with modules — so: search box (Enter takes the top hit),
-		// CATEGORY tree (TypeInfo::category from NUKE_CLASS's 3rd arg; "" = Other), and a
-		// height-capped scroll area. Filter walks the whole reflected base CHAIN, so derived
-		// components (Foliage : InstancedMesh) are offered too.
+		// Add Component: every registered create-able type, grouped by TypeInfo::category ("" = Other).
 		ImGui::Separator();
 		if (ImGui::Button("Add Component", ImVec2(-FLT_MIN, 0)))
 			ImGui::OpenPopup("addcomp");
@@ -1704,9 +1625,8 @@ void EditorUI::winInspector()
 	});
 }
 
-// Inspector for a project asset selected in the Browser. Dispatched by extension: .nutex (usage + info),
-// .numat (reflected material fields), else read-only info + Open. Loaded assets are cached (reloaded on
-// selection change) so edits persist to the file (and are undoable).
+// Dispatches by extension: .nutex (usage + info), .numat (reflected fields), else read-only info.
+// The loaded asset is cached until the selection or the file's mtime changes.
 void EditorUI::DrawAssetInspector(const std::string& path)
 {
 	std::string ext = bfs::path(path).extension().string();
@@ -1714,11 +1634,10 @@ void EditorUI::DrawAssetInspector(const std::string& path)
 
 	boost::system::error_code mec;
 	long long mtime = (long long)bfs::last_write_time(bfs::path(path), mec);
-	if (path != inspAssetPath || mtime != inspAssetMtime)   // selection changed OR file changed on disk (reimport) -> refresh
+	if (path != inspAssetPath || mtime != inspAssetMtime)   // new selection or a reimport on disk
 	{
 		if (inspTex) { delete inspTex; inspTex = nullptr; }
 		if (inspMat) { delete inspMat; inspMat = nullptr; }
-		// Drop the GPU preview of the previous texture (rebuilt below for the new one).
 		if (inspTexPreviewId)
 		{
 			if (iRender* r = AppInstance::GetSingleton()->render) r->destroyTexture2D(inspTexPreviewId);
@@ -1728,10 +1647,8 @@ void EditorUI::DrawAssetInspector(const std::string& path)
 		inspAssetPath = path; inspAssetMtime = mtime;
 		if      (ext == ".nutex") inspTex = nuke::Texture::LoadFromFile(path);
 		else if (ext == ".numat") inspMat = nuke::Material::LoadFromFile(path);
-		// Texture preview: decode mip0 to RGBA8 and upload once per selection/change. Huge source
-		// textures (multi-thousand-px sprite sheets) are box-downsampled to a 2048 cap first: a full
-		// 7000x2628 preview is a 73 MB GPU upload that spikes VRAM on every edit — pointless for a
-		// panel-width thumbnail, and the spike could starve real scene texture uploads.
+		// Decode mip0 and upload once per change; downsample to a 2048 cap first so huge sheets
+		// don't spike VRAM for a panel-width thumbnail.
 		if (inspTex && !inspTex->renderTexture)
 			if (iRender* r = AppInstance::GetSingleton()->render)
 			{
@@ -1764,8 +1681,7 @@ void EditorUI::DrawAssetInspector(const std::string& path)
 
 	ImGui::TextUnformatted(bfs::path(path).filename().string().c_str());
 	ImGui::SameLine(); ImGui::TextDisabled("%s", ext.c_str());
-	// Assets open their OWN editor window (module-supplied types included — e.g. .nutile
-	// from NukeTilemapEditor); text-editable types additionally offer the text editor.
+	// Types with a dedicated editor window, module-supplied ones included.
 	const bool hasOwnEditor = ext == ".numat" || ext == ".numesh" || ext == ".nuprefab"
 	                       || nuke::AssetEditorForExt(ext) != nullptr;
 	if (hasOwnEditor)
@@ -1788,7 +1704,6 @@ void EditorUI::DrawAssetInspector(const std::string& path)
 	if (ext == ".nutex" && inspTex)
 	{
 		if (inspTex->renderTexture) { ImGui::TextDisabled("Render texture (%dx%d).", inspTex->width, inspTex->height); return; }
-		// Image preview (fit to the panel width, aspect kept; mip0 / frame 0).
 		if (inspTexPreviewId)
 		{
 			float w = ImGui::GetContentRegionAvail().x;
@@ -1852,9 +1767,7 @@ void EditorUI::DrawAssetInspector(const std::string& path)
 			if (ImGui::IsItemHovered()) ImGui::SetTooltip("On = OpenGL convention (+Y up, green flipped) — glTF/Blender/Substance default.\nOff = DirectX (-Y). Toggle if the relief looks inverted.");
 		}
 
-		// Compression override — re-compresses the .nutex in place (quality vs size). Normals default to BC5 (8bpp);
-		// BC1 halves the size but is blocky. Applied immediately (decode -> re-encode) + live in the renderer.
-		if (inspTex->usage == nuke::Texture::UsageSprite)   // grid/margin/spacing/9-slice live in the dedicated slicer
+		if (inspTex->usage == nuke::Texture::UsageSprite)   // grid/margin/spacing/9-slice live in the slicer
 		{
 			if (ImGui::Button(ICON_LC_GRID_2X2 " Open Sprite Slicer", ImVec2(-FLT_MIN, 0))) OpenAssetEditor(path);
 			ImGui::TextDisabled("Grid %dx%d  ·  margin %d/%d/%d/%d  ·  spacing %d,%d", inspTex->spriteColumns, inspTex->spriteRows,
@@ -1938,7 +1851,6 @@ void EditorUI::DrawAssetInspector(const std::string& path)
 	}
 	else if (ext == ".numat" && inspMat)
 	{
-		// Live 3D preview on a sphere (edits below re-stage through the mtime refresh).
 		DrawAssetPreview3D(path, ext);
 		if (nuke::TypeInfo* ti = inspMat->GetType())
 			if (DrawFields(inspMat, ti))

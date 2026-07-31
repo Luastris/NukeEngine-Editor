@@ -1,21 +1,21 @@
 // browser panel — EditorUI method definitions (translation unit).
 #include <editor/editorui.h>
-#include "nukeui.h"   // DocWindow: detachable panels (task #137)
-#include "API/Model/Material.h"   // regen GUIDs of copied assets
+#include "nukeui.h"
+#include "API/Model/Material.h"
 #include "API/Model/Mesh.h"
 #include "API/Model/Texture.h"
-#include "API/Model/Package.h"    // pak sessions: the mounted stack's content is browsable
-#include <nlohmann/json.hpp>      // dependency scan + unlink (rewrite reference fields)
-#include "interface/AssetCreators.h"   // plugin-registered "New ..." commands
-#include "API/Model/Prefab.h"          // SaveAtomToString (undo snapshots for drop-on-atom)
+#include "API/Model/Package.h"
+#include <nlohmann/json.hpp>
+#include "interface/AssetCreators.h"
+#include "API/Model/Prefab.h"
 #include "API/Model/MeshRenderer.h"
 #include <boost/filesystem/fstream.hpp>
 #include <algorithm>
 #include <iterator>
 #include <set>
 
-// Rename/move a file or folder on disk + keep ResDB's guid<->path in sync; a renamed .numat also
-// gets its internal name re-synced. One canonical operation so undo can replay it in either direction.
+// Rename/move a file or folder on disk, keeping ResDB's guid<->path (and a .numat's internal
+// name) in sync. Symmetric so undo can replay it in either direction.
 static void DoFileMove(const std::string& from, const std::string& to)
 {
 	if (from == to) return;
@@ -37,10 +37,9 @@ void EditorUI::RecordFileMove(const std::string& from, const std::string& to)
 	PushUndo("Move " + bfs::path(to).filename().string(),
 		[from, to]{ DoFileMove(to, from); },
 		[from, to]{ DoFileMove(from, to); },
-		false);   // file operation — undoable, but the open WORLD did not change
+		false);   // file op: undoable, but the open world did not change
 }
 
-// Icon for a (lowercased) file extension.
 const char* EditorUI::ExtIcon(const std::string& ext)
 {
 	if (ext == ".numesh") return ICON_LC_BOX;
@@ -53,12 +52,11 @@ const char* EditorUI::ExtIcon(const std::string& ext)
 	if (ext == ".ogg" || ext == ".wav" || ext == ".mp3" || ext == ".flac") return ICON_LC_MUSIC;
 	if (ext == ".lua" || ext == ".cs") return ICON_LC_FILE_CODE;
 	if (ext == ".hlsl" || ext == ".nushader") return ICON_LC_FILE_CODE;
-	// C++ sources (the source root, 6.0)
 	if (ext == ".cpp" || ext == ".h" || ext == ".hpp" || ext == ".c" || ext == ".cc"
 	    || ext == ".inl" || ext == ".inc" || ext == ".cmake") return ICON_LC_FILE_CODE;
 	return ICON_LC_FILE;
 }
-// Whether a file of this extension passes the current type filters.
+// Whether this extension passes the current type filters.
 bool EditorUI::ExtVisible(const std::string& ext)
 {
 	if (ext == ".numesh") return fMesh;
@@ -75,7 +73,7 @@ bool EditorUI::SearchMatch(const std::string& name)
 	return s.find(q) != std::string::npos;
 }
 
-// Recursive folder tree (Tree mode), rooted at the project content folder.
+// Recursive folder tree (Tree view), rooted at `dir`.
 void EditorUI::BrowserTree(const std::string& dir)
 {
 	boost::system::error_code ec;
@@ -101,8 +99,7 @@ void EditorUI::BrowserTree(const std::string& dir)
 				ImGui::BulletText("%s %s", ExtIcon(ext), name.c_str());
 		}
 	}
-	// Mounted stack (pak/mod session): this level's PACKED children too (read-only).
-	// Content-root only — paks never carry C++ sources.
+	// Mounted pak stack: this level's packed children too (read-only, content root only).
 	if (browserRoot == 0 && nuke::Package::MountedCount() > 0)
 	{
 		std::string relDir = "content";
@@ -135,7 +132,7 @@ void EditorUI::BrowserTree(const std::string& dir)
 	}
 }
 
-// Reconstruct a .nuprefab into the current world and select it.
+// Instantiate a .nuprefab into the current world and select it; returns the new atom.
 Atom* EditorUI::SpawnPrefab(const std::string& path)
 {
 	if (Atom* a = nuke::LoadPrefab(path))
@@ -150,12 +147,9 @@ Atom* EditorUI::SpawnPrefab(const std::string& path)
 	return nullptr;
 }
 
-// Begin renaming a browser entry: edit only the NAME — the extension is locked (changing it would
-// make the engine unable to load the asset). Folders have no extension, so the whole name is edited.
-// Creator templates carry a %CLASSNAME% token that follows the FILE name (a C# class must
-// match how CSharpScript instantiates it). Sanitized to an identifier.
-static std::string sFreshTemplatePath;      // the file JUST created from a template
+static std::string sFreshTemplatePath;      // file just created from a template
 static std::string sFreshTemplateContent;   // its raw template (token not substituted)
+// Substitute a creator template's %CLASSNAME% token with `stem` sanitized to an identifier.
 static std::string InstantiateCreatorTemplate(const std::string& content, const std::string& stem)
 {
 	std::string cls;
@@ -168,6 +162,7 @@ static std::string InstantiateCreatorTemplate(const std::string& content, const 
 	return out;
 }
 
+// Open the rename modal for a browser entry; only the name is editable, the extension is locked.
 void EditorUI::StartRename(const std::string& path)
 {
 	renamePath = path;
@@ -181,12 +176,11 @@ void EditorUI::StartRename(const std::string& path)
 	openRenamePopup = true;
 }
 
-// Right-click context menu for a browser entry (call right after rendering the item).
+// Right-click context menu for a browser entry. Must be called right after rendering the item.
 void EditorUI::EntryContextMenu(const std::string& path, bool isDir)
 {
 	if (ImGui::BeginPopupContextItem())
 	{
-		// World-specific actions: open it, or make it the project's default.
 		if (!isDir && bfs::path(path).extension() == ".nuworld")
 		{
 			if (ImGui::MenuItem(ICON_LC_GLOBE " Open World")) OpenWorldFromBrowser(path);
@@ -198,7 +192,6 @@ void EditorUI::EntryContextMenu(const std::string& path, bool isDir)
 			}
 			ImGui::Separator();
 		}
-		// Type-specific openers: asset editors (material/mesh/prefab) and the text editor.
 		if (!isDir)
 		{
 			std::string cext = bfs::path(path).extension().string();
@@ -222,12 +215,12 @@ void EditorUI::EntryContextMenu(const std::string& path, bool isDir)
 		if (ImGui::MenuItem(ICON_LC_CLIPBOARD_PASTE " Paste", "Ctrl+V", false, !clipboard.empty())) BrowserPaste();
 		ImGui::Separator();
 		if (ImGui::MenuItem(ICON_LC_PENCIL " Rename")) StartRename(path);
-		if (ImGui::MenuItem(ICON_LC_TRASH_2 " Delete")) RequestDelete(path);   // confirm (+ dependents list)
+		if (ImGui::MenuItem(ICON_LC_TRASH_2 " Delete")) RequestDelete(path);
 		ImGui::EndPopup();
 	}
 }
 
-// Rename modal (InputText + OK/Cancel). Performs bfs::rename within the same folder.
+// Rename modal; renames within the same folder.
 void EditorUI::DrawRenamePopup()
 {
 	if (openRenamePopup) { ImGui::OpenPopup("Rename##browser"); openRenamePopup = false; }
@@ -242,7 +235,6 @@ void EditorUI::DrawRenamePopup()
 		boost::system::error_code ec;
 		bfs::path src = renamePath;
 		bfs::path dst = src.parent_path() / (std::string(renameBuf) + renameExt);   // name + locked ext
-		// Block if a DIFFERENT entry with that name already exists (no silent overwrite).
 		bool clash = renameBuf[0] && dst != src && bfs::exists(dst, ec);
 		if (clash) ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1), ICON_LC_TRIANGLE_ALERT " A file/folder with that name already exists here.");
 
@@ -255,14 +247,11 @@ void EditorUI::DrawRenamePopup()
 		{
 			if (src != dst)
 			{
-				DoFileMove(src.string(), dst.string());          // rename + ResDB sync + .numat name
-				RecordFileMove(src.string(), dst.string());      // undoable
+				DoFileMove(src.string(), dst.string());
+				RecordFileMove(src.string(), dst.string());
 				if (browserSel == src.string()) browserSel = dst.string();
-				// Renaming a .cs keeps its CLASS DECLARATION in sync with the file name —
-				// CSharpScript binds classes BY NAME, a silent mismatch reads as "class not
-				// found". Replaces exactly `class <oldStem>` (identifier-bounded), so the
-				// rest of the user's code is untouched. Covers both the just-created
-				// template AND later renames.
+				// CSharpScript binds classes by name, so a renamed .cs must have its
+				// `class <oldStem>` declaration renamed too (identifier-bounded match).
 				{
 					std::string cext = dst.extension().string();
 					for (char& c : cext) c = (char)tolower((unsigned char)c);
@@ -314,8 +303,8 @@ void EditorUI::DrawRenamePopup()
 	}
 }
 
-// Folder navigation history (file-explorer style). NavigateTo pushes the current folder onto the
-// back stack and clears forward; Back/Forward walk between them (driven by buttons + mouse M4/M5).
+// Folder navigation history: Navigate pushes the current folder onto the back stack and clears
+// forward; Back/Forward walk between them.
 void EditorUI::BrowserNavigate(const std::string& path)
 {
 	if (path == browserCwd) return;
@@ -338,9 +327,8 @@ void EditorUI::BrowserForward()
 	browserFwd.pop_back();
 }
 
-// Return `desired` if free, else append " (n)" before the extension until the name is unused —
-// so moving/creating never silently overwrites an existing file or folder of the same name.
-// An existing counter in the stem is stripped first: copying "Box (2).png" makes "Box (3).png".
+// Return `desired` if free, else append " (n)" before the extension until unused; an existing
+// counter in the stem is stripped first ("Box (2).png" -> "Box (3).png").
 static bfs::path UniquePath(const bfs::path& desired)
 {
 	boost::system::error_code ec;
@@ -355,6 +343,7 @@ static bfs::path UniquePath(const bfs::path& desired)
 }
 
 // Make the last-drawn item a drag source carrying an asset path (payload "NUKE_ASSET").
+// Must be called immediately after the item.
 void EditorUI::BrowserDragSource(const std::string& path)
 {
 	if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_None))
@@ -365,22 +354,21 @@ void EditorUI::BrowserDragSource(const std::string& path)
 	}
 }
 
-// Save a scene atom (with its children) as a .nuprefab in `folder`. The prefab is a snapshot —
-// later edits to the world atom don't change the file (no live link yet).
+// Save an atom (with its children) as a .nuprefab in `folder`. Snapshot only — no live link.
 void EditorUI::SaveAtomAsPrefab(Atom* a, const std::string& folder)
 {
 	if (!a) return;
 	bfs::path path = UniquePath(bfs::path(folder) / (a->GetName() + ".nuprefab"));
-	a->prefabGuid = ResDB::NewGuid();   // the source atom becomes an instance of this new prefab
+	a->prefabGuid = ResDB::NewGuid();   // source atom becomes an instance of this new prefab
 	if (nuke::SavePrefab(a, path.string()))
 	{
-		ResDB::getSingleton()->SetAssetPath(a->prefabGuid, path.string());   // resolve guid -> file
+		ResDB::getSingleton()->SetAssetPath(a->prefabGuid, path.string());
 		browserSel = path.string();
 		cout << "[editor]\tsaved prefab " << path.string() << " (" << a->prefabGuid << ")" << endl;
 	}
 }
 
-// Recursively copy a file or a whole folder tree (dst must not already exist — callers use UniquePath).
+// Recursively copy a file or folder tree; dst must not already exist.
 static void CopyRecursive(const bfs::path& src, const bfs::path& dst, boost::system::error_code& ec)
 {
 	if (bfs::is_directory(src))
@@ -392,9 +380,8 @@ static void CopyRecursive(const bfs::path& src, const bfs::path& dst, boost::sys
 	else bfs::copy_file(src, dst, ec);
 }
 
-// A freshly COPIED asset still carries the original's internal GUID — two files sharing one GUID
-// collide in ResDB on the next project load. Rewrite the copy's GUID on disk (and register the copy
-// live so it shows in pickers immediately). Worlds/prefabs have no ResDB-keyed GUID — left as-is.
+// Give a copied asset a fresh GUID on disk and register it live; two files sharing one GUID
+// collide in ResDB. Worlds/prefabs have no ResDB-keyed GUID and are left as-is.
 static void RegenAssetGuid(const bfs::path& file)
 {
 	std::string ext = file.extension().string();
@@ -427,7 +414,7 @@ static void RegenGuidsIn(const bfs::path& path)
 	else RegenAssetGuid(path);
 }
 
-// Delete a file or folder from disk (immediate; no confirm — callers gate that).
+// Delete a file or folder from disk immediately; callers gate the confirmation.
 void EditorUI::BrowserDelete(const std::string& path)
 {
 	boost::system::error_code ec;
@@ -436,7 +423,7 @@ void EditorUI::BrowserDelete(const std::string& path)
 	if (browserSel == path) browserSel.clear();
 }
 
-// Content files (worlds/prefabs/materials = JSON) that reference `guid` as text + the live world.
+// Content files (worlds/prefabs/materials) referencing `guid`, plus the live world.
 std::vector<std::string> EditorUI::FindDependents(const std::string& guid)
 {
 	std::vector<std::string> deps;
@@ -450,7 +437,7 @@ std::vector<std::string> EditorUI::FindDependents(const std::string& guid)
 			std::string e = it->path().extension().string();
 			for (char& c : e) c = (char)tolower((unsigned char)c);
 			if (e != ".nuworld" && e != ".nuprefab" && e != ".numat") continue;
-			if (it->path().string() == pendingDelete) continue;            // skip the file being deleted
+			if (it->path().string() == pendingDelete) continue;
 			bfs::ifstream f(it->path()); if (!f) continue;
 			std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
 			if (text.find(guid) != std::string::npos)
@@ -461,7 +448,7 @@ std::vector<std::string> EditorUI::FindDependents(const std::string& guid)
 	return deps;
 }
 
-// Replace every reference to `guid` with its default, recursively, by the field it sits under.
+// Recursively replace every reference to `guid` with the default for the field it sits under.
 static bool UnlinkInJson(nlohmann::json& n, const std::string& guid)
 {
 	bool changed = false;
@@ -483,13 +470,13 @@ static bool UnlinkInJson(nlohmann::json& n, const std::string& guid)
 	return changed;
 }
 
-// Reset every reference to `guid` to defaults across the live world + all content files (irreversible).
+// Reset every reference to `guid` to defaults across the live world and all content files.
+// Irreversible.
 void EditorUI::UnlinkResource(const std::string& guid)
 {
 	if (guid.empty()) return;
 	AppInstance* app = AppInstance::GetSingleton();
-	ResDB::getSingleton()->UnlinkGuid(guid);   // fix LOADED material templates first (shader/texture refs + Resolve)
-	// 1) live world (may be unsaved) — re-clones instances from the now-fixed templates
+	ResDB::getSingleton()->UnlinkGuid(guid);   // loaded templates first: the world re-clones from them
 	{
 		nlohmann::json j = nlohmann::json::parse(app->currentWorld->SaveToString(), nullptr, false);
 		if (!j.is_discarded() && UnlinkInJson(j, guid))
@@ -499,7 +486,6 @@ void EditorUI::UnlinkResource(const std::string& guid)
 			if (!app->currentWorldPath.empty()) app->SaveWorld(app->currentWorldPath);
 		}
 	}
-	// 2) every other world / prefab / material file on disk
 	boost::system::error_code ec;
 	bfs::path root(contentDir);
 	std::string curFull = app->currentWorldPath.empty() ? std::string() : app->WorldFullPath(app->currentWorldPath);
@@ -519,7 +505,7 @@ void EditorUI::UnlinkResource(const std::string& guid)
 		}
 }
 
-// Open the confirm modal, listing what depends on the resource.
+// Collect dependents and open the delete-confirm modal.
 void EditorUI::RequestDelete(const std::string& path)
 {
 	pendingDelete   = path;
@@ -532,12 +518,12 @@ void EditorUI::PerformDelete(const std::string& path)
 {
 	ResDB* db = ResDB::getSingleton();
 	std::string guid = db->GuidForPath(path);
-	if (unlinkOnDelete && !guid.empty()) UnlinkResource(guid);   // reset refs in files + live world + DB templates
-	if (!guid.empty()) db->RemoveByGuid(guid);                   // drop the deleted asset from the live DB (pickers)
+	if (unlinkOnDelete && !guid.empty()) UnlinkResource(guid);
+	if (!guid.empty()) db->RemoveByGuid(guid);   // drop from the live DB so pickers forget it
 	BrowserDelete(path);
 }
 
-// Delete-confirm modal: dependents list + irreversible warning + the persisted "Unlink?" toggle.
+// Delete-confirm modal: dependents list, warning, and the persisted "Unlink?" toggle.
 void EditorUI::DrawDeletePopup()
 {
 	if (openDeletePopup) { ImGui::OpenPopup("Delete?##browser"); openDeletePopup = false; }
@@ -573,7 +559,7 @@ void EditorUI::DrawDeletePopup()
 	}
 }
 
-// Paste the clipboard into the current folder. Cut = move (and clear the clipboard); copy = duplicate.
+// Paste the clipboard into the current folder: cut = move (one-shot), copy = duplicate.
 void EditorUI::BrowserPaste()
 {
 	if (clipboard.empty()) return;
@@ -590,18 +576,18 @@ void EditorUI::BrowserPaste()
 		if (clipboardCut)
 		{
 			DoFileMove(srcStr, dst.string());
-			RecordFileMove(srcStr, dst.string());   // undoable (cut = move)
+			RecordFileMove(srcStr, dst.string());
 			ec.clear();
 		}
 		else { CopyRecursive(src, dst, ec); if (!ec) RegenGuidsIn(dst); }   // a copy needs a fresh GUID
 		if (!ec) lastSel = dst.string();
 	}
 	if (!lastSel.empty()) browserSel = lastSel;
-	if (clipboardCut) clipboard.clear();   // a cut is one-shot
+	if (clipboardCut) clipboard.clear();
 }
 
-// Make the last-drawn item (a folder) a drop target: move a dragged file/folder into it, or save a
-// dragged scene atom into it as a prefab.
+// Make the last-drawn folder item a drop target: move a dragged file/folder into it, or save a
+// dragged atom into it as a prefab.
 void EditorUI::BrowserFolderDropTarget(const std::string& folderPath)
 {
 	if (!ImGui::BeginDragDropTarget()) return;
@@ -609,13 +595,12 @@ void EditorUI::BrowserFolderDropTarget(const std::string& folderPath)
 	{
 		std::string srcStr((const char*)p->Data);
 		bfs::path src(srcStr), dstDir(folderPath);
-		// Skip no-ops and moving a folder into itself / its own subtree.
-		bool intoSelf = dstDir.string().rfind(src.string(), 0) == 0;
+		bool intoSelf = dstDir.string().rfind(src.string(), 0) == 0;   // folder into its own subtree
 		if (src.parent_path() != dstDir && !intoSelf)
 		{
-			bfs::path dst = UniquePath(dstDir / src.filename());   // never clobber a same-named entry
+			bfs::path dst = UniquePath(dstDir / src.filename());
 			DoFileMove(srcStr, dst.string());
-			RecordFileMove(srcStr, dst.string());                  // undoable
+			RecordFileMove(srcStr, dst.string());
 			if (browserSel == srcStr) browserSel = dst.string();
 		}
 	}
@@ -624,7 +609,7 @@ void EditorUI::BrowserFolderDropTarget(const std::string& folderPath)
 	ImGui::EndDragDropTarget();
 }
 
-// Viewport / hierarchy drop: accept an asset and instantiate it.
+// Viewport/hierarchy drop target: accept an asset and instantiate it.
 void EditorUI::AcceptAssetDropTarget()
 {
 	if (!ImGui::BeginDragDropTarget()) return;
@@ -646,7 +631,7 @@ void EditorUI::DropAssetOnAtom(Atom* a, const std::string& path)
 {
 	if (!a) return;
 	nuke::MeshRenderer* mr = a->GetComponent<nuke::MeshRenderer>();
-	if (!mr) return;                                  // only mesh objects carry a material
+	if (!mr) return;   // only mesh objects carry a material
 	std::string ext = bfs::path(path).extension().string();
 	std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
 	if (ext != ".numat" && ext != ".nutex") return;
@@ -658,18 +643,18 @@ void EditorUI::DropAssetOnAtom(Atom* a, const std::string& path)
 	if (ext == ".numat")
 	{
 		std::string guid = db->GuidForPath(path);
-		if (guid.empty())   // not indexed yet -> load + register the asset
+		if (guid.empty())   // not indexed yet: load + register
 			if (Material* m = Material::LoadFromFile(path)) { db->RegisterMaterial(m); db->SetAssetPath(m->guid, path); guid = m->guid; }
 		if (!guid.empty())
 		{
 			Material* asset = db->GetMaterial(guid);
 			mr->matGuid = guid;
 			if (mr->mat) delete mr->mat;
-			mr->mat = asset ? asset->Clone() : nullptr;   // own an instance (scene edits stay local)
+			mr->mat = asset ? asset->Clone() : nullptr;   // own an instance so edits stay local
 			changed = true;
 		}
 	}
-	else // .nutex -> base color (diffuse); a RenderTexture -> emissive so it shows like an unlit screen
+	else   // .nutex
 	{
 		std::string guid = db->GuidForPath(path);
 		if (guid.empty())
@@ -684,8 +669,8 @@ void EditorUI::DropAssetOnAtom(Atom* a, const std::string& path)
 			Texture* tx = db->GetTexture(guid);
 			if (tx && tx->renderTexture)
 			{
-				// Camera feed: emissive (unlit, full bright). Emissive map is tinted by emissive color×
-				// intensity, so set those to white×1 or the map shows black.
+				// Camera feed goes to emissive; the map is tinted by color x intensity, so
+				// those must be white x 1 or it renders black.
 				mr->mat->emissiveGuid = guid;
 				mr->mat->emissive = Color(1, 1, 1, 1);
 				mr->mat->emissiveIntensity = 1.0f;
@@ -713,7 +698,7 @@ Atom* EditorUI::SpawnMeshAsset(const std::string& path)
 	Mesh* m = Mesh::LoadFromFile(path);
 	if (!m) return nullptr;
 	ResDB* db = ResDB::getSingleton();
-	if (Mesh* ex = db->GetMesh(m->guid)) { delete m; m = ex; }   // reuse the already-loaded asset
+	if (Mesh* ex = db->GetMesh(m->guid)) { delete m; m = ex; }   // reuse the loaded asset
 	else                                  db->RegisterMesh(m);
 	Atom* atom = new Atom(bfs::path(path).stem().string().c_str());
 	MeshRenderer* mr = new MeshRenderer();
@@ -731,13 +716,13 @@ void EditorUI::CreateFolderAsset(const std::string& folder)
 	bfs::path dir = UniquePath(bfs::path(folder) / "New Folder");
 	bfs::create_directory(dir, ec);
 	browserSel = dir.string();
-	StartRename(dir.string());   // immediately let the user name it
+	StartRename(dir.string());
 }
 
 void EditorUI::CreateWorldAsset(const std::string& folder)
 {
 	bfs::path path = UniquePath(bfs::path(folder) / "New World.nuworld");
-	World* w = new World();           // empty world -> canonical JSON
+	World* w = new World();
 	w->SaveToFile(path.string());
 	delete w;
 	browserSel = path.string();
@@ -752,7 +737,7 @@ void EditorUI::CreateBoneMapAsset(const std::string& folder)
 	b->name = path.stem().string();
 	b->map["sourceBoneName"] = "targetBoneName";
 	b->SaveToFile(path.string());
-	ResDB::getSingleton()->RegisterBoneMap(b);   // show up in bone-map pickers immediately
+	ResDB::getSingleton()->RegisterBoneMap(b);
 	ResDB::getSingleton()->SetAssetPath(b->guid, path.string());
 	browserSel = path.string();
 	StartRename(path.string());
@@ -765,7 +750,7 @@ void EditorUI::CreateMaterialAsset(const std::string& folder)
 	m->guid    = ResDB::NewGuid();
 	m->matName = "New Material";
 	m->SaveToFile(path.string());
-	ResDB::getSingleton()->RegisterMaterial(m);   // show up in material pickers immediately
+	ResDB::getSingleton()->RegisterMaterial(m);
 	ResDB::getSingleton()->SetAssetPath(m->guid, path.string());
 	browserSel = path.string();
 	StartRename(path.string());
@@ -777,12 +762,12 @@ void EditorUI::CreateRenderTextureAsset(const std::string& folder)
 	Texture* t = new Texture();
 	t->guid = ResDB::NewGuid();
 	t->renderTexture = true;
-	t->width = 512; t->height = 512;          // default; (resize later when an inspector exists)
+	t->width = 512; t->height = 512;
 	t->SaveToFile(path.string());
 	ResDB* db = ResDB::getSingleton();
 	db->RegisterTexture(t);
 	db->SetAssetPath(t->guid, path.string());
-	if (AppInstance::GetSingleton()->render)  // allocate its GPU render target now
+	if (AppInstance::GetSingleton()->render)   // allocate the GPU render target now
 		t->rtId = AppInstance::GetSingleton()->render->createRenderTarget(t->width, t->height);
 	browserSel = path.string();
 	StartRename(path.string());
@@ -790,7 +775,7 @@ void EditorUI::CreateRenderTextureAsset(const std::string& folder)
 
 void EditorUI::CreateShaderAsset(const std::string& folder)
 {
-	// A shader is a "<base>.vs.hlsl" + "<base>.ps.hlsl" pair — find a base where neither exists.
+	// A shader is a "<base>.vs.hlsl" + "<base>.ps.hlsl" pair; find a base where neither exists.
 	boost::system::error_code ec;
 	std::string base = "NewShader";
 	for (int n = 1; bfs::exists(bfs::path(folder) / (base + ".vs.hlsl"), ec) ||
@@ -798,7 +783,7 @@ void EditorUI::CreateShaderAsset(const std::string& folder)
 		base = "NewShader" + std::to_string(++n);
 	bfs::path vsp = bfs::path(folder) / (base + ".vs.hlsl");
 	bfs::path psp = bfs::path(folder) / (base + ".ps.hlsl");
-	// Seed from the built-in "world" shader so it compiles out of the box.
+	// Seed from the built-in "world" shader so the new pair compiles as-is.
 	Shader* w = ResDB::getSingleton()->GetShader("world");
 	{ bfs::ofstream f(vsp); if (f) f << (w ? w->vsSource : std::string()); }
 	{ bfs::ofstream f(psp); if (f) f << (w ? w->psSource : std::string()); }
@@ -817,13 +802,10 @@ void EditorUI::winBrowser()
 	if (!win->browser) return;
 	NukeUI::DocPanel("panel:browser", "Browser", &win->browser, window_flags, 920, 380, [this]()
 	{
-	// Boot load in progress: locked — the content scan is still WRITING ResDB on a worker
-	// (previews/paths would race it).
+	// Locked while booting: the content scan is still writing ResDB on a worker.
 	if (bootLoading) { ImGui::TextDisabled("Loading project..."); return; }
 
-	// Back/Forward navigate the folder history while the browser is hovered. The chords come from the
-	// centralized hotkey pool (rebindable in Project Settings, conflict-aware); default M4/M5. They're
-	// dispatched HERE (context-sensitive) rather than globally, so they only act over the browser.
+	// Hotkeys are dispatched here rather than globally so they only act over the browser.
 	if (ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows))
 	{
 		nuke::Hotkeys* hk = nuke::Hotkeys::Get();
@@ -832,8 +814,7 @@ void EditorUI::winBrowser()
 		if (b && b->bound && ImGui::IsKeyChordPressed((ImGuiKeyChord)b->chord)) BrowserBack();
 		if (f && f->bound && ImGui::IsKeyChordPressed((ImGuiKeyChord)f->chord)) BrowserForward();
 
-		// Clipboard (don't steal keys while typing in the search/rename fields).
-		if (!ImGui::GetIO().WantTextInput)
+		if (!ImGui::GetIO().WantTextInput)   // don't steal keys while typing in a field
 		{
 			auto chord = [&](const char* id) { nuke::Hotkey* h = hk->Find(id); return h && h->bound && ImGui::IsKeyChordPressed((ImGuiKeyChord)h->chord); };
 			if (chord("editor.cut")   && !browserSel.empty()) { clipboard = { browserSel }; clipboardCut = true;  }
@@ -842,27 +823,25 @@ void EditorUI::winBrowser()
 		}
 	}
 
-	// Delete: behaviour is per-active-window — only act when the Browser is FOCUSED. Shift+Delete deletes
-	// immediately; plain Delete asks for confirmation. Chords come from the shared pool.
+	// Delete is per-active-window: only act when the browser is focused.
 	if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) && !ImGui::GetIO().WantTextInput && !browserSel.empty())
 	{
 		nuke::Hotkeys* hk = nuke::Hotkeys::Get();
 		nuke::Hotkey* d  = hk->Find("editor.delete");
 		nuke::Hotkey* df = hk->Find("editor.delete.force");
-		if (df && df->bound && ImGui::IsKeyChordPressed((ImGuiKeyChord)df->chord)) PerformDelete(browserSel);            // Shift+Del: no confirm
-		else if (d && d->bound && ImGui::IsKeyChordPressed((ImGuiKeyChord)d->chord)) RequestDelete(browserSel);          // Del: confirm
+		if (df && df->bound && ImGui::IsKeyChordPressed((ImGuiKeyChord)df->chord)) PerformDelete(browserSel);   // no confirm
+		else if (d && d->bound && ImGui::IsKeyChordPressed((ImGuiKeyChord)d->chord)) RequestDelete(browserSel);
 	}
 
-	// --- browse ROOT (6.0): content or the project's C++ sources (<project>/source, when
-	// present). Assets/import/pak-union are content-only concepts; sources browse + open.
+	// Browse root: content, or the project's C++ sources when <project>/source exists.
 	const bfs::path srcRootP = bfs::path(projectDir) / "source";
 	boost::system::error_code srcEc;
 	const bool hasSrc = bfs::exists(srcRootP, srcEc) && bfs::is_directory(srcRootP, srcEc);
 	if (!hasSrc) browserRoot = 0;
 
-	// --- toolbar: view mode | search | filters ---
+	// Toolbar: view mode | search | filters.
 	const char* modes[] = { ICON_LC_LAYOUT_GRID " Tiles", ICON_LC_LIST " List", ICON_LC_FOLDER_TREE " Tree" };
-	if (browserView < 0 || browserView > 2) browserView = 0;   // drop the removed "By Type" mode
+	if (browserView < 0 || browserView > 2) browserView = 0;
 	ImGui::SetNextItemWidth(130);
 	ImGui::Combo("##bview", &browserView, modes, 3);
 	ImGui::SameLine();
@@ -870,17 +849,15 @@ void EditorUI::winBrowser()
 	ImGui::InputTextWithHint("##bsearch", ICON_LC_SEARCH " Search", browserSearch, sizeof(browserSearch));
 	ImGui::SameLine();
 	if (ImGui::Button(ICON_LC_FILTER " Filters")) ImGui::OpenPopup("bfilters");
-	if (browserRoot == 0)   // Import/New create ASSETS — meaningless inside the C++ sources
+	if (browserRoot == 0)   // Import/New create assets: meaningless in the C++ source root
 	{
 	ImGui::SameLine();
 	if (ImGui::Button(ICON_LC_DOWNLOAD " Import"))
 	{
-		std::string src = EditorPickModelFile();   // models OR images
+		std::string src = EditorPickModelFile();   // models or images
 		if (!src.empty())
 		{
 			std::string dest = browserCwd.empty() ? contentDir : browserCwd;
-			// ASYNC (2.4): heavy conversion on a worker; the editor stays responsive
-			// (the status bar shows the import field until completion).
 			AssImporter::getSingleton()->ImportAnyAsync(src, dest, [src, dest](bool ok) {
 				cout << "[editor]\timport " << (ok ? "ok" : "FAILED") << ": " << src << " -> " << dest << endl;
 			});
@@ -901,8 +878,7 @@ void EditorUI::winBrowser()
 		if (ImGui::MenuItem(ICON_LC_BONE " Bone Map"))     CreateBoneMapAsset(folder);
 		if (ImGui::MenuItem(ICON_LC_FILE_CODE " Shader"))  CreateShaderAsset(folder);
 		if (ImGui::MenuItem(ICON_LC_IMAGE " RenderTexture")) CreateRenderTextureAsset(folder);
-		// Plugin-registered file types (descriptors: label/ext/template/category/icon; the
-		// editor writes the file). Grouped by category (submenu); "" = flat entry.
+		// Plugin-registered file types, grouped by category ("" = flat entry).
 		const std::vector<nuke::AssetCreator>& creators = nuke::AssetCreators();
 		if (!creators.empty()) ImGui::Separator();
 		auto creatorItem = [&](const nuke::AssetCreator& ac)
@@ -911,11 +887,10 @@ void EditorUI::winBrowser()
 			if (ImGui::MenuItem((std::string(icon) + " " + ac.label).c_str()))
 			{
 				bfs::path p = UniquePath(bfs::path(folder) / (ac.baseName + ac.ext));
-				// BINARY write: text mode would CRLF-mangle the template and break the
+				// Binary: text mode would CRLF-mangle the template and break the
 				// "still the untouched template" compare on rename.
 				bfs::ofstream wf(p, std::ios::binary);
 				if (wf) wf << InstantiateCreatorTemplate(ac.content, p.stem().string());
-				// The rename that follows re-substitutes %CLASSNAME% with the FINAL name.
 				sFreshTemplatePath    = p.string();
 				sFreshTemplateContent = ac.content;
 				browserSel = p.string();
@@ -945,14 +920,13 @@ void EditorUI::winBrowser()
 		ImGui::EndPopup();
 	}
 
-	DrawRenamePopup();   // rename modal (works in all views; before the mode early-returns)
-	DrawDeletePopup();   // delete-confirm modal
+	DrawRenamePopup();   // before the per-view early-returns, so modals work in every view
+	DrawDeletePopup();
 
 	bfs::path root = (browserRoot == 1) ? srcRootP : bfs::path(contentDir);
 	bfs::path cwd  = browserCwd.empty() ? root : bfs::path(browserCwd);
 	{
-		// A cwd that isn't under the CURRENT root (root switch, deleted folder, stale
-		// editor_state) snaps back to the root instead of listing a foreign tree.
+		// A cwd outside the current root (root switch, deleted folder, stale state) snaps back.
 		boost::system::error_code cec;
 		bfs::path relc = bfs::relative(cwd, root, cec);
 		const std::string rs = relc.generic_string();
@@ -963,7 +937,7 @@ void EditorUI::winBrowser()
 		}
 	}
 
-	// --- path bar: Up + root selector + current location (relative to the root) ---
+	// Path bar: Back/Forward/Up + root selector + current location.
 	ImGui::Separator();
 	boost::system::error_code rc;
 	bool atRoot = (cwd == root) || (bfs::exists(cwd, rc) && bfs::exists(root, rc) && bfs::equivalent(cwd, root, rc));
@@ -986,8 +960,7 @@ void EditorUI::winBrowser()
 	if (ImGui::Button(ICON_LC_CORNER_LEFT_UP "##up") && !atRoot)
 		BrowserNavigate(cwd.parent_path().string());
 	ImGui::SameLine();
-	// Root selector: a dropdown only when the project HAS sources; plain text otherwise.
-	if (hasSrc)
+	if (hasSrc)   // root selector is a dropdown only when the project has sources
 	{
 		const char* roots[] = { "content", "source" };
 		ImGui::SetNextItemWidth(96);
@@ -1010,7 +983,7 @@ void EditorUI::winBrowser()
 	ImGui::Text("%s", loc.c_str());
 	ImGui::Separator();
 
-	if (browserView == 2)   // Tree (recursive folders from the content root)
+	if (browserView == 2)   // Tree
 	{
 		ImGui::BeginChild("##browserfiles");   // only the tree scrolls
 		BrowserTree(root.string());
@@ -1019,14 +992,14 @@ void EditorUI::winBrowser()
 		return;
 	}
 
-	// --- gather the current folder's entries (Tiles / List) ---
+	// Gather the current folder's entries (Tiles / List).
 	struct FEntry { std::string name, path, ext; bool isDir; const char* icon; bool pak = false; };
 	std::vector<FEntry> entries;
 	boost::system::error_code ec;
 	const bool searching = (browserSearch[0] != 0);
 	if (searching)
 	{
-		// Recurse: a search spans the whole subtree under the current folder (files only).
+		// A search spans the whole subtree under the current folder (files only).
 		for (auto& de : bfs::recursive_directory_iterator(cwd, ec))
 		{
 			if (bfs::is_directory(de.path())) continue;
@@ -1049,10 +1022,8 @@ void EditorUI::winBrowser()
 			entries.push_back({ name, de.path().string(), ext, dir, dir ? ICON_LC_FOLDER : ExtIcon(ext) });
 		}
 	}
-	// Mounted stack (pak/mod session): union the packed content with the disk overlay —
-	// the base game's resources are BROWSABLE, not invisible. Disk wins name collisions
-	// (the modder's copy overrides); pak-only entries are read-only ("pak://<rel>" paths).
-	// Content-root only — paks never carry C++ sources.
+	// Union the mounted pak content with the disk overlay: disk wins name collisions, pak-only
+	// entries are read-only "pak://<rel>" paths. Content root only.
 	if (browserRoot == 0 && Package::MountedCount() > 0)
 	{
 		std::string relDir = "content";
@@ -1080,7 +1051,7 @@ void EditorUI::winBrowser()
 				continue;
 			}
 			size_t sl = tail.find('/');
-			if (sl != std::string::npos)                       // a subfolder at this level
+			if (sl != std::string::npos)   // a subfolder at this level
 			{
 				std::string name = tail.substr(0, sl);
 				if (have.count(lowName(name))) continue;
@@ -1102,7 +1073,7 @@ void EditorUI::winBrowser()
 		return a.name < b.name;
 	});
 
-	// The open world gets a "*" when it differs from disk (unsaved editor changes).
+	// The open world gets a "*" when it has unsaved changes.
 	std::string dirtyWorld;
 	if (worldDirty && !AppInstance::GetSingleton()->currentWorldPath.empty())
 	{
@@ -1115,14 +1086,14 @@ void EditorUI::winBrowser()
 		return bfs::weakly_canonical(bfs::path(e.path), dec).generic_string() == dirtyWorld;
 	};
 
-	ImGui::BeginChild("##browserfiles");   // pin the toolbar + path bar; only the file list scrolls
+	ImGui::BeginChild("##browserfiles");   // pins the toolbar + path bar; only the list scrolls
 
 	if (browserView == 0)            // Tiles
 	{
 		const float tile = 64.0f, cell = 84.0f;
 		float availW = ImGui::GetContentRegionAvail().x;
 		int per = (int)(availW / cell); if (per < 1) per = 1;
-		// Truncate a label to the tile width with an ellipsis.
+		// Truncate a label to the tile width.
 		auto fit = [tile](const std::string& s) {
 			if (ImGui::CalcTextSize(s.c_str()).x <= tile) return s;
 			std::string o = s;
@@ -1130,7 +1101,7 @@ void EditorUI::winBrowser()
 			return o + "..";
 		};
 		int i = 0;
-		if (!atRoot)   // ".." cell: DOUBLE-click = atom up, drop a file here = move it up one level
+		if (!atRoot)   // ".." cell
 		{
 			ImGui::PushID("up");
 			ImGui::BeginGroup();
@@ -1150,25 +1121,25 @@ void EditorUI::winBrowser()
 			if (seld) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.42f, 0.68f, 1.0f));
 			bool clicked = ImGui::Button(e.icon, ImVec2(tile, tile));
 			if (seld) ImGui::PopStyleColor();
-			if (!e.pak) BrowserDragSource(e.path);                     // drag this entry
-			if (e.isDir && !e.pak) BrowserFolderDropTarget(e.path);    // drop a file onto this folder = move
-			if (clicked) { browserSel = e.path; AppInstance::GetSingleton()->selectedInHieararchy = nullptr; }   // select asset -> inspector shows it
-			if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0))   // double click = activate (all items)
+			if (!e.pak) BrowserDragSource(e.path);
+			if (e.isDir && !e.pak) BrowserFolderDropTarget(e.path);
+			if (clicked) { browserSel = e.path; AppInstance::GetSingleton()->selectedInHieararchy = nullptr; }
+			if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0))
 			{
 				if      (e.isDir)              BrowserNavigate(e.pak ? (cwd / e.name).string() : e.path);
 				else if (e.ext == ".nuworld")
 				{
-					// Pak-only worlds open THROUGH the layered stack (mods merge in).
+					// Pak-only worlds must open through the layered stack so mods merge in.
 					if (e.pak) OpenWorldCmd(e.path.substr(strlen("pak://content/")));
 					else       OpenWorldFromBrowser(e.path);
 				}
 				else if (!e.pak && (e.ext == ".nuprefab" || e.ext == ".numat" || e.ext == ".numesh" || e.ext == ".nuinput"
 				         || e.ext == ".ogg" || e.ext == ".wav" || e.ext == ".mp3" || e.ext == ".flac"
-				         || nuke::AssetEditorForExt(e.ext)))   // module-supplied editors (e.g. .nutile)
-					OpenAssetEditor(e.path);   // asset editor window (audio opens its preview player)
-				else if (!e.pak && IsTextFile(e.ext)) OpenExternal(e.path, 0);   // scripts/shaders/configs -> the chosen editor
+				         || nuke::AssetEditorForExt(e.ext)))   // module-supplied editors
+					OpenAssetEditor(e.path);
+				else if (!e.pak && IsTextFile(e.ext)) OpenExternal(e.path, 0);
 			}
-			if (!e.pak) EntryContextMenu(e.path, e.isDir);   // right-click: Rename / Delete
+			if (!e.pak) EntryContextMenu(e.path, e.isDir);
 			std::string disp = isDirty(e) ? e.name + " *" : e.name;
 			ImGui::TextUnformatted(fit(disp).c_str());
 			if (ImGui::IsItemHovered())
@@ -1181,7 +1152,7 @@ void EditorUI::winBrowser()
 	else                             // List
 	{
 		int i = 0;
-		if (!atRoot)   // ".." row: DOUBLE-click = atom up (same as every other row), drop a file here = move it up
+		if (!atRoot)   // ".." row
 		{
 			bool upc = ImGui::Selectable(ICON_LC_CORNER_LEFT_UP "  ..", false, ImGuiSelectableFlags_AllowDoubleClick);
 			BrowserFolderDropTarget(cwd.parent_path().string());
@@ -1192,12 +1163,12 @@ void EditorUI::winBrowser()
 			ImGui::PushID(i++);
 			std::string lbl = std::string(e.icon) + "  " + e.name + (isDirty(e) ? " *" : "") + (e.pak ? "  (pak)" : "");
 			bool clicked = ImGui::Selectable(lbl.c_str(), e.path == browserSel, ImGuiSelectableFlags_AllowDoubleClick);
-			if (!e.pak) BrowserDragSource(e.path);                     // drag this entry
-			if (e.isDir && !e.pak) BrowserFolderDropTarget(e.path);    // drop a file onto this folder = move
+			if (!e.pak) BrowserDragSource(e.path);
+			if (e.isDir && !e.pak) BrowserFolderDropTarget(e.path);
 			if (clicked)
 			{
 				browserSel = e.path;
-				AppInstance::GetSingleton()->selectedInHieararchy = nullptr;   // select asset -> inspector shows it
+				AppInstance::GetSingleton()->selectedInHieararchy = nullptr;
 				if (ImGui::IsMouseDoubleClicked(0))
 				{
 					if (e.isDir)                   BrowserNavigate(e.pak ? (cwd / e.name).string() : e.path);
@@ -1208,27 +1179,27 @@ void EditorUI::winBrowser()
 					}
 					else if (!e.pak && (e.ext == ".nuprefab" || e.ext == ".numat" || e.ext == ".numesh" || e.ext == ".nuinput"
 					         || e.ext == ".ogg" || e.ext == ".wav" || e.ext == ".mp3" || e.ext == ".flac"
-					         || nuke::AssetEditorForExt(e.ext)))   // module-supplied editors (e.g. .nutile)
-						OpenAssetEditor(e.path);   // asset editor window (audio opens its preview player)
-					else if (!e.pak && IsTextFile(e.ext)) OpenExternal(e.path, 0);   // scripts/shaders/configs -> the chosen editor
+					         || nuke::AssetEditorForExt(e.ext)))   // module-supplied editors
+						OpenAssetEditor(e.path);
+					else if (!e.pak && IsTextFile(e.ext)) OpenExternal(e.path, 0);
 				}
 			}
-			if (!e.pak) EntryContextMenu(e.path, e.isDir);   // right-click: Rename / Delete
+			if (!e.pak) EntryContextMenu(e.path, e.isDir);
 			ImGui::PopID();
 		}
 	}
 
-	// Empty area below the entries: drag a scene atom here to save it as a prefab in this folder.
+	// Empty area below the entries: drop an atom here to save it as a prefab in this folder.
 	ImVec2 rest = ImGui::GetContentRegionAvail();
 	if (rest.y < 24.0f) rest.y = 24.0f;
 	ImGui::InvisibleButton("##browser-drop", rest);
 	if (ImGui::BeginDragDropTarget())
 	{
-		// Prefabs are ASSETS — a drop while browsing the C++ sources lands in the content root.
+		// Prefabs are assets: a drop while browsing sources lands in the content root.
 		if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("NUKE_ATOM"))
 			SaveAtomAsPrefab(*(Atom**)p->Data, (browserRoot != 0 || browserCwd.empty()) ? contentDir : browserCwd);
 		ImGui::EndDragDropTarget();
 	}
-	ImGui::EndChild();   // end the scrolling file list
+	ImGui::EndChild();
 	});
 }

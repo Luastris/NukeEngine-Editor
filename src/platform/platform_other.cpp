@@ -1,7 +1,5 @@
 // Non-Windows implementation of the editor's OS-integration seam (declared in editor/editorui.h).
-// Stubs for now — Linux would use a portable file dialog (GTK/zenity) and xdg-mime/.desktop for the
-// project file association; macOS would use NSOpenPanel + LSSetDefaultRoleHandlerForContentType.
-// The shared editor code calls these neutrally and never touches a platform API directly.
+// Stubs for now.
 #ifndef _WIN32
 
 #include <string>

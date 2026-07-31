@@ -3,17 +3,17 @@
 #include <nukeui.h>
 #include "imgui.h"
 #include <editor/editorui.h>
-#include <input/DesktopInput.h>   // gameplay input provider (keyboard/mouse)
-#include <interface/AssetCreators.h>   // register the .nuinput asset type
-#include <interface/AtomCreators.h>    // register engine atom templates for the "+" menu
-#include <interface/ComponentIcons.h>  // register engine component icons for the viewport
+#include <input/DesktopInput.h>
+#include <interface/AssetCreators.h>
+#include <interface/AtomCreators.h>
+#include <interface/ComponentIcons.h>
 #include <input/keyboard.h>
 #include <config.h>
 #include <interface/Modular.h>
 #ifdef EDITOR
 #include <interface/AppInstance.h>
 #include <import/assimporter.h>
-#include <API/Model/Jobs.h>                 // core job system (2.4)
+#include <API/Model/Jobs.h>
 #else
 #include <interface/AppInstance.h>
 #endif
@@ -21,7 +21,7 @@
 #include <iostream>
 #include <boost/filesystem.hpp>
 #include <boost/filesystem/fstream.hpp>
-#include <nlohmann/json.hpp>   // early Preferences read (editor render backend)
+#include <nlohmann/json.hpp>   // early Preferences read
 #include <sstream>
 #include <boost/dll/runtime_symbol_info.hpp>   // program_location() -> exe dir
 #include <boost/thread.hpp>
@@ -38,13 +38,11 @@
 
 namespace bfs = boost::filesystem;
 using namespace std;
-using namespace nuke;   // engine API now lives in namespace nuke
+using namespace nuke;
 
 #ifdef _WIN32
-// Crash telemetry: on any unhandled SEH exception (access violation, ...) print the
-// faulting address + a SYMBOLIZED stack of the crashing thread to stdout/stderr (raw C
-// stdio — works even while cout/cerr are rerouted into the log ring), then fall through
-// to the system dialog. PDBs sit next to the binaries, so Debug builds resolve fully.
+// Unhandled-SEH filter: print the faulting address + a symbolized stack (raw C stdio, so it
+// works while cout/cerr are rerouted), then fall through to the system dialog.
 static LONG WINAPI NukeCrashTrace(EXCEPTION_POINTERS* ep)
 {
 	static LONG once = 0;
@@ -63,9 +61,8 @@ static LONG WINAPI NukeCrashTrace(EXCEPTION_POINTERS* ep)
 	SymInitialize(proc, nullptr, TRUE);
 
 	CONTEXT ctx = *ep->ContextRecord;
-	// A CALL through a null/garbage pointer parks RIP outside every module — the walker
-	// dies on frame 0. The return address of that call is on top of the stack: resume
-	// from it so the report names the CALLER.
+	// RIP outside every module (call through a bad pointer) kills the walker on frame 0;
+	// resume from the return address on top of the stack so the caller is named.
 	if (ctx.Rip < 0x10000 && ctx.Rsp && !IsBadReadPtr((void*)ctx.Rsp, 8))
 	{
 		fprintf(stderr, "[CRASH] RIP invalid (call through a bad pointer) — resuming from the return address\n");
@@ -116,7 +113,6 @@ static LONG WINAPI NukeCrashTrace(EXCEPTION_POINTERS* ep)
 		++printed;
 	}
 	// Backstop when the walk yields nothing: raw-scan the stack for code addresses.
-	// Noisier than a real walk (stale frames show up) but always names the neighborhood.
 	if (printed < 2 && ep->ContextRecord->Rsp)
 	{
 		fprintf(stderr, "[CRASH] stack walk failed — raw scan:\n");
@@ -148,8 +144,8 @@ static LONG WINAPI NukeCrashTrace(EXCEPTION_POINTERS* ep)
 	return EXCEPTION_CONTINUE_SEARCH;   // let the system dialog / debugger take over
 }
 
-// CRT asserts (IM_ASSERT, _ASSERTE) abort without raising SEH — hook the report path and
-// print the SAME symbolized stack so an assert names its caller in the captured log.
+// CRT assert/error report hook: CRT asserts abort without raising SEH, so print a symbolized
+// stack here too. Returns FALSE to continue to the normal assert dialog.
 static int __cdecl NukeCrtReportHook(int reportType, char* message, int* /*returnValue*/)
 {
 	if (reportType != _CRT_ASSERT && reportType != _CRT_ERROR) return FALSE;
@@ -196,10 +192,6 @@ static int __cdecl NukeCrtReportHook(int reportType, char* message, int* /*retur
 	return FALSE;   // continue to the normal assert dialog
 }
 #endif  // _WIN32
-
-// OS integration (file dialog, .nuproj association) is declared neutrally in editor/editorui.h and
-// implemented per-platform in src/platform/platform_win32.cpp / platform_other.cpp — no platform API
-// is baked into this shared host code.
 
 //void CreateDemoObjects(){
 //    Atom* root = new Atom("root");
@@ -354,8 +346,8 @@ void InitEngine()
         edcamc->transform->position = { 0, 10, -10};
         edcamc->freeMode = true;
         //edcamc->Init(edcam);
-        edcam->layer = 31;   // "Editor" layer: the editor's own objects (see nuke::Layers)
-        edcamc->editorCamera = true;   // screen-space canvases render as editable world planes for it
+        edcam->layer = 31;   // "Editor" layer (see nuke::Layers)
+        edcamc->editorCamera = true;
         AppInstance::GetSingleton()->currentWorld->GetHierarchy().push_back(edcam);
         //edcamc->renderer->currentWorld = AppInstance::GetSingleton()->currentWorld;
     }
@@ -392,24 +384,16 @@ iRender* PreInitRender(){
     iRender * render = AppInstance::GetSingleton()->render;
 
 	cout << "[main]\t\t\t" << "Renderer is: " << render << endl;
-    // World rendering lives in the engine lib (World::Render), shared by editor
-    // and game. The renderer just invokes onRender each frame. The asset-preview
-    // world (inspector 3D preview) renders FIRST, so the live scene re-pushes its
-    // own lights/sky/TLAS afterwards and the viewport image stays untouched.
+    // Asset preview renders first so the live scene re-pushes its own lights/sky/TLAS after it.
     render->setOnRender([]{
         iRender* r = AppInstance::GetSingleton()->render;
-        // FIRST: apply a queued world switch at the frame boundary — tearing the world
-        // down mid-command-list (from a click handler) breaks D3D12 (render safety).
+        // Must be first: tearing the world down mid-command-list breaks D3D12.
         EditorUI::getSingleton()->ApplyPendingWorldOpen();
-        // Viewport draw mode (toolbar Solid/Wireframe) applies to the LIVE scene only —
-        // asset previews (inspector/editor 3D thumbnails) always render solid.
-        r->setWireframe(false);
+        r->setWireframe(false);   // previews always render solid, whatever the toolbar says
         EditorUI::getSingleton()->RenderAssetPreview(r);
         r->setWireframe(AppInstance::GetSingleton()->wireframe);
         AppInstance::GetSingleton()->currentWorld->Render(r);
     });
-    // UI is driven by the UI module (NukeUI); it is wired in main() after the
-    // renderer is initialized (NukeUI hooks the renderer's onGUI itself).
 
 	cout << "[main]\t\t\t" << "Preinit done... Next stage..." << endl;
 
@@ -434,12 +418,9 @@ int main(int argc, char** argv)
 	_CrtSetReportHook(NukeCrtReportHook);          // ...and on CRT asserts (IM_ASSERT)
 #endif
 #endif
-	// FIRST: route cout/cerr through the engine log ring — every boot line (module loads,
-	// service registrations, pak mounts) must land in the Console panel, not just stdout.
-	nuke::Log::CaptureStd();
+	nuke::Log::CaptureStd();   // must precede any boot logging so it lands in the Console panel
 
-	// Capture + absolutize a .nuproj / .nupak / .numod argument against the ORIGINAL cwd,
-	// BEFORE we change cwd below. Archives extract into an editable work tree (3.2).
+	// Absolutize the project/archive argument against the ORIGINAL cwd, before the cwd change below.
 	std::string projectArg, archiveArg;
 	if (argc > 1 && argv[1])
 	{
@@ -450,10 +431,8 @@ int main(int argc, char** argv)
 		else if (endsWith(".nupak") || endsWith(".numod")) archiveArg = bfs::absolute(bfs::path(a)).string();
 	}
 
-	// Always run with cwd = the editor's own directory. Engine resources (config, modules, shaders,
-	// fonts) are cwd-relative, so they must resolve from the install dir regardless of how we were
-	// launched — double-clicking a .nuproj otherwise sets cwd to the project folder, which breaks
-	// every dependency and spawns empty config/ + modules/ there.
+	// cwd = the editor's own directory: engine resources are cwd-relative, and a double-clicked
+	// .nuproj would otherwise set cwd to the project folder.
 	{
 		boost::system::error_code ec;
 		bfs::path exeDir = boost::dll::program_location(ec).parent_path();
@@ -464,9 +443,7 @@ int main(int argc, char** argv)
 	instance->setEditor(true);
 	cout << "[main]\t\t\t" << "NukeEngine starting... Welcome!" << endl;
 
-	// "Open with" / double-click an ARCHIVE (.nupak project / .numod mod): extract it into
-	// "<stem>_project" beside the pak — the editable work tree — and open THAT. The base
-	// pak is remembered (".nupak_base"), so Package Mod diffs against it / repacks a mod.
+	// Archive argument (.nupak / .numod): resolve it to a project folder and open that.
 	if (!archiveArg.empty())
 	{
 		cout << "[main]\t\t\t" << "Opening archive: " << archiveArg << endl;
@@ -481,8 +458,6 @@ int main(int argc, char** argv)
 		}
 	}
 
-	// "Open with" / double-click a .nuproj: point the editor at that project (absolute path; cwd stays
-	// the editor dir). The project folder = where the .nuproj lives; its content resolves from there.
 	if (!projectArg.empty())
 	{
 		cout << "[main]\t\t\t" << "Opening project: " << projectArg << endl;
@@ -490,10 +465,8 @@ int main(int argc, char** argv)
 	}
 	else
 	{
-		// No explicit project: the startup choice is a MACHINE preference (%APPDATA%) —
-		// "open the last project" (default) or "always ask". Nothing is auto-created:
-		// with no last project on disk the editor boots into the PROJECT HUB (recent
-		// list / open / create) and the picked project relaunches the editor on itself.
+		// No explicit project: startup choice comes from the machine preferences (%APPDATA%) —
+		// last project, or the project hub. Nothing is auto-created.
 		int startupMode = 0;
 		std::string lastProject;
 		if (const char* appdata = std::getenv("APPDATA"))
@@ -528,8 +501,7 @@ int main(int argc, char** argv)
 		}
 		else if (startupMode == 0 && bfs::exists(bfs::path("project/game.nuproj"), ec))
 		{
-			// Legacy layout: a root project/ from before the hub existed keeps opening
-			// (and gets recorded into the recent list once loaded).
+			// Legacy layout: a root project/ predating the hub still opens.
 			cout << "[main]\t\t\t" << "Opening legacy root project." << endl;
 		}
 		else
@@ -539,11 +511,8 @@ int main(int argc, char** argv)
 		}
 	}
 
-	// Two-phase startup, phase 1 (PHASE_BOOT). Discover the shared plugin pool first —
-	// metadata only, nothing activated — then enable the project's chosen render provider
-	// ("services.render" in the .nuproj, read early because the full LoadProject() runs
-	// after the window/UI exist). The renderer is an ordinary plugin now; the host gets
-	// its iRender through the service registry.
+	// Startup phase 1 (PHASE_BOOT): discover plugins (metadata only), then enable the project's
+	// render provider — the full LoadProject() only runs once the window/UI exist.
 	cout << "[main]\t\t\t" << "Discovering plugins..." << endl;
 	InitModules(instance);
 	NUKEModule* renderPlugin = FindServiceProvider("render",
@@ -565,12 +534,8 @@ int main(int argc, char** argv)
 	PreInitRender();
 	cout << "[main]\t\t\t" << "Preinited render is: " << render << endl;
     Config* config = Config::getSingleton();
-	// Optional: hide the OS console (window.showConsole=false). The in-app Console panel still
-	// captures stdout; a console shared with a launching terminal is left alone (guard inside).
 	Config::SetConsoleWindowVisible(config->window.showConsole);
-	// Perf: logToConsole=false stops the slow conhost echo. CaptureStd (above) tee's cout into
-	// the ring, so the in-app Console panel keeps showing everything — only the OS write drops.
-	nuke::Log::SetConsoleEcho(config->logToConsole);
+	nuke::Log::SetConsoleEcho(config->logToConsole);   // off = skip the slow conhost write; the ring still gets it
 
 	instance->config = config;
 	instance->keyboard = KeyBoard::getSingleton();
@@ -581,19 +546,16 @@ int main(int argc, char** argv)
 	cout << "[main]\t\t\t" << ">> Window size: w(" << config->window.w << "), h(" << config->window.h << ")" << endl;
     WindowDesc wd;
     wd.w = config->window.w; wd.h = config->window.h;
-    wd.title       = "NukeEngine Editor";   // fixed: the editor is always the editor (the game window
-                                            // titles itself from the project's name — not config)
+    wd.title       = "NukeEngine Editor";   // fixed; the game window titles itself from the project name
     wd.decorated   = config->window.decorated;
     wd.resizable   = config->window.resizable;
     wd.floating    = config->window.floating;
     wd.maximized   = config->window.maximized;
     wd.fullscreen  = config->window.fullscreen;
-    wd.transparent = false;   // per-pixel transparency is a GAME/runtime feature — the editor window is
-                              // always opaque (no DComp swap chain), whatever the config says
+    wd.transparent = false;   // editor window is always opaque; per-pixel transparency is runtime-only
     wd.opacity     = config->window.opacity;
-    // EDITOR backend comes from the engine-wide PREFERENCES (%APPDATA%), NOT the project
-    // config: config/main.json window.backend is the RUNTIME (Player) backend and ships
-    // with the packaged game. Editor default = Vulkan (native detachable windows).
+    // Editor backend comes from the preferences (%APPDATA%), not the project config —
+    // config/main.json window.backend is the runtime (Player) backend. Default = Vulkan.
     int editorBackend = 2; bool editorRT = true;
     if (const char* appdata = std::getenv("APPDATA"))
     {
@@ -615,24 +577,19 @@ int main(int argc, char** argv)
     }
     wd.backend     = editorBackend;
     wd.rayTracing  = editorRT;
-    wd.gpuValidation = config->gpuValidation;   // Debug GPU validation opt-in (config, works for double-click)
-    LoadBuiltinShaders(render, "shaders");   // engine loads built-in shaders + feeds the renderer
+    wd.gpuValidation = config->gpuValidation;
+    LoadBuiltinShaders(render, "shaders");   // engine-side built-in shaders -> renderer
     render->init(wd);
-    render->setVSync(config->window.vsync);   // honour config vsync (Game.SetVSync toggles it live)
+    render->setVSync(config->window.vsync);
     cout << "[main]\t\t\t" << "> Render: " << render << endl;
 
-	// Bring up the UI module (ImGui) — it renders through the renderer's neutral
-	// seam, so this works regardless of which renderer module is loaded.
-	// VULKAN: native imgui multi-viewport — any panel/editor dragged out becomes a real
-	// per-window swapchain OS window (the Vulkan WSI has none of the DXGI races that
-	// forced the single-window model + GDI hosts on D3D, which remain the fallback).
+	// Native imgui multi-viewport only on Vulkan; D3D falls back to GDI-hosted windows (DXGI races).
 	NukeUI::EnableNativeViewports(editorBackend == 2);
 	NukeUI::Init(render);
 
-	nuke::InstallDesktopInput(render);   // gameplay input: keyboard/mouse -> Input controls (chains the UI callbacks)
+	nuke::InstallDesktopInput(render);   // chains the UI callbacks
 
-	// .nuinput = a first-class, text-editable input map asset. New-menu template = a ready Gameplay context
-	// (WASD -> Move, mouse -> Look, Space -> Jump, LMB -> Fire). Any .nuinput in content auto-loads (ResDB).
+	// New-menu template for the .nuinput input map asset.
 	{
 		nuke::AssetCreator ic;
 		ic.label = "Input Map"; ic.ext = ".nuinput"; ic.baseName = "Input"; ic.category = "Input";
@@ -655,24 +612,17 @@ int main(int argc, char** argv)
 		nuke::RegisterAssetCreator(ic);
 	}
 
-	// ENGINE atom templates for the "+" create menu (interface/AtomCreators.h). Modules
-	// register their own from OnLoad — same registry, no editor linkage.
+	// Engine atom templates for the "+" create menu; modules register their own from OnLoad.
 	nuke::RegisterAtomCreator({ "Effects", "Wind Zone", "\xee\x86\xb0" /* ICON_LC_WIND */, { "WindZone" } });
-	// ENGINE component icons for the viewport overlay (interface/ComponentIcons.h) — same
-	// registry the modules use; the viewport draws only from it, zero per-type hardcode.
-	// (Water creators/icons live in the NukeWater MODULE now — UE-style water plugin.)
+	// Engine component icons for the viewport overlay.
 	nuke::RegisterComponentIcon({ "WindZone", "\xee\x86\xb0" /* ICON_LC_WIND */, { 0.63f, 0.9f, 0.78f, 0.92f } });
 
-	// Workers BEFORE SetUp: the project's heavy tail (content scan, shaders, the world) now
-	// loads in the background (EditorUI::StartBootLoad), so the pool must already exist.
-	nuke::Jobs::Init(Config::getSingleton()->jobWorkers, Config::getSingleton()->jobPinCores);   // worker pool (2.4)
+	// Workers before SetUp: its heavy tail loads in the background (EditorUI::StartBootLoad).
+	nuke::Jobs::Init(Config::getSingleton()->jobWorkers, Config::getSingleton()->jobPinCores);
 	editorinit();                       // SetUp: loads the project + activates its chosen plugins
 	instance->StartFixedThread();       // fixed-frequency update thread (idles until PIE plays)
-	NukeUI::AddDrawCallback(editorDraw); // editor draws via the UI module each frame
+	NukeUI::AddDrawCallback(editorDraw);
 	cout << "[main]\t\t\t" << "Editor UI initialized." << endl;
-
-    // The project's default world is opened from content by editorinit() (SetUp) — after the
-    // project's plugins are active, so components deserialize correctly. Nothing to restore here.
 
 	cout << "[main]\t\t\t" << "All done. Starting render loop." << endl;
 
@@ -681,11 +631,9 @@ int main(int argc, char** argv)
     render->loop();
 
     cout << "[main]\t\t\t" << "shit down..." << endl;
-    // Persist editor state FIRST — before any teardown step that can wedge or die (thread
-    // joins, module unloads): the user's camera/selection/panels must survive a bad exit.
-    EditorUI::getSingleton()->SaveEditorState();
+    EditorUI::getSingleton()->SaveEditorState();   // first: any later teardown step may wedge or die
     AppInstance::GetSingleton()->StopFixedThread();
     nuke::Jobs::Shutdown();
-    Unload();   // runtime plugins first, then the render provider (its Shutdown deinits the renderer)
+    Unload();   // runtime plugins first, then the render provider
     return 0;
 }

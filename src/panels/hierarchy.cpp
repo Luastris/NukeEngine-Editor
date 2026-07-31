@@ -1,6 +1,6 @@
 // hierarchy panel — tree, icons, search, drag&drop (reparent + asset instantiate), focus. EditorUI.
 #include <editor/editorui.h>
-#include "nukeui.h"   // DocWindow: detachable panels (task #137)
+#include "nukeui.h"   // DocPanel: detachable panels
 #include <API/Model/Light.h>
 #include <cmath>
 
@@ -55,13 +55,10 @@ void EditorUI::FocusSelected()
 	double half = (double)editorCam->fov * 0.5 * 0.01745329252;
 	double dist = radius / std::max(0.05, std::tan(half)) + radius * 2.0;
 	Transform* c = editorCam->transform;
-	camFocusTarget = target - c->direction() * dist;   // keep orientation, look at the target
-	camFocusing    = true;                              // smoothly lerp there (see winRender)
+	camFocusTarget = target - c->direction() * dist;   // keep orientation
+	camFocusing    = true;
 }
 
-// A thin "insert before" zone overlaid on the TOP EDGE of the row just drawn. Only appears while an
-// atom is being dragged. It restores the cursor afterwards, so it adds NO layout height — the tree
-// stays as compact as normal; only the hit region + the orange insertion line sit on the edge.
 void EditorUI::HierGap(Atom* before)
 {
 	const ImGuiPayload* drag = ImGui::GetDragDropPayload();
@@ -95,10 +92,8 @@ void EditorUI::DrawAtomNode(Atom* atom)
 	if (atom->children.empty())            fl |= ImGuiTreeNodeFlags_Leaf;
 	if (searching)                       ImGui::SetNextItemOpen(true);   // reveal matches
 
-	// Non-native atoms carry their MOD's badge (world-merge provenance).
 	std::string rowLabel = std::string(AtomIcon(atom)) + " " + atom->GetName();
 	if (!atom->modOrigin.empty()) rowLabel += "  [" + atom->modOrigin + "]";
-	// Disabled atoms (own flag or any ancestor's) draw dimmed — same visual as disabled widgets.
 	bool dim = !atom->enabled;
 	for (Atom* p = atom->parent; !dim && p; p = p->parent) dim = !p->enabled;
 	if (dim) ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
@@ -106,11 +101,8 @@ void EditorUI::DrawAtomNode(Atom* atom)
 	if (dim) ImGui::PopStyleColor();
 	if (!atom->modOrigin.empty() && ImGui::IsItemHovered())
 		ImGui::SetTooltip("Added by mod: %s", atom->modOrigin.c_str());
-	// Select on mouse RELEASE, not press: selecting on press instantly switches the inspector to
-	// the grabbed atom, which kills a drag&drop into another component's field (e.g. dragging a
-	// camera into a Canvas's Camera slot) before it can start. A release after a real drag is
-	// consumed by the drag&drop system, so plain clicks still select as before. An expand-arrow
-	// click toggles on PRESS — remember it so its release doesn't select the row.
+	// Select on mouse RELEASE, not press: selecting on press switches the inspector mid-drag and kills
+	// drag&drop into another component's field. The expand arrow toggles on PRESS — suppress its release.
 	static bool s_toggleSuppress = false;
 	if (ImGui::IsItemToggledOpen()) s_toggleSuppress = true;
 	if (ImGui::IsItemHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Left)
@@ -120,7 +112,6 @@ void EditorUI::DrawAtomNode(Atom* atom)
 		s_toggleSuppress = false;   // cleared once the click fully settles
 	if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) { app->selectedInHieararchy = atom; FocusSelected(); }
 
-	// Right-click: select + the atom clipboard menu (same ops as the Edit menu / chords).
 	if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right))
 		app->selectedInHieararchy = atom;
 	if (ImGui::BeginPopupContextItem("##atomctx"))
@@ -130,13 +121,12 @@ void EditorUI::DrawAtomNode(Atom* atom)
 		if (ImGui::MenuItem(ICON_LC_CLIPBOARD_PASTE " Paste", nullptr, false, AtomClipboardAvailable())) PasteAtom();
 		if (ImGui::MenuItem(ICON_LC_COPY_PLUS " Duplicate"))  DuplicateSelectedAtom();
 		ImGui::Separator();
-		// Whole-atom switch (mirrors the inspector checkbox); undoable by id — ApplyAtomState
-		// re-creates atoms, so closures must never capture the pointer.
+		// Undo captures the ID, never the pointer: ApplyAtomState re-creates atoms.
 		if (ImGui::MenuItem("Enabled", nullptr, atom->enabled))
 		{
 			const long aid = atom->id.id; const bool nv = !atom->enabled;
 			atom->enabled = nv;
-			editing = false; editAtomId = 0;   // this is its own command — suppress the auto edit-detector
+			editing = false; editAtomId = 0;   // own command: suppress the auto edit-detector
 			PushUndo(nv ? "Enable atom" : "Disable atom",
 				[aid, nv]{ if (Atom* a = AppInstance::GetSingleton()->currentWorld->GetById(aid)) a->enabled = !nv; },
 				[aid, nv]{ if (Atom* a = AppInstance::GetSingleton()->currentWorld->GetById(aid)) a->enabled = nv; });
@@ -171,7 +161,7 @@ void EditorUI::DrawAtomNode(Atom* atom)
 		ImGui::EndDragDropTarget();
 	}
 
-	HierGap(atom);   // thin "insert before `atom`" zone overlaid on this row's top edge (drag only)
+	HierGap(atom);
 
 	if (open)
 	{
@@ -186,16 +176,14 @@ void EditorUI::winHierarchy()
 	if (!win->hierarchy) return;
 	NukeUI::DocPanel("panel:hierarchy", "Hierarchy", &win->hierarchy, window_flags, 300, 620, [this]()
 	{
-	// Boot load in progress: the world is still streaming in — locked placeholder (status bar
-	// carries the step-by-step report).
-	if (bootLoading) { ImGui::TextDisabled("Loading project..."); return; }
+	if (bootLoading) { ImGui::TextDisabled("Loading project..."); return; }   // world still streaming in
 	AppInstance* app = AppInstance::GetSingleton();
 
 	ImGui::SetNextItemWidth(-1);
 	ImGui::InputTextWithHint("##hsearch", ICON_LC_SEARCH " Search (atom or component)", hierSearch, sizeof(hierSearch));
 	ImGui::Separator();
 
-	// Editor camera pinned at the top, separate from the scene tree (not draggable/reparentable).
+	// Editor camera pinned at the top, outside the tree: not draggable/reparentable.
 	if (Atom* cam = app->currentWorld->Get("Editor Camera"))
 	{
 		bool sel = (app->selectedInHieararchy == cam);
@@ -204,12 +192,11 @@ void EditorUI::winHierarchy()
 		ImGui::Separator();
 	}
 
-	// The scene tree (excludes the editor camera).
 	for (Atom* atom : app->currentWorld->GetHierarchy())
 		if (atom && atom->GetName() != "Editor Camera")
 			DrawAtomNode(atom);
 
-	// Empty area below: drop target for re-parenting to root / instantiating an asset at root.
+	// Empty area below = drop target for root.
 	ImVec2 rest = ImGui::GetContentRegionAvail();
 	if (rest.y < 24.0f) rest.y = 24.0f;
 	ImGui::InvisibleButton("##hroot", rest);
@@ -226,12 +213,10 @@ void EditorUI::winHierarchy()
 		ImGui::EndDragDropTarget();
 	}
 
-	// F frames the selected atom (when the hierarchy is focused; the viewport handles its own F).
 	if (ImGui::IsWindowFocused() && !ImGui::GetIO().WantTextInput && ImGui::IsKeyPressed(ImGuiKey_F))
 		FocusSelected();
 
-	// Delete (or Shift+Delete) removes the selected atom while the hierarchy is focused. Behaviour is
-	// per-active-window; the chords come from the shared pool (rebindable). Atom deletes are undoable.
+	// Chords act only while this panel is focused; bindings come from the shared rebindable pool.
 	if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) && !ImGui::GetIO().WantTextInput)
 	{
 		nuke::Hotkeys* hk = nuke::Hotkeys::Get();
@@ -240,7 +225,6 @@ void EditorUI::winHierarchy()
 		if ((d  && d->bound  && ImGui::IsKeyChordPressed((ImGuiKeyChord)d->chord)) ||
 		    (df && df->bound && ImGui::IsKeyChordPressed((ImGuiKeyChord)df->chord)))
 			DeleteSelectedAtom();
-		// Atom clipboard — the same generic chords the browser uses for files.
 		auto chord = [&](const char* id) { nuke::Hotkey* h = hk->Find(id); return h && h->bound && ImGui::IsKeyChordPressed((ImGuiKeyChord)h->chord); };
 		if (chord("editor.copy"))      CopySelectedAtom();
 		if (chord("editor.cut"))       CutSelectedAtom();
@@ -248,22 +232,17 @@ void EditorUI::winHierarchy()
 		if (chord("editor.duplicate")) DuplicateSelectedAtom();
 	}
 
-	// Apply deferred DnD now that the whole tree is drawn (mutating the lists mid-iteration corrupts it).
+	// Deferred DnD applies only after the tree is drawn: mutating the lists mid-iteration corrupts it.
 	if (dndPending && dndAtom)
 	{
-		// Capture the old placement + a pre-move snapshot first so the move is undoable: the undo
-		// JSON must carry the OLD-parent-relative local transform (a post-move snapshot would restore
-		// the new-parent locals under the old parent and shift the world pose on Ctrl+Z).
+		// Snapshot BEFORE the move: undo needs the old-parent-relative transform.
 		long oldParent = dndAtom->parent ? dndAtom->parent->id.id : 0;
 		int  oldIndex  = 0;
 		{ auto& lst = dndAtom->parent ? dndAtom->parent->children : app->currentWorld->GetHierarchy();
 		  int i = 0; for (Atom* s : lst) { if (s == dndAtom) { oldIndex = i; break; } ++i; } }
 		Atom* moved = dndAtom;
 		std::string beforeJson = SaveAtomToString(moved);
-		// Keep the atom's WORLD pose across any parent change (standard editor behaviour — the object
-		// stays put on screen instead of jumping into the new parent's local space). Gap-drops change
-		// the parent too (a gap between roots unparents), so both paths share the capture; a pure
-		// same-parent reorder leaves the local floats untouched.
+		// Keep the WORLD pose across any parent change (gap-drops reparent too).
 		Atom* wasParent = moved->parent;
 		Transform& mt = moved->GetTransform();
 		Vector3 wp = mt.globalPosition(); Quaternion wr = mt.globalRotation(); Vector3 ws = mt.globalScale();
@@ -273,7 +252,7 @@ void EditorUI::winHierarchy()
 		RecordReparent(moved, oldParent, oldIndex, beforeJson);
 	}
 	dndPending = false; dndAtom = dndBefore = dndParent = nullptr;
-	// Apply a deferred component move (an inspector component header dropped on a row).
+	// Deferred component move (inspector header dropped on a row).
 	if (dndCompDst)
 	{
 		Atom* srcA = app->currentWorld->GetById(dndCompAtomId);

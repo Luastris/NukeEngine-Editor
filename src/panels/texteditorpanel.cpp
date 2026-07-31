@@ -1,16 +1,11 @@
-// Text editor panel (roadmap 2.2) — EditorUI method definitions (translation unit).
-// Tabs of open text files on the vendored ImGuiColorTextEdit; the syntax language comes
-// from the file-type descriptor (0.6, AssetCreatorForExt), with a fallback by extension.
-// Saving writes the file to disk — shaders/materials then hot-reload through the editor's
-// existing mtime watcher (ResDB::HotReloadShaders/Assets), no extra plumbing needed.
+// Text editor panel: open text files on the vendored ImGuiColorTextEdit, one detachable window each.
 #include <editor/editorui.h>
 #include "interface/AssetCreators.h"
-#include "nukeui.h"   // DocWindow: detachable document windows (task #136)
+#include "nukeui.h"   // DocWindow: detachable document windows
 #include "../textedit/TextEditor.h"
 #include <boost/filesystem/fstream.hpp>
 
-// Syntax language for a file: the registered descriptor's syntaxLanguage first, then a
-// built-in extension fallback (shaders/json/etc. are editor-created, not plugin-registered).
+// Syntax language for a file extension: the registered descriptor first, then a built-in fallback.
 static TextEditor::LanguageDefinitionId LangForFile(const std::string& ext)
 {
 	std::string lang;
@@ -36,8 +31,7 @@ static TextEditor::LanguageDefinitionId LangForFile(const std::string& ext)
 	return TextEditor::LanguageDefinitionId::None;
 }
 
-// A file the text editor may open: the descriptor says textEditable, or it's a known
-// text extension (shader sources and configs are editor-created — no descriptor).
+// True if the text editor may open this extension: descriptor textEditable, or a known text extension.
 bool EditorUI::IsTextFile(const std::string& ext)
 {
 	if (const nuke::AssetCreator* ac = nuke::AssetCreatorForExt(ext))
@@ -45,7 +39,6 @@ bool EditorUI::IsTextFile(const std::string& ext)
 	static const char* kText[] = { ".lua", ".hlsl", ".fx", ".glsl", ".vert", ".frag",
 	                               ".json", ".txt", ".md", ".ini", ".cfg", ".nuproj",
 	                               ".nubonemap",   // retarget map = plain JSON
-	                               // C++ sources (the browser's source root, 6.0)
 	                               ".cpp", ".h", ".hpp", ".c", ".cc", ".inl", ".inc", ".cmake" };
 	for (const char* t : kText) if (ext == t) return true;
 	return false;
@@ -53,7 +46,6 @@ bool EditorUI::IsTextFile(const std::string& ext)
 
 void EditorUI::OpenTextFile(const std::string& path, int line)
 {
-	// Already open: focus its tab (and jump if a line was asked for).
 	for (TextDoc& d : textDocs)
 		if (d.path == path)
 		{
@@ -87,15 +79,12 @@ void EditorUI::SaveTextDoc(TextDoc& d)
 	out.write(text.data(), (std::streamsize)text.size());
 	out.close();
 	d.savedUndoIndex = d.ed->GetUndoIndex();
-	// Shaders/materials/textures reload via the existing mtime watcher (Draw()'s
-	// HotReloadShaders/HotReloadAssets); Lua re-runs on the next Play.
+	// Shaders/materials reload through Draw()'s mtime watcher; Lua re-runs on the next Play.
 }
 
 void EditorUI::winTextEditor()
 {
 	textFocused = -1;   // recomputed below; EditorUI::Undo/Redo route by it
-	// EACH open file is its OWN window (floating by default; dockable anywhere like any
-	// panel). The window id is keyed by the file path, so re-opening a file focuses it.
 	for (int i = 0; i < (int)textDocs.size(); ++i)
 	{
 		TextDoc& d = textDocs[i];
@@ -105,10 +94,8 @@ void EditorUI::winTextEditor()
 		std::string title = std::string(ICON_LC_FILE_PEN " ") + bfs::path(d.path).filename().string()
 		                  + "###" + docId;   // stable identity: the dirty flag changes, the id doesn't
 		ImGuiWindowFlags wf = window_flags | (dirty ? ImGuiWindowFlags_UnsavedDocument : 0);
-		// DETACHABLE document window (NukeUI): docked = a normal imgui window, detached =
-		// its own OS window; tear-off/dock-back by dragging like every asset editor. The
-		// content lambda looks the doc up BY PATH — it may run in the host pass, and the
-		// vector can shift under it.
+		// The content lambda looks the doc up BY PATH: it may run in the host pass, where the
+		// textDocs vector can shift under it.
 		const std::string keyPath = d.path;
 		NukeUI::DocWindow(docId.c_str(), title.c_str(), &d.open, wf, 720, 520, [this, keyPath]()
 		{
@@ -124,7 +111,6 @@ void EditorUI::winTextEditor()
 				const bool focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
 				if (focused) textFocused = k;   // the widget owns Ctrl+Z; scene undo must stay away
 				dd.ed->Render("##text", focused, ImGui::GetContentRegionAvail());
-				// Ctrl+S saves this document while its window is focused.
 				if (focused && ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S, false))
 					SaveTextDoc(dd);
 				return;
@@ -137,7 +123,7 @@ void EditorUI::winTextEditor()
 		}
 	}
 
-	// Discard-changes modal for a closing dirty document (one at a time, global).
+	// Discard-changes modal for a closing dirty document; one at a time, global.
 	if (textCloseConfirm >= 0) ImGui::OpenPopup("Unsaved changes##textedit");
 	if (ImGui::BeginPopupModal("Unsaved changes##textedit", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
 	{
@@ -156,7 +142,7 @@ void EditorUI::winTextEditor()
 		ImGui::EndPopup();
 	}
 
-	// Drop closed documents.
+	// Drop closed documents AFTER drawing: erasing mid-iteration would invalidate the loop above.
 	for (int i = (int)textDocs.size() - 1; i >= 0; --i)
 		if (!textDocs[i].open)
 			textDocs.erase(textDocs.begin() + i);

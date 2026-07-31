@@ -1,22 +1,19 @@
-// project panel — EditorUI method definitions (translation unit).
+// Project panel: .nuproj load/save, disk sync, plugin activation and project switching.
 #include <editor/editorui.h>
-#include <API/Model/PostProcess.h>   // serialize the editor camera's post-effect chain (RTX/rtreflect)
+#include <API/Model/PostProcess.h>
 #include <API/Model/Layers.h>        // render-layer slot names persist in the .nuproj
-#include <iterator>   // istreambuf_iterator (read world file for disk-sync)
+#include <iterator>
 
-// The project manifest (project/game.nuproj): content dir, startup world, plugin load list.
-// Projects have a file (like .sln/.uproject); this is ours, extension .nuproj. The plugin
-// pool is shared (modules/); "plugins" is THIS project's chosen load list (dll names).
+// Point the editor at a .nuproj manifest, deriving the project directory from it.
 void EditorUI::SetProjectFile(const std::string& path)
 {
-	bfs::path p = bfs::absolute(bfs::path(path));   // absolute, so it stays valid after cwd = editor dir
+	bfs::path p = bfs::absolute(bfs::path(path));   // absolute: cwd later becomes the editor dir
 	projectFile = p.string();
 	projectDir  = p.has_parent_path() ? p.parent_path().string() : std::string(".");
 }
 
-// Phase-1 boot helper: read a single service-provider choice from the .nuproj without
-// running the full LoadProject() (which needs the render/UI up). Tolerant of a missing
-// or invalid file — "" lets the loader fall back to the first discovered provider.
+// Read one service-provider choice from the .nuproj during boot, before LoadProject() can run.
+// Returns "" for a missing/invalid file, which makes the loader pick the first discovered provider.
 std::string EditorUI::EarlyProjectService(const std::string& service)
 {
 	bfs::ifstream f{bfs::path(projectFile)};
@@ -26,6 +23,7 @@ std::string EditorUI::EarlyProjectService(const std::string& service)
 	return j["services"].value(service, std::string());
 }
 
+// Write the .nuproj manifest.
 void EditorUI::SaveProject()
 {
 	boost::system::error_code ec; bfs::create_directories(projectDir, ec);
@@ -33,41 +31,37 @@ void EditorUI::SaveProject()
 	j["name"]         = projectName;
 	j["engine"]       = "NukeEngine";
 	j["content"]      = "content";          // relative to the project dir
-	// Packaging (3.2): project pak = immutable release artifact (zstd max by default);
-	// mod paks = editable overlays (store by default). 0 store / 1 zlib / 2 zstd.
+	// Pak compression method: 0 store / 1 zlib / 2 zstd.
 	j["pakMethod"] = pakMethod; j["pakLevel"] = pakLevel;
 	j["modMethod"] = modMethod; j["modLevel"] = modLevel;
-	j["gameIcon"]  = gameIcon;              // .ico stamped onto the shipped exe (dist)
+	j["gameIcon"]  = gameIcon;              // .ico stamped onto the shipped exe
 	j["distPath"]  = distPath;              // build output ("" = <project>/dist)
-	j["modName"]   = modName;               // last packaged mod name (same name = update that mod)
-	j["startupWorld"] = startupWorld;        // the default world the game loads
-	j["unlinkOnDelete"] = unlinkOnDelete;   // break refs to a deleted resource (vs leave dangling)
+	j["modName"]   = modName;               // last packaged mod name
+	j["startupWorld"] = startupWorld;
+	j["unlinkOnDelete"] = unlinkOnDelete;   // break refs to a deleted resource vs leave dangling
 	j["reloadCleanMode"] = reloadCleanMode; // disk changed, editor clean: 0=ask,1=auto-reload
 	j["conflictMode"]    = conflictMode;    // disk changed, editor dirty: 0=ask,1=reload,2=overwrite,3=merge
-	j["msaa"]            = msaaSamples;      // anti-aliasing sample count (1/2/4/8)
-	j["hdr"]             = hdrEnabled;       // HDR pipeline on/off
+	j["msaa"]            = msaaSamples;      // 1/2/4/8
+	j["hdr"]             = hdrEnabled;
 	j["hdrPaperWhite"]   = hdrPaperWhite;    // HDR10 diffuse-white nits
 	j["hdrPeak"]         = hdrPeak;          // HDR10 peak nits
-	j["plugins"]      = enabledPlugins;     // which pooled plugins this project loads
-	// Service provider choices (service -> dll). For hot-swappable services the LIVE
-	// provider is the truth; for PHASE_BOOT services (render) a persisted choice may be a
-	// pending restart-switch from the plugin window — never overwrite it with the live one.
+	j["plugins"]      = enabledPlugins;
+	// Service choices (service -> dll). For PHASE_BOOT services a persisted choice may be a
+	// pending restart-switch, so it must never be overwritten with the live provider.
 	for (auto& m : nuke::GetModules())
 	{
 		if (!m || !m->loaded || !*m->provides()) continue;
-		if (m->sharedService()) continue;   // shared services (scripting) load via the plugin list — no single choice
+		if (m->sharedService()) continue;   // shared services load via the plugin list, no single choice
 		if (m->phase() == nuke::PHASE_BOOT && serviceChoices.count(m->provides())) continue;
 		serviceChoices[m->provides()] = m->moduleFile;
 	}
 	j["services"] = serviceChoices;
-	nlohmann::json hk = nlohmann::json::object();   // hotkey bindings (id -> chord), saved with the project
+	nlohmann::json hk = nlohmann::json::object();   // hotkey bindings: id -> chord
 	for (auto& kv : nuke::Hotkeys::Get()->ExportBindings()) hk[kv.first] = kv.second;
 	j["hotkeys"] = hk;
-	j["layers"] = nuke::Layers::All();   // render-layer slot names (32; see nuke::Layers)
-	// Serialize BEFORE opening the file: the ofstream truncates on open, so a dump() throw
-	// used to leave a ZERO-BYTE .nuproj (the project silently wiped — seen in the wild).
-	// error_handler replace: a stray non-UTF-8 byte (e.g. an ANSI path) becomes U+FFFD in the
-	// saved file instead of killing the editor mid-save.
+	j["layers"] = nuke::Layers::All();   // render-layer slot names
+	// Serialize before opening the file: ofstream truncates on open, so a dump() throw would
+	// leave a zero-byte .nuproj. `replace` turns stray non-UTF-8 bytes into U+FFFD.
 	std::string out;
 	try { out = j.dump(2, ' ', false, nlohmann::json::error_handler_t::replace); }
 	catch (const std::exception& e)
@@ -78,11 +72,12 @@ void EditorUI::SaveProject()
 	bfs::ofstream f{bfs::path(projectFile)};
 	if (f) f << out;
 }
+// Read the .nuproj manifest into the editor state, applying render settings as it goes.
 void EditorUI::LoadProject()
 {
 	boost::system::error_code ec; bfs::create_directories(projectDir, ec);
 	bfs::ifstream f{bfs::path(projectFile)};
-	if (!f) { SaveProject(); return; }   // first run — create a default .nuproj
+	if (!f) { SaveProject(); return; }   // first run: create a default .nuproj
 	nlohmann::json j = nlohmann::json::parse(f, nullptr, false);
 	if (j.is_discarded()) return;
 	startupWorld   = j.value("startupWorld", startupWorld);
@@ -95,8 +90,7 @@ void EditorUI::LoadProject()
 	gameIcon  = j.value("gameIcon", std::string());
 	distPath  = j.value("distPath", std::string());
 	modName   = j.value("modName", std::string());
-	// Opened from an archive? The extractor left a base-pak pointer (Package Mod diffs
-	// against it / repacks an editable .numod in place).
+	// If the project came from an archive, the extractor left a base-pak pointer for Package Mod.
 	{
 		bfs::ifstream bm{bfs::path(projectDir + "/.nupak_base")};
 		if (bm) std::getline(bm, basePakPath);
@@ -122,14 +116,14 @@ void EditorUI::LoadProject()
 		pluginListLoaded = true;
 		for (auto& p : j["plugins"]) enabledPlugins.push_back(p.get<std::string>());
 	}
-	// Render-layer slot names (project data -> the engine's Layers registry).
+	// Render-layer slot names -> the engine's Layers registry.
 	if (j.contains("layers") && j["layers"].is_array())
 	{
 		std::vector<std::string> names;
 		for (auto& n : j["layers"]) names.push_back(n.is_string() ? n.get<std::string>() : std::string());
 		nuke::Layers::SetAll(names);
 	}
-	// Hotkey bindings are applied AFTER plugins load (so plugin-registered hotkeys exist) — stash them.
+	// Hotkeys are stashed here and applied after plugins load, so plugin-registered ids exist.
 	pendingHotkeyBinds.clear();
 	if (j.contains("hotkeys") && j["hotkeys"].is_object())
 		for (auto& kv : j["hotkeys"].items())
@@ -149,26 +143,28 @@ void EditorUI::UpdateWindowTitle()
 	app->render->setWindowTitle(title.c_str());
 }
 
-// --- disk <-> editor world sync ---------------------------------------------------------------
+// --- disk <-> editor world sync ---------------------------------------------
+
 static std::string ReadFileText(const std::string& path)
 {
 	bfs::ifstream f{bfs::path(path)};
 	if (!f) return std::string();
 	return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
 }
-// Canonical JSON (parse + re-dump) so formatting/indent differences don't read as "changed".
+// Canonical JSON so formatting/indent differences don't read as "changed".
 static std::string Canon(const std::string& s)
 {
 	nlohmann::json j = nlohmann::json::parse(s, nullptr, false);
 	return j.is_discarded() ? s : j.dump();
 }
 
+// Re-baseline the open world against disk: content snapshot, dirty flag, mtime.
 void EditorUI::SyncWorldBaseline()
 {
 	AppInstance* app = AppInstance::GetSingleton();
-	worldOnDisk = app->currentWorld->SaveToString();   // kept for the merge/conflict flows (once per open/save)
+	worldOnDisk = app->currentWorld->SaveToString();   // baseline for the merge/conflict flows
 	worldDirty  = false;
-	savedWorldSerial = WorldEditSerial();              // dirty tracking = undo cursor vs this
+	savedWorldSerial = WorldEditSerial();              // dirty = undo cursor vs this
 	worldMtime  = 0;
 	boost::system::error_code ec;
 	if (!app->currentWorldPath.empty())
@@ -179,17 +175,15 @@ void EditorUI::SyncWorldBaseline()
 	UpdateWindowTitle();
 }
 
+// Update the dirty flag from the undo cursor. Deliberately serializes nothing: diffing the
+// world JSON per frame is far too slow on large worlds, and every edit path goes through PushUndo.
 void EditorUI::TrackDirty()
 {
-	// Dirty = the undo cursor moved since the last save/load. NOTHING is serialized
-	// here: the old implementation diffed the WHOLE world JSON every 15 frames, which
-	// froze the editor on big scenes (a 200+-atom prefab = tens of ms, 4x per second —
-	// the "editor stutters, Player is fine" asymmetry). Every edit path pushes through
-	// PushUndo, so the cursor IS the edit state.
 	const bool d = WorldEditSerial() != savedWorldSerial;
 	if (d != worldDirty) { worldDirty = d; UpdateWindowTitle(); }
 }
 
+// Replace the open world with the given JSON from disk and reset undo/dirty state.
 void EditorUI::ReloadWorld(const std::string& diskJson)
 {
 	AppInstance* app = AppInstance::GetSingleton();
@@ -198,10 +192,11 @@ void EditorUI::ReloadWorld(const std::string& diskJson)
 	worldOnDisk = Canon(diskJson);
 	worldDirty  = false;
 	ResetUndo();
-	savedWorldSerial = WorldEditSerial();   // = 0 (stacks just cleared)
+	savedWorldSerial = WorldEditSerial();   // 0: the stacks were just cleared
 	UpdateWindowTitle();
 }
 
+// Save the editor's world over the file on disk and re-baseline.
 void EditorUI::OverwriteWorld()
 {
 	AppInstance* app = AppInstance::GetSingleton();
@@ -210,10 +205,10 @@ void EditorUI::OverwriteWorld()
 	SyncWorldBaseline();
 }
 
+// Detect an external edit of the open world and route it to reload/overwrite/merge.
+// Checks only on focus-gain, so a file still being written by another program never triggers.
 void EditorUI::TrackExternalChange()
 {
-	// Re-check ONLY when the editor window regains focus — so a file mid-write (while you're in the
-	// other program) never triggers; by the time you tab back it's done. Cross-platform via GLFW focus.
 	AppInstance* app = AppInstance::GetSingleton();
 	bool focused = !app->render || app->render->isWindowFocused();
 	bool gained  = focused && !wasWindowFocused;
@@ -226,13 +221,12 @@ void EditorUI::TrackExternalChange()
 	if (!bfs::exists(full, ec)) return;
 	long long mt = (long long)bfs::last_write_time(full, ec);
 	if (ec || mt == worldMtime) return;                 // unchanged since we last looked
-	// Stability gate: if the file doesn't parse as valid JSON it's still being written / locked —
-	// leave worldMtime untouched so we retry on the next focus-gain.
+	// Unparseable = still being written: leave worldMtime alone so the next focus-gain retries.
 	nlohmann::json pj = nlohmann::json::parse(ReadFileText(full), nullptr, false);
 	if (pj.is_discarded()) return;
 	std::string disk = pj.dump();
 	worldMtime = mt;                                    // record so we don't re-trigger
-	if (disk == worldOnDisk) return;                   // same content (e.g. our own save)
+	if (disk == worldOnDisk) return;                   // same content, e.g. our own save
 	bool dirty = app->currentWorld->SaveToString() != worldOnDisk;
 	if (!dirty)
 	{
@@ -245,12 +239,13 @@ void EditorUI::TrackExternalChange()
 		{
 			case 1: ReloadWorld(disk); break;                                  // ignore editor, reload from disk
 			case 2: OverwriteWorld();  break;                                  // ignore disk, overwrite from editor
-			case 3: OpenMerge(app->currentWorld->SaveToString(), disk); break; // merge/resolve window
+			case 3: OpenMerge(app->currentWorld->SaveToString(), disk); break; // merge window
 			default: pendingDisk = disk; openConflictPopup = true; break;      // 0 = ask
 		}
 	}
 }
 
+// Modal for "changed on disk, editor clean".
 void EditorUI::DrawReloadPopup()
 {
 	if (openReloadPopup) { ImGui::OpenPopup("Changed on disk##reload"); openReloadPopup = false; }
@@ -261,11 +256,12 @@ void EditorUI::DrawReloadPopup()
 		ImGui::Separator();
 		if (ImGui::Button("Reload")) { ReloadWorld(pendingDisk); pendingDisk.clear(); ImGui::CloseCurrentPopup(); }
 		ImGui::SameLine();
-		if (ImGui::Button("Ignore")) { pendingDisk.clear(); ImGui::CloseCurrentPopup(); }   // keep editor copy; mtime already advanced
+		if (ImGui::Button("Ignore")) { pendingDisk.clear(); ImGui::CloseCurrentPopup(); }   // mtime already advanced
 		ImGui::EndPopup();
 	}
 }
 
+// Modal for "changed on disk and in the editor": reload / overwrite / merge / ignore.
 void EditorUI::DrawConflictPopup()
 {
 	if (openConflictPopup) { ImGui::OpenPopup("Conflict##disk"); openConflictPopup = false; }
@@ -279,7 +275,7 @@ void EditorUI::DrawConflictPopup()
 		ImGui::SameLine();
 		if (ImGui::Button("Overwrite (lose disk changes)")) { OverwriteWorld();          pendingDisk.clear(); ImGui::CloseCurrentPopup(); }
 		ImGui::SameLine();
-		if (ImGui::Button("Merge…"))   // open the resolve window
+		if (ImGui::Button("Merge…"))
 		{
 			OpenMerge(AppInstance::GetSingleton()->currentWorld->SaveToString(), pendingDisk);
 			pendingDisk.clear(); ImGui::CloseCurrentPopup();
@@ -290,10 +286,8 @@ void EditorUI::DrawConflictPopup()
 	}
 }
 
-// Activate the project's chosen plugins from the shared (already-discovered) pool. On a
-// project with no list yet (first run), default every discovered plugin ON and persist it.
-// PHASE_BOOT providers (the renderer) are NOT part of the plugin list — they were enabled
-// in boot phase 1 and are driven by serviceChoices instead.
+// Activate the project's chosen plugins from the discovered pool; a project with no list yet
+// defaults every plugin on. PHASE_BOOT providers are driven by serviceChoices, not this list.
 void EditorUI::ApplyProjectPlugins()
 {
 	auto& mods = nuke::GetModules();
@@ -308,10 +302,8 @@ void EditorUI::ApplyProjectPlugins()
 	for (auto& m : mods)
 	{
 		if (m->phase() == nuke::PHASE_BOOT) continue;
-		// Editor TOOLING modules (asset editors for plugin file types) are always on in the
-		// editor host — tooling availability must not depend on a per-project plugin list.
-		// editorTool is ABI 2: a module DLL built before it has a SHORTER vtable and calling
-		// the slot jumps into garbage — stale project modules must load fine, not crash.
+		// Editor tooling modules are always on, independent of the per-project plugin list.
+		// editorTool() is an ABI-2 slot: older module DLLs have a shorter vtable, so the ABI check is required.
 		bool want = (nuke::ModuleAbi(m.get()) >= 2 && m->editorTool())
 		         || std::find(enabledPlugins.begin(), enabledPlugins.end(), m->moduleFile) != enabledPlugins.end();
 		if (want) nuke::EnablePlugin(m.get());
@@ -327,11 +319,10 @@ void EditorUI::SyncEnabledPlugins()
 	SaveProject();
 }
 
-// ---- New / Open Project (File menu) ----------------------------------------------------
-// The project lifecycle (PHASE_BOOT renderer, plugin set, ResDB) is bound to startup, so
-// switching projects = relaunching the editor on the picked path — the same entry every
-// other route uses (CLI arg, double-click, associations). Raw .nuproj opens as-is; a
-// .nupak mounts read-only with a mod overlay; a .numod extracts for editing (see main.cpp).
+// --- New / Open Project ----------------------------------------------------
+
+// Switch projects by relaunching the editor on the given path: the project lifecycle
+// (PHASE_BOOT renderer, plugin set, ResDB) is bound to startup and cannot be swapped live.
 void EditorUI::SwitchToProject(const std::string& path)
 {
 	if (path.empty()) return;
@@ -345,6 +336,7 @@ void EditorUI::SwitchToProject(const std::string& path)
 		AppInstance::GetSingleton()->render->requestClose();   // this instance hands over
 }
 
+// Switch projects, prompting first if the open world is dirty.
 void EditorUI::RequestProjectSwitch(const std::string& path)
 {
 	if (path.empty()) return;
@@ -358,7 +350,7 @@ void EditorUI::OpenProjectCmd()
 	if (!picked.empty()) RequestProjectSwitch(picked);
 }
 
-// Unsaved-world guard for the switch (mirrors the usual Save/Don't Save/Cancel).
+// Unsaved-world guard for a project switch.
 void EditorUI::DrawSwitchConfirmPopup()
 {
 	if (openSwitchConfirm) { ImGui::OpenPopup("Unsaved changes##switch"); openSwitchConfirm = false; }
@@ -386,9 +378,7 @@ void EditorUI::DrawSwitchConfirmPopup()
 	}
 }
 
-// "New Project" modal: name + location -> scaffolds <location>/<name>/{game.nuproj,
-// content/} and relaunches the editor on it. The first LoadProject fills in every default
-// (plugins all-on, hotkeys, settings), same as any first run.
+// "New Project" modal: scaffolds <location>/<name>/{game.nuproj, content/} and relaunches on it.
 void EditorUI::DrawNewProjectPopup()
 {
 	if (openNewProjectPopup)
@@ -408,11 +398,8 @@ void EditorUI::DrawNewProjectPopup()
 		}
 		ImGui::SameLine(0, 6); ImGui::TextUnformatted("Location");
 
-		// Module choice for the new project — the SHARED pool only (metadata is there even
-		// when nothing is enabled, e.g. in the hub). PROJECT-LOCAL modules (another project's
-		// <project>/modules C++ game code, e.g. an open project's Game.dll) are excluded —
-		// they belong to their project, not to a fresh one. Render providers (PHASE_BOOT)
-		// are a single choice ("services.render"); everything else is a plugin checkbox.
+		// Offer the shared module pool only: project-local modules belong to their own project.
+		// Render providers are a single services.render choice; everything else is a checkbox.
 		boost::system::error_code mec;
 		const std::string poolPrefix = bfs::absolute(bfs::path("modules"), mec).generic_string();
 		auto inSharedPool = [&](NUKEModule* m)
@@ -429,17 +416,16 @@ void EditorUI::DrawNewProjectPopup()
 				if (!m || !inSharedPool(m.get())) continue;
 				if (m->phase() == nuke::PHASE_BOOT)
 				{
-					// default = the renderer this session runs on (else the first provider)
+					// default = the renderer this session runs on, else the first provider
 					if (std::string(m->provides()) == "render" && (newProjRender.empty() || m->loaded))
 						newProjRender = m->moduleFile;
 				}
-				else newProjMods[m->moduleFile] = true;   // default: everything on (matches first-run behavior)
+				else newProjMods[m->moduleFile] = true;   // default: everything on
 			}
 			newProjModsInit = true;
 		}
 		ImGui::SeparatorText("Modules");
-		// Fixed-height scrollable table — the pool can grow arbitrarily large without
-		// stretching the modal. Row: checkbox + title | dimmed description (tooltip = full).
+		// Fixed-height scrollable table so a large pool cannot stretch the modal.
 		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(4, 4));
 		ImGui::BeginChild("np_mods", ImVec2(560, 240), ImGuiChildFlags_Borders);
 		ImGui::PopStyleVar();
@@ -459,7 +445,7 @@ void EditorUI::DrawNewProjectPopup()
 				ImGui::TableSetColumnIndex(0);
 				ImGui::Checkbox((std::string(m->title) + "##npm" + m->moduleFile).c_str(), &it->second);
 				ImGui::TableSetColumnIndex(1);
-				// First line of the module's self-description; the full text on hover.
+				// First line of the module's self-description; full text on hover.
 				std::string d = m->description;
 				const size_t nl = d.find('\n');
 				ImGui::TextDisabled("%s", (nl == std::string::npos ? d : d.substr(0, nl)).c_str());
@@ -470,7 +456,7 @@ void EditorUI::DrawNewProjectPopup()
 		}
 		ImGui::PopStyleVar();
 		ImGui::EndChild();
-		// Renderer combo (only if there is more than one shared provider to choose from).
+		// Renderer combo, only when there is more than one shared provider.
 		{
 			std::vector<NUKEModule*> renders;
 			for (auto& m : nuke::GetModules())
@@ -492,7 +478,7 @@ void EditorUI::DrawNewProjectPopup()
 			}
 		}
 
-		// Validate: a clean name + a picked folder; refuse to hijack an existing project.
+		// Require a clean name and a picked folder; refuse to hijack an existing project.
 		std::string name = newProjName;
 		bool nameOk = !name.empty();
 		for (char c : name) nameOk &= (std::isalnum((unsigned char)c) || c == '_' || c == '-' || c == ' ');
@@ -512,8 +498,7 @@ void EditorUI::DrawNewProjectPopup()
 			j["name"] = name;
 			j["engine"] = "NukeEngine";
 			j["content"] = "content";
-			// The chosen module set: a real plugin list (so the first LoadProject does NOT
-			// default everything on) + the render provider choice.
+			// Write a real plugin list so the first LoadProject does not default everything on.
 			nlohmann::json plugins = nlohmann::json::array();
 			for (auto& kv : newProjMods) if (kv.second) plugins.push_back(kv.first);
 			j["plugins"] = plugins;
@@ -536,8 +521,8 @@ void EditorUI::DrawNewProjectPopup()
 	}
 }
 
-// Machine-wide recent-projects list (preferences): newest first, deduped by path
-// (case-insensitive — Windows), capped. Feeds "open last project" and the hub's list.
+// Push a path onto the machine-wide recent-projects list: newest first, case-insensitively
+// deduped, capped at 10, persisted to preferences.
 void EditorUI::PushRecentProject(const std::string& path)
 {
 	if (path.empty()) return;
@@ -551,9 +536,7 @@ void EditorUI::PushRecentProject(const std::string& path)
 	SavePreferences();
 }
 
-// PROJECT HUB — the whole UI when the editor booted with no project (startup pref "always
-// ask", or no last project on disk). Recent list + Open + New; a pick relaunches the
-// editor on the chosen .nuproj (the same lifecycle as every other open route).
+// Project hub: the entire UI when the editor booted with no project. Recent list, Open, New.
 void EditorUI::DrawProjectHub()
 {
 	ImGuiViewport* vp = ImGui::GetMainViewport();
@@ -562,8 +545,7 @@ void EditorUI::DrawProjectHub()
 	                        ImGuiCond_Always, ImVec2(0.5f, 0.5f));
 	ImGui::SetNextWindowSize(ImVec2(640, 460), ImGuiCond_Once);
 	ImGui::SetNextWindowViewport(vp->ID);   // pin: NoAutoMerge must not float it into its own OS window
-	// The theme's 15px WindowPadding stacks (window + bordered child) — too airy for a
-	// launcher. Tighten the hub only; the pushes cover Begin AND the child below.
+	// Tighter padding than the theme; the pushes must cover Begin and the child below.
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10, 10));
 	ImGui::Begin("Projects##hub", nullptr, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDocking);
 	ImGui::TextUnformatted("NukeEngine");
@@ -571,7 +553,7 @@ void EditorUI::DrawProjectHub()
 	ImGui::Separator();
 	ImGui::TextDisabled("Recent");
 	const float footer = ImGui::GetFrameHeightWithSpacing() + ImGui::GetStyle().ItemSpacing.y;
-	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(4, 4));   // inner child: table has its own cell padding
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(4, 4));   // the table has its own cell padding
 	ImGui::BeginChild("hub_recent", ImVec2(0, -footer), ImGuiChildFlags_Borders);
 	ImGui::PopStyleVar();
 	if (recentProjects.empty()) ImGui::TextDisabled("(no recent projects)");
@@ -581,7 +563,7 @@ void EditorUI::DrawProjectHub()
 		if (ImGui::BeginTable("hub_recent_tbl", 2,
 		                      ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH |
 		                      ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_ScrollY |
-		                      ImGuiTableFlags_PadOuterX))   // no outer V borders -> imgui drops edge padding by default
+		                      ImGuiTableFlags_PadOuterX))   // without outer V borders imgui drops edge padding
 		{
 			ImGui::TableSetupColumn("Project", ImGuiTableColumnFlags_WidthFixed, 170.0f);
 			ImGui::TableSetupColumn("Path", ImGuiTableColumnFlags_WidthStretch);
@@ -597,7 +579,7 @@ void EditorUI::DrawProjectHub()
 				ImGui::TableNextRow();
 				ImGui::TableSetColumnIndex(0);
 				ImGui::BeginDisabled(!exists);
-				// Full-row click target (spans both columns); the path renders over it in col 1.
+				// Full-row click target; the path renders over it in column 1.
 				if (ImGui::Selectable((name + "##rec" + std::to_string(idx++)).c_str(), false,
 				                      ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap))
 					RequestProjectSwitch(p);
@@ -620,11 +602,11 @@ void EditorUI::DrawProjectHub()
 	ImGui::PopStyleVar();   // hub WindowPadding
 }
 
-// Editor state (NOT world state) -> project/editor_state.json: camera, selection, which
-// inspector headers are expanded, the browser view/path/filters, and which panels are open.
+// Persist editor state (not world state) to project/editor_state.json: camera, selection,
+// browser view/path/filters, and which panels and windows are open.
 void EditorUI::SaveEditorState()
 {
-	if (projectHubMode) return;   // no project open — nothing to persist, nowhere to write
+	if (projectHubMode) return;   // no project open: nowhere to write
 	nlohmann::json j;
 	if (editorCam && editorCam->transform)
 	{
@@ -635,13 +617,13 @@ void EditorUI::SaveEditorState()
 		jc["fov"] = editorCam->fov; jc["near"] = editorCam->_near; jc["far"] = editorCam->_far;
 		jc["rw"] = editorCam->r_width; jc["rh"] = editorCam->r_height; jc["depth"] = editorCam->depth;
 		jc["free"] = editorCam->freeMode; jc["invMouse"] = editorCam->invertMouse;
-		jc["yaw"] = camYaw; jc["pitch"] = camPitch;   // editor look angles (not on the Camera component)
-		// Post-effect chain (RTX/rtreflect/...) lives on a PostProcess sibling component — persist it too.
+		jc["yaw"] = camYaw; jc["pitch"] = camPitch;   // editor look angles, not on the Camera component
+		// The post-effect chain lives on a sibling PostProcess component.
 		if (Atom* a = AppInstance::GetSingleton()->currentWorld->Get("Editor Camera"))
 			if (nuke::PostProcess* pp = a->GetComponent<nuke::PostProcess>()) { pp->Commit(); jc["post"] = pp->effectsData; }
 	}
 	if (auto sel = AppInstance::GetSingleton()->selectedInHieararchy)
-		j["selected"] = (long long)sel->id.id;   // stable id (recursive lookup), not name (name misses children)
+		j["selected"] = (long long)sel->id.id;   // stable id, not name: names miss children
 	nlohmann::json o = nlohmann::json::object();
 	for (auto& kv : uiOpen) o[kv.first] = kv.second;
 	j["uiOpen"]  = o;
@@ -649,16 +631,17 @@ void EditorUI::SaveEditorState()
 	                 {"fMesh", fMesh}, {"fMat", fMat}, {"fTex", fTex}, {"fPrefab", fPrefab} };
 	if (win) j["panels"] = { {"hierarchy", win->hierarchy}, {"console", win->console}, {"browser", win->browser},
 	                         {"inspector", win->inspector}, {"render", win->render}, {"plugmgr", win->plugmgr}, {"about", win->about} };
-	nlohmann::json wo = nlohmann::json::object();   // host-owned window open flags (e.g. plugin windows)
+	nlohmann::json wo = nlohmann::json::object();   // host-owned window open flags
 	for (auto& kv : AppInstance::GetSingleton()->windowOpen) wo[kv.first] = kv.second;
 	j["windowOpen"] = wo;
-	j["worldSettingsOpen"] = worldSettingsOpen;   // keep the World Settings window open across restarts
-	j["lastWorld"] = AppInstance::GetSingleton()->currentWorldPath;   // reopened on next launch ("" = unsaved -> default)
+	j["worldSettingsOpen"] = worldSettingsOpen;
+	j["lastWorld"] = AppInstance::GetSingleton()->currentWorldPath;   // reopened next launch; "" = default
 	if (iRender* r = AppInstance::GetSingleton()->render) j["maximized"] = r->isWindowMaximized();
 	bfs::ofstream f{bfs::path(projectDir + "/editor_state.json")};
 	if (f) f << j.dump(2);
 }
 
+// Restore editor state from project/editor_state.json.
 void EditorUI::LoadEditorState()
 {
 	bfs::ifstream f{bfs::path(projectDir + "/editor_state.json")};
@@ -667,11 +650,7 @@ void EditorUI::LoadEditorState()
 	if (j.is_discarded()) return;
 	if (j.contains("uiOpen") && j["uiOpen"].is_object())
 		for (auto& kv : j["uiOpen"].items()) uiOpen[kv.key()] = kv.value().get<bool>();
-	// NOTE: asset editors deliberately do NOT auto-reopen (user: surprise windows at
-	// startup; and a bad asset would crash every launch). Stale "assetEditors" keys in
-	// old state files are simply ignored. (The NUKE_OPEN_ASSET dev hook lives in
-	// setup_menu.cpp ONLY — a second copy here fired with the UNRESOLVED path and opened
-	// every asset twice: two windows for one document.)
+	// Asset editors deliberately do not auto-reopen; stale "assetEditors" keys are ignored.
 	if (j.contains("selected") && j["selected"].is_number_integer())
 		pendingSelectId = (long)j["selected"].get<long long>();
 	lastWorld = j.value("lastWorld", std::string());
@@ -687,7 +666,7 @@ void EditorUI::LoadEditorState()
 		editorCam->depth = jc.value("depth", editorCam->depth);
 		editorCam->freeMode = jc.value("free", editorCam->freeMode); editorCam->invertMouse = jc.value("invMouse", editorCam->invertMouse);
 		camYaw = jc.value("yaw", camYaw); camPitch = jc.value("pitch", camPitch);
-		if (jc.contains("post"))   // restore the post-effect chain (RTX/rtreflect/...); recreate the component if needed
+		if (jc.contains("post"))   // restore the post-effect chain, recreating the component if needed
 		{
 			if (Atom* a = AppInstance::GetSingleton()->currentWorld->Get("Editor Camera"))
 			{
