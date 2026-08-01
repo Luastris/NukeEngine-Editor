@@ -506,6 +506,23 @@ void EditorUI::winSettings()
 			ImGui::SameLine(); ImGui::TextDisabled("(?)");
 			if (ImGui::IsItemHovered())
 				ImGui::SetTooltip("Project pak: zstd max = smallest release, fast to load.\nMods default to Store so they stay editable/diffable.");
+
+			// Split: heavy content moves into side "part" paks that mount with their main one.
+			// Applies to the game pak, DLC paks and mods alike.
+			if (ImGui::Combo("Pak split", &modSplitMode,
+			                 "None (single file)\0By content type (textures/audio/meshes)\0Size cap per file\0"))
+				SaveProject();
+			if (modSplitMode == 2)
+			{
+				if (ImGui::InputInt("Split cap (MB)", &modSplitCapMB, 64, 256))
+				{
+					if (modSplitCapMB < 16) modSplitCapMB = 16;
+					SaveProject();
+				}
+			}
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("Applies to the game pak, DLC and mods. Worlds, their merge basis, manifests\n"
+				                  "and script assemblies always stay in the MAIN pak.");
 		}
 
 		// Mods list, backed by config/mods.json: checkbox = enabled, row order = load order.

@@ -34,6 +34,8 @@ void EditorUI::SaveProject()
 	// Pak compression method: 0 store / 1 zlib / 2 zstd.
 	j["pakMethod"] = pakMethod; j["pakLevel"] = pakLevel;
 	j["modMethod"] = modMethod; j["modLevel"] = modLevel;
+	j["modSplit"]  = modSplitMode;   // 0 one file / 1 by content type / 2 size cap
+	j["modSplitCapMB"] = modSplitCapMB;
 	j["gameIcon"]  = gameIcon;              // .ico stamped onto the shipped exe
 	j["distPath"]  = distPath;              // build output ("" = <project>/dist)
 	j["modName"]   = modName;               // last packaged mod name
@@ -87,6 +89,8 @@ void EditorUI::LoadProject()
 	conflictMode    = j.value("conflictMode", 0);
 	pakMethod = j.value("pakMethod", 2); pakLevel = j.value("pakLevel", 22);
 	modMethod = j.value("modMethod", 0); modLevel = j.value("modLevel", 0);
+	modSplitMode  = j.value("modSplit", 0);
+	modSplitCapMB = j.value("modSplitCapMB", 512);
 	gameIcon  = j.value("gameIcon", std::string());
 	distPath  = j.value("distPath", std::string());
 	modName   = j.value("modName", std::string());

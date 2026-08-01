@@ -475,6 +475,66 @@ void EditorUI::RunEngineBuild(const std::string& config, std::function<void(bool
 	});
 }
 
+// Split `files` per the project's setting: what stays goes back into `files`, the rest is
+// returned as (suffix, files) part sets. Worlds, the merge basis, manifests and script
+// assemblies ALWAYS stay in the main pak — the loader reads them from the pak that served
+// the world. splitMode: 0 none, 1 by content type, 2 greedy under a raw-size cap.
+static std::vector<std::pair<std::string, std::vector<std::pair<std::string, std::string>>>>
+SplitPakFiles(std::vector<std::pair<std::string, std::string>>& files, int splitMode, int splitCapMB)
+{
+	std::vector<std::pair<std::string, std::vector<std::pair<std::string, std::string>>>> partsOut;
+	if (splitMode != 1 && (splitMode != 2 || splitCapMB <= 0)) return partsOut;
+
+	auto low = [](const std::string& rel)
+	{ std::string s = rel; for (char& c : s) c = (char)tolower((unsigned char)c); return s; };
+	auto ends = [](const std::string& s, const char* e)
+	{ const size_t n = strlen(e); return s.size() > n && s.compare(s.size() - n, n, e) == 0; };
+	auto mustStayMain = [&](const std::string& l)
+	{
+		return l.compare(0, 6, "basis/") == 0 || l.compare(0, 8, "managed/") == 0
+		    || ends(l, ".nuworld") || l == "mod.json" || l == "pak.json" || l == "game.nuproj";
+	};
+
+	std::vector<std::pair<std::string, std::string>> mainFiles;
+	if (splitMode == 1)
+	{
+		auto classOf = [&](const std::string& l) -> const char*
+		{
+			if (ends(l, ".nutex") || ends(l, ".png") || ends(l, ".jpg") || ends(l, ".jpeg")
+			 || ends(l, ".tga") || ends(l, ".dds") || ends(l, ".bmp")) return "textures";
+			if (ends(l, ".wav") || ends(l, ".ogg") || ends(l, ".mp3") || ends(l, ".flac")) return "audio";
+			if (ends(l, ".numesh") || ends(l, ".nuanim") || ends(l, ".nubonemap")) return "meshes";
+			return "";
+		};
+		std::map<std::string, std::vector<std::pair<std::string, std::string>>> byClass;
+		for (auto& fp : files)
+		{
+			const std::string l = low(fp.first);
+			const char* cls = mustStayMain(l) ? "" : classOf(l);
+			if (cls[0]) byClass[cls].push_back(fp); else mainFiles.push_back(fp);
+		}
+		for (auto& kv : byClass) if (!kv.second.empty()) partsOut.push_back({ kv.first, kv.second });
+	}
+	else
+	{
+		const uint64_t cap = (uint64_t)splitCapMB << 20;
+		std::vector<std::pair<std::string, std::string>> cur;
+		uint64_t mainSz = 0, curSz = 0; int partN = 2;
+		for (auto& fp : files)
+		{
+			boost::system::error_code fec;
+			const uint64_t sz = (uint64_t)bfs::file_size(bfs::path(fp.second), fec);
+			if (mustStayMain(low(fp.first)))      { mainFiles.push_back(fp); mainSz += sz; continue; }
+			if (mainSz + sz <= cap)               { mainFiles.push_back(fp); mainSz += sz; continue; }
+			if (!cur.empty() && curSz + sz > cap) { partsOut.push_back({ "part" + std::to_string(partN++), cur }); cur.clear(); curSz = 0; }
+			cur.push_back(fp); curSz += sz;
+		}
+		if (!cur.empty()) partsOut.push_back({ "part" + std::to_string(partN++), cur });
+	}
+	files.swap(mainFiles);
+	return partsOut;
+}
+
 void EditorUI::PackageProject()
 {
 	// Rebuild Release FIRST so stale binaries never ship (the superbuild is incremental).
@@ -530,6 +590,7 @@ void EditorUI::PackageProjectNow()
 	                    : (bfs::path(distPath).is_absolute() ? distPath
 	                                                         : (bfs::path(projDir) / distPath).string());
 	const int method = pakMethod, level = pakLevel;
+	const int splitMode = modSplitMode, splitCapMB = modSplitCapMB;   // one split setting for every pak
 	// Used modules only: chosen service providers + the project's plugin list; no persisted
 	// list -> all runtime modules (mirrors the Player's load rule).
 	std::set<std::string> modules;
@@ -549,7 +610,8 @@ void EditorUI::PackageProjectNow()
 		if (m && m->loaded) m->shipExtras(projDir.c_str(), extraPak, extraDist);
 
 	StatusBar::Set("package", "Packaging project...", StatusBar::kIndeterminate);
-	nuke::Jobs::Schedule([projDir, projFile, content, gameName, icon, method, level, modules, distStr, guidFiles,
+	nuke::Jobs::Schedule([projDir, projFile, content, gameName, icon, method, level, splitMode, splitCapMB,
+	                      modules, distStr, guidFiles,
 	                      extraPak, extraDist, gbSet, gbCfg, gbLogS, gbDbgS]()
 	{
 		boost::system::error_code ec;
@@ -614,15 +676,6 @@ void EditorUI::PackageProjectNow()
 		files.push_back({ "game.nuproj", projFile });
 		// Pak identity: DLCs record this name as their "base", so a DLC mounts only onto its own game.
 		bfs::path pakManTmp = bfs::path(projDir) / ".pak.json.tmp";
-		{
-			nlohmann::json pj;
-			pj["kind"] = "base";
-			pj["name"] = gameName;
-			pj["platforms"] = nlohmann::json::array({ Package::CurrentPlatform() });
-			bfs::ofstream pf(pakManTmp, std::ios::binary | std::ios::trunc);
-			if (pf) pf << pj.dump(2);
-		}
-		files.push_back({ "pak.json", pakManTmp.string() });
 		// Module pak extras: project files the cooker can't reach by reference.
 		for (const std::string& rel : extraPak)
 		{
@@ -653,6 +706,21 @@ void EditorUI::PackageProjectNow()
 				std::string rel = bfs::relative(it->path(), rt, rec).generic_string();
 				if (!rec) files.push_back({ rel, it->path().string() });
 			}
+		// Split the game's own content into side parts, then write the identity manifest with
+		// the part list so the runtime mounts them alongside game.nupak.
+		auto partsOut = SplitPakFiles(files, splitMode, splitCapMB);
+		std::vector<std::string> partFiles;
+		for (auto& pr : partsOut) partFiles.push_back("game." + pr.first + ".nupak");
+		{
+			nlohmann::json pj;
+			pj["kind"] = "base";
+			pj["name"] = gameName;
+			pj["platforms"] = nlohmann::json::array({ Package::CurrentPlatform() });
+			if (!partFiles.empty()) pj["parts"] = partFiles;
+			bfs::ofstream pf(pakManTmp, std::ios::binary | std::ios::trunc);
+			if (pf) pf << pj.dump(2);
+		}
+		files.push_back({ "pak.json", pakManTmp.string() });
 		bool ok = !files.empty()
 		       && Package::Create(files, (dist / "content" / "game.nupak").string(), method, level,
 		              [](int done, int total)
@@ -660,6 +728,26 @@ void EditorUI::PackageProjectNow()
 		                  StatusBar::Set("package", "Packaging project... " + std::to_string(done) + "/" + std::to_string(total),
 		                                 total ? 0.7f * done / total : 0.0f);
 		              });
+		for (size_t pi = 0; ok && pi < partsOut.size(); ++pi)
+		{
+			nlohmann::json ppj;
+			ppj["kind"] = "part";
+			ppj["name"] = gameName + " (" + partsOut[pi].first + ")";
+			ppj["part_of"] = gameName;
+			bfs::path ptmp = bfs::path(projDir) / (".pak.part" + std::to_string(pi) + ".json.tmp");
+			{ bfs::ofstream po(ptmp, std::ios::binary | std::ios::trunc); if (po) po << ppj.dump(2); }
+			auto pfiles = partsOut[pi].second;
+			pfiles.push_back({ "pak.json", ptmp.string() });
+			ok = Package::Create(pfiles, (dist / "content" / partFiles[pi]).string(), method, level,
+			         [](int done, int total)
+			         {
+			             StatusBar::Set("package", "Packaging part... " + std::to_string(done) + "/" + std::to_string(total),
+			                            total ? 0.7f * done / total : 0.0f);
+			         }) && ok;
+			bfs::remove(ptmp, ec);
+			if (ok) std::cout << "[Package]\tgame part: " << partFiles[pi] << " ("
+			                  << partsOut[pi].second.size() << " files)" << std::endl;
+		}
 
 		// 2) The runtime around it: the Player under the game's name + icon, its DLLs, the
 		// config, the used modules and the mods/ socket. The two build configs never mix (CRT).
@@ -801,11 +889,13 @@ void EditorUI::PackageMod(const std::string& modNameIn)
 	// Recorded into mod.json; the loader mounts them below it. Snapshot on the game thread.
 	std::vector<std::string> requires_;
 	for (const Package::ModInfo& mi : Package::Mods()) requires_.push_back(mi.name);
+	// The DLCs mounted in this session: a mod authored over DLC content must not load without it.
+	const std::vector<std::string> dlcDeps = Package::MountedDlcs();
 	const int splitMode = modSplitMode;      // 0 = one pak, 1 = by content type, 2 = size cap
 	const int splitCapMB = modSplitCapMB;
 
 	StatusBar::Set("packmod", "Packaging mod...", StatusBar::kIndeterminate);
-	nuke::Jobs::Schedule([projDir, base, name, method, level, distStr, requires_, splitMode, splitCapMB]()
+	nuke::Jobs::Schedule([projDir, base, name, method, level, distStr, requires_, dlcDeps, splitMode, splitCapMB]()
 	{
 		boost::system::error_code ec;
 		auto all = CollectProject(projDir, true, DistPrefix(projDir, distStr));
@@ -921,57 +1011,7 @@ void EditorUI::PackageMod(const std::string& modNameIn)
 				{ hasNative = true; break; }
 			}
 
-			// Optional split into part paks. Worlds, basis, manifest and the scripts assembly
-			// MUST stay in the main pak: the loader reads them from the pak that served the world.
-			auto mustStayMain = [&](const std::string& low)
-			{
-				return low.compare(0, 6, "basis/") == 0 || low.compare(0, 8, "managed/") == 0
-				    || endsWith(low, ".nuworld") || low == "mod.json" || low == "game.nuproj";
-			};
-			std::vector<std::pair<std::string, std::vector<std::pair<std::string, std::string>>>> partsOut;   // (suffix, files)
-			if (splitMode == 1)
-			{
-				// Textures / audio / meshes get one part each.
-				auto classOf = [&](const std::string& low) -> const char*
-				{
-					if (endsWith(low, ".nutex") || endsWith(low, ".png") || endsWith(low, ".jpg")
-					 || endsWith(low, ".jpeg") || endsWith(low, ".tga") || endsWith(low, ".dds")
-					 || endsWith(low, ".bmp")) return "textures";
-					if (endsWith(low, ".wav") || endsWith(low, ".ogg") || endsWith(low, ".mp3")
-					 || endsWith(low, ".flac")) return "audio";
-					if (endsWith(low, ".numesh") || endsWith(low, ".nuanim") || endsWith(low, ".nubonemap")) return "meshes";
-					return "";
-				};
-				std::map<std::string, std::vector<std::pair<std::string, std::string>>> byClass;
-				std::vector<std::pair<std::string, std::string>> mainFiles;
-				for (auto& fp : files)
-				{
-					const std::string low = lowRelOf(fp.first);
-					const char* cls = mustStayMain(low) ? "" : classOf(low);
-					if (cls[0]) byClass[cls].push_back(fp); else mainFiles.push_back(fp);
-				}
-				for (auto& kv : byClass) if (!kv.second.empty()) partsOut.push_back({ kv.first, kv.second });
-				files.swap(mainFiles);
-			}
-			else if (splitMode == 2 && splitCapMB > 0)
-			{
-				// Fill the main pak to the cap, then greedy part2/part3/... Bound by RAW size.
-				const uint64_t cap = (uint64_t)splitCapMB << 20;
-				std::vector<std::pair<std::string, std::string>> mainFiles, cur;
-				uint64_t mainSz = 0, curSz = 0; int partN = 2;
-				for (auto& fp : files)
-				{
-					const std::string low = lowRelOf(fp.first);
-					boost::system::error_code fec;
-					const uint64_t sz = (uint64_t)bfs::file_size(bfs::path(fp.second), fec);
-					if (mustStayMain(low))                { mainFiles.push_back(fp); mainSz += sz; continue; }
-					if (mainSz + sz <= cap)               { mainFiles.push_back(fp); mainSz += sz; continue; }
-					if (!cur.empty() && curSz + sz > cap) { partsOut.push_back({ "part" + std::to_string(partN++), cur }); cur.clear(); curSz = 0; }
-					cur.push_back(fp); curSz += sz;
-				}
-				if (!cur.empty()) partsOut.push_back({ "part" + std::to_string(partN++), cur });
-				files.swap(mainFiles);
-			}
+			auto partsOut = SplitPakFiles(files, splitMode, splitCapMB);
 			std::vector<std::string> partFiles;
 			for (auto& pr : partsOut) partFiles.push_back(name + "." + pr.first + ".numod");
 
@@ -980,6 +1020,7 @@ void EditorUI::PackageMod(const std::string& modNameIn)
 			man["name"] = name;
 			man["requires"] = requires_;
 			man["platform"] = hasNative ? Package::CurrentPlatform() : "any";
+			if (!dlcDeps.empty()) man["dlc"] = dlcDeps;
 			if (!partFiles.empty()) man["parts"] = partFiles;
 			if (fromMod)
 			{
@@ -1183,6 +1224,7 @@ void EditorUI::SaveEditorMods()
 	if (out) out << ej.dump(2);
 	Package::UnmountAll();
 	Package::Mount(basePakPath, 0);
+	Package::MountPakParts(basePakPath, 0);
 	// The DLC layer is part of the game the modder targets.
 	Package::PakInfo basePi;
 	Package::ReadPakInfo(basePakPath, basePi);
@@ -1252,12 +1294,18 @@ void EditorUI::DrawPackageModPopup()
 		else if (bfs::exists(target, ec))
 			ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1), "A mod with this name exists - it will be updated.");
 
+		// Same setting as Project Settings -> Packaging; edited here it persists too.
 		ImGui::SetNextItemWidth(300);
-		ImGui::Combo("Split", &modSplitMode, "None (single file)\0By content type (textures/audio/meshes)\0Size cap per file\0");
+		if (ImGui::Combo("Split", &modSplitMode, "None (single file)\0By content type (textures/audio/meshes)\0Size cap per file\0"))
+			SaveProject();
 		if (modSplitMode == 2)
 		{
 			ImGui::SetNextItemWidth(300);
-			if (ImGui::InputInt("Cap (MB)", &modSplitCapMB, 64, 256) && modSplitCapMB < 16) modSplitCapMB = 16;
+			if (ImGui::InputInt("Cap (MB)", &modSplitCapMB, 64, 256))
+			{
+				if (modSplitCapMB < 16) modSplitCapMB = 16;
+				SaveProject();
+			}
 		}
 
 		ImGui::Separator();
@@ -1365,6 +1413,7 @@ void EditorUI::PackageDlc(const std::string& dlcNameIn, const std::string& baseP
 	const std::string projDir = projectDir, projFile = projectFile, content = contentDir;
 	const std::string base = basePakIn;
 	const int method = pakMethod, level = pakLevel;
+	const int splitMode = modSplitMode, splitCapMB = modSplitCapMB;
 	std::string distStr = distPath.empty() ? (bfs::path(projectDir) / "dist").string()
 	                    : (bfs::path(distPath).is_absolute() ? distPath
 	                                                         : (bfs::path(projectDir) / distPath).string());
@@ -1382,7 +1431,7 @@ void EditorUI::PackageDlc(const std::string& dlcNameIn, const std::string& baseP
 				guidFiles[sh->guid].push_back(sh->psPath);
 	}
 	StatusBar::Set("packdlc", "Packaging DLC...", StatusBar::kIndeterminate);
-	nuke::Jobs::Schedule([projDir, projFile, content, base, name, method, level, distStr, guidFiles]()
+	nuke::Jobs::Schedule([projDir, projFile, content, base, name, method, level, splitMode, splitCapMB, distStr, guidFiles]()
 	{
 		boost::system::error_code ec;
 		Package::File bf;
@@ -1427,11 +1476,15 @@ void EditorUI::PackageDlc(const std::string& dlcNameIn, const std::string& baseP
 			std::cout << "[Package]\tDLC: nothing new against the base — nothing to pack." << std::endl;
 		else
 		{
+			auto partsOut = SplitPakFiles(files, splitMode, splitCapMB);
+			std::vector<std::string> partFiles;
+			for (auto& pr : partsOut) partFiles.push_back(name + "." + pr.first + ".nupak");
 			nlohmann::json pj;
 			pj["kind"] = "dlc";
 			pj["name"] = name;
 			pj["base"] = basePi.name;   // "" for a legacy base: folder placement binds it
 			pj["platforms"] = nlohmann::json::array({ Package::CurrentPlatform() });
+			if (!partFiles.empty()) pj["parts"] = partFiles;
 			bfs::path manTmp = bfs::path(projDir) / ".dlc.json.tmp";
 			{
 				bfs::ofstream mo(manTmp, std::ios::binary | std::ios::trunc);
@@ -1450,6 +1503,26 @@ void EditorUI::PackageDlc(const std::string& dlcNameIn, const std::string& baseP
 					               total ? (float)done / total : 0.0f);
 				});
 			bfs::remove(manTmp, ec);
+			for (size_t pi = 0; ok && pi < partsOut.size(); ++pi)
+			{
+				nlohmann::json ppj;
+				ppj["kind"] = "part";
+				ppj["name"] = name + " (" + partsOut[pi].first + ")";
+				ppj["part_of"] = name;
+				bfs::path ptmp = bfs::path(projDir) / (".dlc.part" + std::to_string(pi) + ".json.tmp");
+				{ bfs::ofstream po(ptmp, std::ios::binary | std::ios::trunc); if (po) po << ppj.dump(2); }
+				auto pfiles = partsOut[pi].second;
+				pfiles.push_back({ "pak.json", ptmp.string() });
+				ok = Package::Create(pfiles, (outDir / partFiles[pi]).string(), method, level,
+					[](int done, int total)
+					{
+						StatusBar::Set("packdlc", "Packaging DLC part... " + std::to_string(done) + "/" + std::to_string(total),
+						               total ? (float)done / total : 0.0f);
+					}) && ok;
+				bfs::remove(ptmp, ec);
+				if (ok) std::cout << "[Package]\tDLC part: " << partFiles[pi] << " ("
+				                  << partsOut[pi].second.size() << " files)" << std::endl;
+			}
 		}
 		nuke::Jobs::RunOnMain([ok, outPath, name]()
 		{
@@ -1615,6 +1688,7 @@ std::string EditorUI::PrepareMountedProject(const std::string& pakAbs)
 		std::cout << "[Package]\tcan't open archive: " << pakAbs << std::endl;
 		return std::string();
 	}
+	Package::MountPakParts(pakAbs, 0);
 	boost::system::error_code ec;
 	bfs::path pak(pakAbs);
 	bfs::path work = pak.parent_path() / (pak.stem().string() + "_mod");
@@ -1701,6 +1775,13 @@ std::string EditorUI::PrepareArchiveProject(const std::string& pakAbs)
 			bfs::path basePak = gameRoot / "content" / "game.nupak";
 			if (bfs::exists(basePak, ec) && Package::Mount(basePak.string(), 0))
 			{
+				Package::MountPakParts(basePak.string(), 0);
+				// The game's DLC layer is part of what this mod was authored on top of.
+				{
+					Package::PakInfo basePi;
+					Package::ReadPakInfo(basePak.string(), basePi);
+					Package::MountDlcs(gameRoot.string(), basePi.name);
+				}
 				// name -> "mods/<file>" map from the game's mods dir manifests.
 				std::map<std::string, std::string> byName;
 				std::map<std::string, std::string> fileByName;   // for reading deps' manifests
