@@ -363,6 +363,38 @@ void EditorUI::DiscoverProjectModules()
 {
 	boost::system::error_code ec;
 	const bfs::path dir = bfs::path(projectDir) / "modules";
+	// A module the project HAS sources for but no built DLL for is invisible everywhere its
+	// components should appear (Add Component, prop pickers, worlds that reference it) — and
+	// silently so. Build it once per session instead, exactly like the script backends build
+	// themselves; a failing build then reports through the normal build log.
+	{
+		static std::string autoBuilt;
+		const bfs::path srcDir = bfs::path(projectDir) / "source";
+		bool missing = false;
+		if (bfs::exists(srcDir, ec))
+			for (bfs::directory_iterator it(srcDir, ec), end; it != end && !ec; it.increment(ec))
+			{
+				if (!bfs::is_directory(it->path()) || !bfs::exists(it->path() / "CMakeLists.txt")) continue;
+				const std::string name = it->path().filename().string();
+				if (!bfs::exists(dir / (name + ".dll"), ec)) { missing = true; break; }
+			}
+		// A DLL built against an older engine ABI is refused by the loader — same end result as
+		// a missing one (no components anywhere), so treat it the same and rebuild.
+		if (!missing)
+		{
+			const std::string prefix = bfs::absolute(dir, ec).generic_string();
+			for (const std::string& r : nuke::RefusedModules())
+				if (bfs::absolute(bfs::path(r), ec).generic_string().rfind(prefix, 0) == 0) { missing = true; break; }
+		}
+		if (missing && autoBuilt != projectDir)
+		{
+			autoBuilt = projectDir;
+			std::cout << "[gamemodule]	a module in <project>/source has no built DLL in "
+			          << "<project>/modules — building it now" << std::endl;
+			BuildGameModules();          // async; re-enters this function when it finishes
+			return;
+		}
+	}
 	if (!bfs::exists(dir, ec)) return;
 	nuke::DiscoverModulesIn(dir.string());
 

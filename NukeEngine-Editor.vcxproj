@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
@@ -188,6 +188,12 @@ xcopy "$(SolutionDir)shaders" "$(OutDir)shaders\" /s /e /i /y /d</Command>
     <ClCompile Include="src\panels\viewport.cpp" />
     <ClCompile Include="src\panels\dialogs.cpp" />
     <ClCompile Include="src\panels\browser.cpp" />
+    <ClCompile Include="src\panels\sequencer.cpp" />
+    <ClCompile Include="src\panels\animeditor.cpp" />
+    <ClCompile Include="src\panels\smeditor.cpp" />
+    <ClCompile Include="src\panels\blendeditor.cpp" />
+    <ClCompile Include="src\panels\skeleteditor.cpp" />
+    <ClCompile Include="src\panels\ragdolleditor.cpp" />
     <ClCompile Include="src\panels\plugins.cpp" />
     <ClCompile Include="src\panels\settings.cpp" />
     <ClCompile Include="src\panels\inputmap.cpp" />
@@ -196,11 +202,13 @@ xcopy "$(SolutionDir)shaders" "$(OutDir)shaders\" /s /e /i /y /d</Command>
     <ClCompile Include="src\panels\texteditorpanel.cpp" />
     <ClCompile Include="src\panels\asseteditor.cpp" />
     <ClCompile Include="src\panels\statusbar.cpp" />
+    <ClCompile Include="src\panels\profiler.cpp" />
     <ClCompile Include="src\textedit\TextEditor.cpp" />
     <ClCompile Include="src\textedit\LanguageDefinitions.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="include\editor\editorui.h" />
+    <ClInclude Include="include\editor\animshared.h" />
     <ClInclude Include="src\textedit\TextEditor.h" />
     <ClInclude Include="resource.h" />
   </ItemGroup>

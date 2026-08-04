@@ -1,5 +1,6 @@
 // inspector panel — EditorUI method definitions (translation unit).
 #include <editor/editorui.h>
+#include "editor/animshared.h"
 #include "nukeui.h"   // DocPanel: detachable panels
 #include <API/Model/Camera.h>
 #include <API/Model/CharacterController.h>
@@ -37,15 +38,17 @@ void EditorUI::StageAssetPreview(const std::string& path, const std::string& ext
 	{
 		inspPv->mr->meshGuid = guid;
 		inspPv->mr->mesh = db->GetMesh(guid);
-		inspPv->mr->matGuid = "builtin:default";
-		if (inspPv->mr->mat) { delete inspPv->mr->mat; inspPv->mr->mat = nullptr; }   // re-resolve
+		EditorApplyMeshMaterials(inspPv->mr, guid);   // the mesh's OWN materials, not a white default
 	}
 	else if (ext == ".numat")
 	{
 		inspPv->mr->meshGuid = "builtin:sphere";
 		inspPv->mr->mesh = db->GetMesh("builtin:sphere");
 		inspPv->mr->matGuid = guid;
+		// The renderer only clones matGuid -> mat inside Init(); this component is long past
+		// it, so a bare guid left `mat` null and the preview drew the DEFAULT white material.
 		if (inspPv->mr->mat) { delete inspPv->mr->mat; inspPv->mr->mat = nullptr; }
+		if (Material* asset = db->GetMaterial(guid)) inspPv->mr->mat = asset->Clone();
 	}
 	FramePreview(*inspPv, nullptr);
 	pvStaged = path;
@@ -152,6 +155,28 @@ static std::string FileKindExt(const std::string& kind)
 	for (char& c : e) c = (char)tolower((unsigned char)c);
 	return e;
 }
+// The file extension an asset KIND (the reflection hint) is stored as; "" when the kind is not
+// a single file type. Feeds both drop-matching and the picker's icons.
+static std::string KindExt(const std::string& kind)
+{
+	if (IsFileKind(kind))   return FileKindExt(kind);
+	if (kind == "mesh")     return ".numesh";
+	if (kind == "material") return ".numat";
+	if (kind == "texture")  return ".nutex";
+	if (kind == "anim")     return ".nuanim";
+	if (kind == "bonemap")  return ".nubonemap";
+	if (kind == "skeleton") return ".nuskel";
+	if (kind == "animsm")   return ".nusm";
+	if (kind == "blendspace") return ".nublend";
+	if (kind == "sequence") return ".nuseq";
+	if (kind == "ragdoll")  return ".nurag";
+	if (kind == "prefab")   return ".nuprefab";
+	if (kind == "world")    return ".nuworld";
+	if (kind == "script")   return ".lua";
+	if (kind == "shader" || kind == "postshader") return ".hlsl";
+	return "";
+}
+
 // True if a dropped file path matches the field's asset kind.
 static bool KindMatchesFile(const std::string& kind, const std::string& path)
 {
@@ -163,6 +188,11 @@ static bool KindMatchesFile(const std::string& kind, const std::string& path)
 	if (kind == "texture")  return e == ".nutex";
 	if (kind == "anim")     return e == ".nuanim";
 	if (kind == "bonemap")  return e == ".nubonemap";
+	if (kind == "skeleton") return e == ".nuskel";
+	if (kind == "animsm")   return e == ".nusm";
+	if (kind == "blendspace") return e == ".nublend";
+	if (kind == "sequence") return e == ".nuseq";
+	if (kind == "ragdoll")  return e == ".nurag";
 	if (kind == "script")   return e == ".lua";
 	if (kind == "audio")    return IsAudioExt(e);
 	if (kind == "shader")   { std::string fn = bfs::path(path).filename().string(); return EndsWithCI(fn, ".vs.hlsl") || EndsWithCI(fn, ".ps.hlsl"); }
@@ -195,6 +225,11 @@ bool EditorUI::AssetPicker(const char* label, std::string& guid, const std::stri
 		else if (kind == "material") { Material* m = db->GetMaterial(g); if (m) n = m->matName; }
 		else if (kind == "anim")     { AnimClip* c = db->GetClip(g);     if (c) n = c->name; }
 		else if (kind == "bonemap")  { BoneMap* b = db->GetBoneMap(g);   if (b) n = b->name; }
+		else if (kind == "skeleton") { Skeleton* sk = db->GetSkeleton(g); if (sk) n = sk->name; }
+		else if (kind == "animsm")   { AnimSM* m = db->GetAnimSM(g);     if (m) n = m->name; }
+		else if (kind == "blendspace") { BlendSpace* b = db->GetBlendSpace(g); if (b) n = b->name; }
+		else if (kind == "sequence") { Sequence* q = db->GetSequence(g); if (q) n = q->name; }
+		else if (kind == "ragdoll")  { RagdollDef* r = db->GetRagdoll(g); if (r) n = r->name; }
 		else if (kind == "texture")  { Texture* t = db->GetTexture(g);   if (t) n = t->name; }
 		return n.empty() ? g : n;
 	};
@@ -229,7 +264,7 @@ bool EditorUI::AssetPicker(const char* label, std::string& guid, const std::stri
 		if      (kind == "script" || kind == "audio" || IsFileKind(kind)) { if (!guid.empty()) path = (bfs::path(contentDir) / guid).string(); }
 		else if (kind == "shader" && db->GetShader(guid)) path = db->GetShader(guid)->vsPath;
 		else                       path = db->PathForGuid(guid);
-		if (!path.empty()) { BrowserNavigate(bfs::path(path).parent_path().string()); browserSel = path; if (win) win->browser = true; }
+		if (!path.empty()) { BrowserNavigate(bfs::path(path).parent_path().string()); BrowserSelect(path); if (win) win->browser = true; }
 	}
 	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Go to file");
 	ImGui::SameLine(0, 2);
@@ -245,10 +280,19 @@ bool EditorUI::AssetPicker(const char* label, std::string& guid, const std::stri
 		std::string flt = assetFilter;
 		ImGui::Separator();
 		ImGui::BeginChild("##lst", ImVec2(280, 260));
+		// The row's icon comes from the type registry, never from a switch here: a value that IS
+		// a path answers by its own extension, otherwise the kind's extension does.
+		const std::string kindExt = KindExt(kind);
+		auto rowIcon = [&](const std::string& value) -> const char*
+		{
+			const std::string e = bfs::path(value).extension().string();
+			return ExtIcon(e.empty() ? kindExt : e);
+		};
 		auto item = [&](const std::string& g, const std::string& n) {
 			if (!ciContains(n, flt)) return;
 			// "##<guid>" keeps the visible text but gives same-named assets distinct IDs (no ID clash).
-			if (ImGui::Selectable((n + "##" + g).c_str(), g == guid)) { guid = g; changed = true; ImGui::CloseCurrentPopup(); }
+			const std::string row = std::string(rowIcon(g)) + "  " + n + "##" + g;
+			if (ImGui::Selectable(row.c_str(), g == guid)) { guid = g; changed = true; ImGui::CloseCurrentPopup(); }
 		};
 		if (ciContains("(none)", flt))
 			if (ImGui::Selectable("(none)", guid.empty())) { guid.clear(); changed = true; ImGui::CloseCurrentPopup(); }
@@ -259,6 +303,11 @@ bool EditorUI::AssetPicker(const char* label, std::string& guid, const std::stri
 		else if (kind == "texture")  for (Texture* t : db->textures) { if (t) item(t->guid, disp(t->guid)); }
 		else if (kind == "anim")     for (AnimClip* c : db->clips)   { if (c) item(c->guid, disp(c->guid)); }
 		else if (kind == "bonemap")  for (BoneMap* b : db->boneMaps) { if (b) item(b->guid, disp(b->guid)); }
+		else if (kind == "skeleton") for (Skeleton* sk : db->skeletons) { if (sk) item(sk->guid, disp(sk->guid)); }
+		else if (kind == "animsm")   for (AnimSM* m : db->animSMs)   { if (m) item(m->guid, disp(m->guid)); }
+		else if (kind == "blendspace") for (BlendSpace* b : db->blendSpaces) { if (b) item(b->guid, disp(b->guid)); }
+		else if (kind == "sequence") for (Sequence* q : db->sequences) { if (q) item(q->guid, disp(q->guid)); }
+		else if (kind == "ragdoll")  for (RagdollDef* r : db->ragdolls) { if (r) item(r->guid, disp(r->guid)); }
 		else if (kind == "csclass")
 		{
 			// Electron classes come from the loaded game assembly via the scripting seam.
@@ -276,7 +325,15 @@ bool EditorUI::AssetPicker(const char* label, std::string& guid, const std::stri
 					size_t nl = names.find('\n', start);
 					if (nl == std::string::npos) nl = names.size();
 					std::string cls = names.substr(start, nl - start);
-					if (!cls.empty()) { item(cls, cls); any = true; }
+					if (!cls.empty())
+					{
+						const char* ic = sv->Icon();
+						const std::string row = std::string(*ic ? ic : ICON_FT_DEFAULT) + "  " + cls + "##" + cls;
+						if (!ciContains(cls, flt)) { start = nl + 1; continue; }
+						if (ImGui::Selectable(row.c_str(), cls == guid))
+						{ guid = cls; changed = true; ImGui::CloseCurrentPopup(); }
+						any = true;
+					}
 					start = nl + 1;
 				}
 				break;
@@ -1683,6 +1740,8 @@ void EditorUI::DrawAssetInspector(const std::string& path)
 	ImGui::SameLine(); ImGui::TextDisabled("%s", ext.c_str());
 	// Types with a dedicated editor window, module-supplied ones included.
 	const bool hasOwnEditor = ext == ".numat" || ext == ".numesh" || ext == ".nuprefab"
+	                       || ext == ".nuanim" || ext == ".nusm" || ext == ".nublend"
+	                       || ext == ".nuskel" || ext == ".nurag" || ext == ".nubonemap"
 	                       || nuke::AssetEditorForExt(ext) != nullptr;
 	if (hasOwnEditor)
 	{
@@ -1865,7 +1924,8 @@ void EditorUI::DrawAssetInspector(const std::string& path)
 		if (inspPv && inspPv->mr->mesh && pvStaged == path)
 		{
 			nuke::Mesh* m = inspPv->mr->mesh;
-			ImGui::Text("%d vertices   %d triangles", m->numVerts, m->numVerts / 3);
+			ImGui::Text("%d vertices   %d triangles   %d section(s)   %d LOD(s)",
+			            m->numVerts, m->TriCount(), m->SectionCount(), m->LodCount());
 			m->EnsureBounds();
 			ImGui::Text("Bounds: %.2f x %.2f x %.2f",
 				m->aabbMax[0] - m->aabbMin[0], m->aabbMax[1] - m->aabbMin[1], m->aabbMax[2] - m->aabbMin[2]);

@@ -81,7 +81,18 @@ void EditorUI::StatusBarPanel()
 			if (e.text.empty()) continue;
 			sep();
 			ImGui::TextUnformatted(e.text.c_str());
-			if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", e.key.c_str());
+			// The timings field is the entry point to the profiler window — clicking the numbers
+			// is where anyone looks for the breakdown.
+			if (e.key == "profiler")
+			{
+				if (ImGui::IsItemHovered())
+				{
+					ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+					ImGui::SetTooltip("Click for the profiler breakdown");
+				}
+				if (ImGui::IsItemClicked()) { profilerOpen = true; profilerFocus = true; }
+			}
+			else if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", e.key.c_str());
 		}
 
 		// ImGui animates a progress bar only for a negative, moving fraction.

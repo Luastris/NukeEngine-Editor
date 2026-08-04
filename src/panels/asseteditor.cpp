@@ -29,6 +29,37 @@ static EditorUI::SpriteMeta SnapMeta(const nuke::Texture* t);
 static void ApplyMeta(nuke::Texture* t, const EditorUI::SpriteMeta& m);
 static void SlicerApplyLive(nuke::Texture* t);
 
+// Clip metadata snapshots for the .nuanim editor's undo (animeditor.cpp).
+std::string EditorAnimMetaJson(const nuke::AnimClip* c);
+void        EditorAnimMetaLoad(nuke::AnimClip* c, const std::string& json);
+// Bone-map snapshots for the .nubonemap editor's undo (skeleteditor.cpp).
+std::string EditorBoneMapJson(const nuke::BoneMap* b);
+void        EditorBoneMapLoad(nuke::BoneMap* b, const std::string& json);
+
+// Generic reflected-field copy between two instances of the SAME type (preview-environment
+// mirroring): typed through Field::addr, so module-added fields follow automatically.
+static void CopyReflectedField(const nuke::Field& f, void* src, void* dst)
+{
+	void* sp = f.addr(src);
+	void* dp = f.addr(dst);
+	if (!sp || !dp) return;
+	using nuke::FT;
+	switch (f.type)
+	{
+		case FT::Bool:   *(bool*)dp = *(bool*)sp; break;
+		case FT::Int:    *(int*)dp = *(int*)sp; break;
+		case FT::Float:  *(float*)dp = *(float*)sp; break;
+		case FT::Double: *(double*)dp = *(double*)sp; break;
+		case FT::String: *(std::string*)dp = *(std::string*)sp; break;
+		case FT::Color:  *(nuke::Color*)dp = *(nuke::Color*)sp; break;
+		case FT::Vec2:   *(nuke::Vector2*)dp = *(nuke::Vector2*)sp; break;
+		case FT::Vec3:   *(nuke::Vector3*)dp = *(nuke::Vector3*)sp; break;
+		case FT::Vec4:   *(nuke::Vector4*)dp = *(nuke::Vector4*)sp; break;
+		case FT::Quat:   *(nuke::Quaternion*)dp = *(nuke::Quaternion*)sp; break;
+		default: break;   // lists/refs are not part of the environment mirror
+	}
+}
+
 // --- Preview-scene pool ----------------------------------------------------
 
 // Take a free pooled preview world, creating one (RT + env/sun/mesh/camera) if needed.
@@ -95,11 +126,17 @@ static void SubtreeBounds(nuke::Atom* a, nuke::Vector3& c, float& r, bool& any)
 {
 	if (!a) return;
 	if (nuke::MeshRenderer* mr = a->GetComponent<nuke::MeshRenderer>())
-		if (mr->mesh)
+	{
+		// Lazily-resolved renderers (skinned instances before the first ApplyPose) still have
+		// a null mesh — fall back to the ASSET's bind-pose bounds, or framing collapses to a
+		// unit sphere at the origin (dead F-focus + microscopic camera speeds on huge models).
+		nuke::Mesh* bm = mr->mesh;
+		if (!bm && !mr->meshGuid.empty()) bm = nuke::ResDB::getSingleton()->GetMesh(mr->meshGuid);
+		if (bm)
 		{
-			mr->mesh->EnsureBounds();
-			const float* mn = mr->mesh->aabbMin;
-			const float* mx = mr->mesh->aabbMax;
+			bm->EnsureBounds();
+			const float* mn = bm->aabbMin;
+			const float* mx = bm->aabbMax;
 			nuke::Vector3 lc((mn[0] + mx[0]) * 0.5, (mn[1] + mx[1]) * 0.5, (mn[2] + mx[2]) * 0.5);
 			nuke::Vector3 sc = a->GetTransform().globalScale();
 			nuke::Vector3 gp = a->GetTransform().globalPosition();
@@ -117,6 +154,7 @@ static void SubtreeBounds(nuke::Atom* a, nuke::Vector3& c, float& r, bool& any)
 				r = nr;
 			}
 		}
+	}
 	for (nuke::Atom* ch : a->children) SubtreeBounds(ch, c, r, any);
 }
 
@@ -182,12 +220,50 @@ void EditorUI::DrawPreviewImage(PreviewWorld& s, ImVec2 size)
 	// Show the top-left pw x ph region of the quantized RT — 1:1 pixels.
 	const ImVec2 uv1(std::min(1.0f, pw / (float)s.rtW), std::min(1.0f, ph / (float)s.rtH));
 	ImGui::Image((ImTextureID)tex, ImVec2(pw, ph), ImVec2(0, 0), uv1);
+	// The preview must LOOK like the scene: mirror the live world's Environment (sky, ambient,
+	// exposure/white point) and its first directional light onto the preview world's pair.
+	{
+		World* live = AppInstance::GetSingleton()->currentWorld;
+		if (live && s.world)
+		{
+			Environment* srcEnv = nullptr;
+			Light* srcSun = nullptr;
+			for (Atom* a : live->GetHierarchy())
+			{
+				if (!a) continue;
+				if (!srcEnv) srcEnv = a->GetComponent<Environment>();
+				if (!srcSun)
+					if (Light* l = a->GetComponent<Light>())
+						if (l->type == Light::Directional) srcSun = l;
+				if (srcEnv && srcSun) break;
+			}
+			if (Atom* pe = s.world->Get("PreviewEnv"))
+				if (Environment* dstEnv = pe->GetComponent<Environment>())
+					if (srcEnv)
+					{
+						// generic reflected copy — module-added fields follow automatically
+						if (nuke::TypeInfo* ti = srcEnv->GetType())
+							for (const nuke::Field& f : ti->fields)
+								CopyReflectedField(f, srcEnv, dstEnv);
+						dstEnv->daySpeed = 0.0f;   // the aux world must not tick its own clock
+					}
+			if (Atom* ps = s.world->Get("PreviewSun"))
+				if (Light* dstSun = ps->GetComponent<Light>())
+					if (srcSun && srcSun->atom)
+					{
+						dstSun->intensity = srcSun->intensity;
+						dstSun->color = srcSun->color;
+						ps->GetTransform().rotation = srcSun->atom->GetTransform().globalRotation();
+					}
+		}
+	}
+
 	ImGuiIO& io = ImGui::GetIO();
 	if (ImGui::IsItemHovered())
 	{
-		// RMB = look, MMB = pan, wheel = dolly, RMB + WASD/QE = fly; LMB stays free for the gizmo/picking.
+		// RMB = look, MMB = pan, wheel = dolly (or speed while flying), RMB + WASD/QE = fly.
 		Transform* t = s.cam->transform;
-		const float k = std::max(0.2f, s.radius);
+		const float k = std::max(0.2f, s.radius) * s.flyMul;
 		const float rotSpeed = 0.005f, panSpeed = 0.0025f * k, zoomSpeed = 0.25f * k;
 
 		// Re-derive yaw/pitch from forward on drag start; recomputing from eulers snaps.
@@ -213,7 +289,16 @@ void EditorUI::DrawPreviewImage(PreviewWorld& s, ImVec2 size)
 			t->position += t->right() * (double)(-io.MouseDelta.x * panSpeed)
 			             + t->up()    * (double)( io.MouseDelta.y * panSpeed);
 		if (io.MouseWheel != 0.0f)
-			t->position += t->direction() * (double)(io.MouseWheel * zoomSpeed);
+		{
+			if (ImGui::IsMouseDown(ImGuiMouseButton_Right))
+			{
+				// wheel while flying tunes the speed multiplier (UE-style), not the dolly
+				s.flyMul = std::max(0.02f, std::min(100.0f, s.flyMul * (1.0f + io.MouseWheel * 0.15f)));
+				s.flyMulHud = 1.2f;
+			}
+			else
+				t->position += t->direction() * (double)(io.MouseWheel * zoomSpeed);
+		}
 
 		if (ImGui::IsMouseDown(ImGuiMouseButton_Right))   // free flight
 		{
@@ -226,6 +311,13 @@ void EditorUI::DrawPreviewImage(PreviewWorld& s, ImVec2 size)
 			if (ImGui::IsKeyDown(ImGuiKey_E)) t->position += t->up()        * (double) fly;
 			if (ImGui::IsKeyDown(ImGuiKey_Q)) t->position += t->up()        * (double)-fly;
 		}
+	}
+	if (s.flyMulHud > 0.0f)   // transient speed HUD after a wheel change
+	{
+		s.flyMulHud -= io.DeltaTime;
+		char hud[32];
+		snprintf(hud, sizeof(hud), "speed x%.2f", s.flyMul);
+		ImGui::GetWindowDrawList()->AddText(ImVec2(p0.x + 8, p0.y + 6), IM_COL32(255, 255, 255, 220), hud);
 	}
 
 	s.visible = true;   // ask the render hook to draw this scene this frame
@@ -339,6 +431,58 @@ void EditorUI::AssetEditorUndo(AssetEditorWin& w)
 		LoadInputMapJson(w, w.undoI.back()); w.undoI.pop_back();
 		w.idleI = InputMapJson(w); w.editing = false; w.dirty = true;
 	}
+	else if (w.ext == ".nuseq" && w.seq && !w.undoQ.empty())
+	{
+		w.redoQ.push_back(w.seq->ToString());
+		if (nuke::Sequence* r = nuke::Sequence::FromString(w.undoQ.back()))
+		{
+			delete w.seq;
+			w.seq = r;
+			if (w.seqPv) w.seqPv->SetSequence(r);
+		}
+		w.undoQ.pop_back();
+		w.idleQ = w.seq->ToString(); w.editing = false; w.dirty = true;
+	}
+	else if (w.ext == ".nuanim" && w.anim && !w.undoAn.empty())
+	{
+		w.redoAn.push_back(EditorAnimMetaJson(w.anim));
+		EditorAnimMetaLoad(w.anim, w.undoAn.back()); w.undoAn.pop_back();
+		w.idleAn = EditorAnimMetaJson(w.anim); w.editing = false; w.dirty = true;
+	}
+	else if (w.ext == ".nusm" && w.sm && !w.undoSm.empty())
+	{
+		w.redoSm.push_back(w.sm->ToString());
+		if (nuke::AnimSM* r = nuke::AnimSM::FromString(w.undoSm.back())) { delete w.sm; w.sm = r; }
+		w.undoSm.pop_back();
+		w.idleSm = w.sm->ToString(); w.editing = false; w.dirty = true;
+	}
+	else if (w.ext == ".nublend" && w.blend && !w.undoB.empty())
+	{
+		w.redoB.push_back(w.blend->ToString());
+		if (nuke::BlendSpace* r = nuke::BlendSpace::FromString(w.undoB.back())) { delete w.blend; w.blend = r; }
+		w.undoB.pop_back();
+		w.idleB = w.blend->ToString(); w.editing = false; w.dirty = true;
+	}
+	else if (w.ext == ".nuskel" && w.skel && !w.undoSk.empty())
+	{
+		w.redoSk.push_back(w.skel->ToString());
+		if (nuke::Skeleton* r = nuke::Skeleton::FromString(w.undoSk.back())) { delete w.skel; w.skel = r; }
+		w.undoSk.pop_back();
+		w.idleSk = w.skel->ToString(); w.editing = false; w.dirty = true;
+	}
+	else if (w.ext == ".nurag" && w.rag && !w.undoRg.empty())
+	{
+		w.redoRg.push_back(w.rag->ToString());
+		if (nuke::RagdollDef* r = nuke::RagdollDef::FromString(w.undoRg.back())) { delete w.rag; w.rag = r; }
+		w.undoRg.pop_back();
+		w.idleRg = w.rag->ToString(); w.editing = false; w.dirty = true;
+	}
+	else if (w.ext == ".nubonemap" && w.bmap && !w.undoBm.empty())
+	{
+		w.redoBm.push_back(EditorBoneMapJson(w.bmap));
+		EditorBoneMapLoad(w.bmap, w.undoBm.back()); w.undoBm.pop_back();
+		w.idleBm = EditorBoneMapJson(w.bmap); w.editing = false; w.dirty = true;
+	}
 }
 
 void EditorUI::AssetEditorRedo(AssetEditorWin& w)
@@ -370,6 +514,58 @@ void EditorUI::AssetEditorRedo(AssetEditorWin& w)
 		w.undoI.push_back(InputMapJson(w));
 		LoadInputMapJson(w, w.redoI.back()); w.redoI.pop_back();
 		w.idleI = InputMapJson(w); w.editing = false; w.dirty = true;
+	}
+	else if (w.ext == ".nuseq" && w.seq && !w.redoQ.empty())
+	{
+		w.undoQ.push_back(w.seq->ToString());
+		if (nuke::Sequence* r = nuke::Sequence::FromString(w.redoQ.back()))
+		{
+			delete w.seq;
+			w.seq = r;
+			if (w.seqPv) w.seqPv->SetSequence(r);
+		}
+		w.redoQ.pop_back();
+		w.idleQ = w.seq->ToString(); w.editing = false; w.dirty = true;
+	}
+	else if (w.ext == ".nuanim" && w.anim && !w.redoAn.empty())
+	{
+		w.undoAn.push_back(EditorAnimMetaJson(w.anim));
+		EditorAnimMetaLoad(w.anim, w.redoAn.back()); w.redoAn.pop_back();
+		w.idleAn = EditorAnimMetaJson(w.anim); w.editing = false; w.dirty = true;
+	}
+	else if (w.ext == ".nusm" && w.sm && !w.redoSm.empty())
+	{
+		w.undoSm.push_back(w.sm->ToString());
+		if (nuke::AnimSM* r = nuke::AnimSM::FromString(w.redoSm.back())) { delete w.sm; w.sm = r; }
+		w.redoSm.pop_back();
+		w.idleSm = w.sm->ToString(); w.editing = false; w.dirty = true;
+	}
+	else if (w.ext == ".nublend" && w.blend && !w.redoB.empty())
+	{
+		w.undoB.push_back(w.blend->ToString());
+		if (nuke::BlendSpace* r = nuke::BlendSpace::FromString(w.redoB.back())) { delete w.blend; w.blend = r; }
+		w.redoB.pop_back();
+		w.idleB = w.blend->ToString(); w.editing = false; w.dirty = true;
+	}
+	else if (w.ext == ".nuskel" && w.skel && !w.redoSk.empty())
+	{
+		w.undoSk.push_back(w.skel->ToString());
+		if (nuke::Skeleton* r = nuke::Skeleton::FromString(w.redoSk.back())) { delete w.skel; w.skel = r; }
+		w.redoSk.pop_back();
+		w.idleSk = w.skel->ToString(); w.editing = false; w.dirty = true;
+	}
+	else if (w.ext == ".nurag" && w.rag && !w.redoRg.empty())
+	{
+		w.undoRg.push_back(w.rag->ToString());
+		if (nuke::RagdollDef* r = nuke::RagdollDef::FromString(w.redoRg.back())) { delete w.rag; w.rag = r; }
+		w.redoRg.pop_back();
+		w.idleRg = w.rag->ToString(); w.editing = false; w.dirty = true;
+	}
+	else if (w.ext == ".nubonemap" && w.bmap && !w.redoBm.empty())
+	{
+		w.undoBm.push_back(EditorBoneMapJson(w.bmap));
+		EditorBoneMapLoad(w.bmap, w.redoBm.back()); w.redoBm.pop_back();
+		w.idleBm = EditorBoneMapJson(w.bmap); w.editing = false; w.dirty = true;
 	}
 }
 
@@ -448,7 +644,93 @@ void EditorUI::OpenAssetEditor(const std::string& path)
 	const bool isAudio = (ext == ".ogg" || ext == ".wav" || ext == ".mp3" || ext == ".flac");
 	// Module-supplied editors win: a module that registers a file type also registers its editor.
 	if (const auto* open = nuke::AssetEditorForExt(ext)) { (*open)(path); return; }
-	if (ext != ".numat" && ext != ".numesh" && ext != ".nuprefab" && ext != ".nutex" && ext != ".nuinput" && !isAudio) return;
+	if (ext != ".numat" && ext != ".numesh" && ext != ".nuprefab" && ext != ".nutex" && ext != ".nuinput"
+	    && ext != ".nuseq" && ext != ".nuanim" && ext != ".nusm" && ext != ".nublend"
+	    && ext != ".nuskel" && ext != ".nurag" && ext != ".nubonemap" && !isAudio) return;
+
+	if (ext == ".nuskel")
+	{
+		AssetEditorWin w;
+		w.path = path; w.ext = ext; w.wantFocus = true; w.detached = detachAssetEditors;
+		w.skel = nuke::Skeleton::LoadFromFile(path);
+		if (!w.skel) return;
+		w.pv = AcquirePreview();
+		if (w.pv) w.pv->mr->mesh = nullptr;
+		w.idleSk = w.skel->ToString();
+		assetEds.push_back(std::move(w));
+		return;
+	}
+	if (ext == ".nurag")
+	{
+		AssetEditorWin w;
+		w.path = path; w.ext = ext; w.wantFocus = true; w.detached = detachAssetEditors;
+		w.rag = nuke::RagdollDef::LoadFromFile(path);
+		if (!w.rag) return;
+		w.pv = AcquirePreview();
+		if (w.pv) w.pv->mr->mesh = nullptr;
+		w.idleRg = w.rag->ToString();
+		assetEds.push_back(std::move(w));
+		return;
+	}
+	if (ext == ".nubonemap")   // pure name pairs: no 3D scene
+	{
+		AssetEditorWin w;
+		w.path = path; w.ext = ext; w.wantFocus = true; w.detached = detachAssetEditors;
+		w.bmap = nuke::BoneMap::LoadFromFile(path);
+		if (!w.bmap) return;
+		w.idleBm = EditorBoneMapJson(w.bmap);
+		assetEds.push_back(std::move(w));
+		return;
+	}
+
+	// stage-10 animation editors: an owned editing copy + a pooled preview world for the rig
+	if (ext == ".nuanim")
+	{
+		AssetEditorWin w;
+		w.path = path; w.ext = ext; w.wantFocus = true; w.detached = detachAssetEditors;
+		w.anim = nuke::AnimClip::LoadFromFile(path);
+		if (!w.anim) return;
+		w.pv = AcquirePreview();
+		if (w.pv) w.pv->mr->mesh = nullptr;
+		w.idleAn = EditorAnimMetaJson(w.anim);   // undo baseline (metadata JSON)
+		assetEds.push_back(std::move(w));
+		return;
+	}
+	if (ext == ".nusm")
+	{
+		AssetEditorWin w;
+		w.path = path; w.ext = ext; w.wantFocus = true; w.detached = detachAssetEditors;
+		w.sm = nuke::AnimSM::LoadFromFile(path);
+		if (!w.sm) return;
+		w.pv = AcquirePreview();
+		if (w.pv) w.pv->mr->mesh = nullptr;
+		w.idleSm = w.sm->ToString();
+		assetEds.push_back(std::move(w));
+		return;
+	}
+	if (ext == ".nublend")
+	{
+		AssetEditorWin w;
+		w.path = path; w.ext = ext; w.wantFocus = true; w.detached = detachAssetEditors;
+		w.blend = nuke::BlendSpace::LoadFromFile(path);
+		if (!w.blend) return;
+		w.pv = AcquirePreview();
+		if (w.pv) w.pv->mr->mesh = nullptr;
+		w.idleB = w.blend->ToString();
+		assetEds.push_back(std::move(w));
+		return;
+	}
+
+	if (ext == ".nuseq")   // sequencer: timeline over the LIVE world, no preview scene
+	{
+		AssetEditorWin w;
+		w.path = path; w.ext = ext; w.wantFocus = true; w.detached = detachAssetEditors;
+		w.seq = nuke::Sequence::LoadFromFile(path);
+		if (!w.seq) return;
+		w.idleQ = w.seq->ToString();   // undo baseline
+		assetEds.push_back(std::move(w));
+		return;
+	}
 
 	if (ext == ".nuinput")   // input map: pure data CRUD, no 3D scene
 	{
@@ -1047,8 +1329,11 @@ void EditorUI::winAssetEditors()
 			{
 				const std::string title = bfs::path(w.path).filename().string();
 				const bool isSlicerH = (w.ext == ".nutex"), isInputH = (w.ext == ".nuinput");
-				const bool isAudioH = !w.pv && !isSlicerH && !isInputH;
-				const int hw = isAudioH ? 460 : (w.ext == ".nuprefab" ? 900 : (isSlicerH ? 760 : (isInputH ? 820 : 640)));
+				const bool isAudioH = !w.pv && !isSlicerH && !isInputH
+				                    && w.ext != ".nuseq" && w.ext != ".nubonemap";
+				const int hw = isAudioH ? 460 : (w.ext == ".nuprefab" ? 900 : (isSlicerH ? 760 : (isInputH ? 820
+				             : w.ext == ".nuanim" ? 1000 : w.ext == ".nusm" ? 1100 : w.ext == ".nublend" ? 900
+				             : w.ext == ".nuskel" ? 960 : w.ext == ".nurag" ? 900 : w.ext == ".nubonemap" ? 700 : 640)));
 				const int hh = isAudioH ? 200 : 640;
 				w.host = NukeUI::HostCreate(title.c_str(), hw, hh);
 				const std::string keyPath = w.path;   // vector may reallocate: look up by path
@@ -1067,9 +1352,11 @@ void EditorUI::winAssetEditors()
 			if (w.dragOut) { NukeUI::HostBeginDrag(w.host, 220.0f, 12.0f); w.dragOut = false; }
 			// Content-window flags mirror the docked window.
 			{
+				// NoScrollbar only: the WINDOW never scrolls (size-oscillation flicker), but the
+				// wheel must still reach scrollable children (the prefab hierarchy tree).
 				const bool isInputH = (w.ext == ".nuinput");
 				NukeUI::HostSetContentFlags(w.host, (w.dirty ? ImGuiWindowFlags_UnsavedDocument : 0)
-				    | (isInputH ? 0 : (ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)));
+				    | (isInputH ? 0 : ImGuiWindowFlags_NoScrollbar));
 			}
 			float dropX = 0, dropY = 0;
 			if (NukeUI::HostDockDrop(w.host, &dropX, &dropY))
@@ -1104,18 +1391,39 @@ void EditorUI::winAssetEditors()
 		}
 		const bool isSlicer = (w.ext == ".nutex");
 		const bool isInput  = (w.ext == ".nuinput");
-		const bool isAudio = !w.pv && !isSlicer && !isInput;
-		ImGui::SetNextWindowSize(isAudio ? ImVec2(420.0f, 170.0f)
-		                                 : ImVec2(w.ext == ".nuprefab" ? 900.0f : (isSlicer ? 760.0f : (isInput ? 820.0f : 420.0f)), 640.0f), ImGuiCond_FirstUseEver);
-		const char* icon = isAudio ? ICON_LC_MUSIC : isSlicer ? ICON_LC_GRID_2X2 : isInput ? ICON_LC_SETTINGS_2
+		const bool isSeq    = (w.ext == ".nuseq");
+		const bool isAnim   = (w.ext == ".nuanim");
+		const bool isSm     = (w.ext == ".nusm");
+		const bool isBlend  = (w.ext == ".nublend");
+		const bool isSkel  = (w.ext == ".nuskel");
+		const bool isRag   = (w.ext == ".nurag");
+		const bool isBmap  = (w.ext == ".nubonemap");
+		const bool isAudio = !w.pv && !isSlicer && !isInput && !isSeq && !isBmap;
+		const float edW = w.ext == ".nuprefab" ? 900.0f : isSlicer ? 760.0f : isInput ? 820.0f
+		                : isSeq ? 980.0f : isAnim ? 1000.0f : isSm ? 1100.0f : isBlend ? 900.0f
+		                : isSkel ? 960.0f : isRag ? 900.0f : isBmap ? 700.0f : 420.0f;
+		ImGui::SetNextWindowSize(isAudio ? ImVec2(420.0f, 170.0f) : ImVec2(edW, 640.0f), ImGuiCond_FirstUseEver);
+		const char* icon = isSeq ? ICON_LC_FILM : isAnim ? ICON_LC_PLAY : isSm ? ICON_LC_WORKFLOW
+		                 : isBlend ? ICON_LC_BLEND
+		                 : (isSkel || isBmap) ? ICON_LC_BONE : isRag ? ICON_LC_PERSON_STANDING
+		                 : isAudio ? ICON_LC_MUSIC : isSlicer ? ICON_LC_GRID_2X2 : isInput ? ICON_LC_SETTINGS_2
 		                 : w.ext == ".numat" ? ICON_LC_PALETTE : (w.ext == ".numesh" ? ICON_LC_BOX : ICON_LC_PACKAGE);
 		std::string title = std::string(icon) + " " + bfs::path(w.path).filename().string() + "###ae:" + w.path;
-		// Preview editors get no scrollbars: they size to free space, so a flickering scrollbar
-		// would oscillate that size every frame. Form editors (.nuinput) scroll normally.
-		ImGuiWindowFlags wf = window_flags | (w.dirty ? ImGuiWindowFlags_UnsavedDocument : 0)
-		                    | (isInput ? 0 : (ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse));
+		// Preview editors get no WINDOW scrollbar: they size to free space, so a flickering
+		// scrollbar would oscillate that size every frame. The wheel still routes to scrollable
+		// children (hierarchy tree). Form editors (.nuinput/.nuseq) scroll normally.
+		// NoCollapse: a title double-click must MAXIMIZE (WindowCaptionButtons), never roll the
+		// window up into a strip — imgui would eat the double-click inside Begin otherwise.
+		ImGuiWindowFlags wf = window_flags | ImGuiWindowFlags_NoCollapse
+		                    | (w.dirty ? ImGuiWindowFlags_UnsavedDocument : 0)
+		                    | ((isInput || isSeq || isBmap) ? 0 : ImGuiWindowFlags_NoScrollbar);
 		if (ImGui::Begin(title.c_str(), &w.open, wf))
+		{
+			// minimize/maximize next to imgui's X once this window owns an OS window (native
+			// viewports) — no-op while it is docked inside the main one
+			NukeUI::WindowCaptionButtons();
 			DrawAssetEditorBody(i);
+		}
 		ImGui::End();
 		if (!w.open && w.dirty)
 		{
@@ -1139,6 +1447,13 @@ void EditorUI::winAssetEditors()
 				else if (w.ext == ".nuprefab" && w.prefabRoot) nuke::SavePrefab(w.prefabRoot, w.path);
 				else if (w.ext == ".nutex"    && w.tex)        { w.tex->SaveToFile(w.path); SlicerApplyLive(w.tex); }
 				else if (w.ext == ".nuinput")                  SaveInputAsset(w);
+				else if (w.ext == ".nuseq"    && w.seq)        w.seq->SaveToFile(w.path);
+				else if (w.ext == ".nuanim"   && w.anim)       w.anim->SaveToFile(w.path);
+				else if (w.ext == ".nusm"     && w.sm)         w.sm->SaveToFile(w.path);
+				else if (w.ext == ".nublend"  && w.blend)      w.blend->SaveToFile(w.path);
+				else if (w.ext == ".nuskel"   && w.skel)       w.skel->SaveToFile(w.path);
+				else if (w.ext == ".nurag"    && w.rag)        w.rag->SaveToFile(w.path);
+				else if (w.ext == ".nubonemap" && w.bmap)      w.bmap->SaveToFile(w.path);
 				w.dirty = false; w.open = false; aeCloseConfirm = -1; ImGui::CloseCurrentPopup();
 			}
 			ImGui::SameLine();
@@ -1171,6 +1486,28 @@ void EditorUI::winAssetEditors()
 				w.texPreview = 0;
 			}
 			if (w.tex) delete w.tex;
+			delete w.seqPv;
+			delete w.seq;
+			// stage-10 editors: rig atoms out of their worlds FIRST — a live Animator must not
+			// outlive the editing copies its preview pointers reference.
+			if (w.anAtomId && w.pv)   w.pv->world->RemoveAtomById(w.anAtomId);
+			if (w.smAtomId && w.pv)   w.pv->world->RemoveAtomById(w.smAtomId);
+			if (w.blAtomId && w.pv)   w.pv->world->RemoveAtomById(w.blAtomId);
+			if (w.skAtomId && w.pv)   w.pv->world->RemoveAtomById(w.skAtomId);
+			if (w.rgAtomId && w.pv)   w.pv->world->RemoveAtomById(w.rgAtomId);
+			if (w.anPv2)
+			{
+				if (w.anAtomId2) w.anPv2->world->RemoveAtomById(w.anAtomId2);
+				ReleasePreview(w.anPv2);
+				w.anPv2 = nullptr;
+			}
+			delete w.anim;
+			delete w.sm;
+			delete w.blend;
+			delete w.blSm;
+			delete w.skel;
+			delete w.rag;
+			delete w.bmap;
 			if (w.pv) ReleasePreview(w.pv);
 			if (w.host) { NukeUI::HostDestroy(w.host); w.host = nullptr; }
 			assetEds.erase(assetEds.begin() + i);
@@ -1183,8 +1520,64 @@ void EditorUI::DrawAssetEditorBody(int i)
 	AssetEditorWin& w = assetEds[i];
 	const bool isSlicer = (w.ext == ".nutex");
 	const bool isInput  = (w.ext == ".nuinput");
-	const bool isAudio  = !w.pv && !isSlicer && !isInput;
+	const bool isSeq    = (w.ext == ".nuseq");
+	const bool isAnim   = (w.ext == ".nuanim");
+	const bool isSm     = (w.ext == ".nusm");
+	const bool isBlend  = (w.ext == ".nublend");
+	const bool isSkel   = (w.ext == ".nuskel");
+	const bool isRag    = (w.ext == ".nurag");
+	const bool isBmap   = (w.ext == ".nubonemap");
+	const bool isAudio  = !w.pv && !isSlicer && !isInput && !isSeq && !isBmap;
 	(void)isAudio;
+	if (isSeq || isAnim || isSm || isBlend || isSkel || isRag || isBmap)   // asset editors with their own body + burst-latched undo
+	{
+		const bool edFocused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+		if (edFocused) aeFocused = i;
+		if (isSeq)        DrawSequenceEditor(w);
+		else if (isAnim)  DrawAnimEditor(w);
+		else if (isSm)    DrawSMEditor(w);
+		else if (isBlend) DrawBlendEditor(w);
+		else if (isSkel)  DrawSkeletonEditor(w);
+		else if (isRag)   DrawRagdollEditor(w);
+		else              DrawBoneMapEditor(w);
+		if (edFocused && ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S, false))
+		{
+			if (isSeq && w.seq)          w.seq->SaveToFile(w.path);
+			else if (isAnim && w.anim)   w.anim->SaveToFile(w.path);
+			else if (isSm && w.sm)       w.sm->SaveToFile(w.path);
+			else if (isBlend && w.blend) w.blend->SaveToFile(w.path);
+			else if (isSkel && w.skel)   w.skel->SaveToFile(w.path);
+			else if (isRag && w.rag)     w.rag->SaveToFile(w.path);
+			else if (isBmap && w.bmap)   w.bmap->SaveToFile(w.path);
+			w.dirty = false;
+		}
+		// per-window undo latch (one edit burst = one entry), .nuinput pattern
+		std::vector<std::string>& undo = isSeq ? w.undoQ : isAnim ? w.undoAn : isSm ? w.undoSm
+		                               : isBlend ? w.undoB : isSkel ? w.undoSk : isRag ? w.undoRg : w.undoBm;
+		std::vector<std::string>& redo = isSeq ? w.redoQ : isAnim ? w.redoAn : isSm ? w.redoSm
+		                               : isBlend ? w.redoB : isSkel ? w.redoSk : isRag ? w.redoRg : w.redoBm;
+		std::string& idle = isSeq ? w.idleQ : isAnim ? w.idleAn : isSm ? w.idleSm
+		                  : isBlend ? w.idleB : isSkel ? w.idleSk : isRag ? w.idleRg : w.idleBm;
+		if (w.editedNow && !w.editing && !idle.empty())
+		{
+			undo.push_back(idle);
+			if (undo.size() > 64) undo.erase(undo.begin());
+			redo.clear();
+		}
+		w.editing = w.editedNow;
+		w.editedNow = false;
+		if (!w.editing)
+		{
+			if (isSeq && w.seq)          idle = w.seq->ToString();
+			else if (isAnim && w.anim)   idle = EditorAnimMetaJson(w.anim);
+			else if (isSm && w.sm)       idle = w.sm->ToString();
+			else if (isBlend && w.blend) idle = w.blend->ToString();
+			else if (isSkel && w.skel)   idle = w.skel->ToString();
+			else if (isRag && w.rag)     idle = w.rag->ToString();
+			else if (isBmap && w.bmap)   idle = EditorBoneMapJson(w.bmap);
+		}
+		return;
+	}
 			const bool focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
 			if (focused) aeFocused = i;   // Ctrl+Z/Ctrl+Y route to this window's history
 			bool wantSave = false;
@@ -1261,7 +1654,7 @@ void EditorUI::DrawAssetEditorBody(int i)
 				{
 					m->EnsureBounds();
 					ImGui::Text("%d vertices   %d triangles   bounds %.2f x %.2f x %.2f",
-						m->numVerts, m->numVerts / 3,
+						m->numVerts, m->TriCount(),
 						m->aabbMax[0] - m->aabbMin[0], m->aabbMax[1] - m->aabbMin[1], m->aabbMax[2] - m->aabbMin[2]);
 				}
 				else ImGui::TextDisabled("Mesh is not in the resource DB.");
@@ -1297,7 +1690,8 @@ void EditorUI::DrawAssetEditorBody(int i)
 				}
 
 				// Left: hierarchy tree. Right: gizmo toolbar + 3D view, atom editor below.
-				ImGui::BeginChild("##ptree", ImVec2(240, 0), ImGuiChildFlags_ResizeX | ImGuiChildFlags_Borders);
+				ImGui::BeginChild("##ptree", ImVec2(240, 0), ImGuiChildFlags_ResizeX | ImGuiChildFlags_Borders,
+				                  ImGuiWindowFlags_HorizontalScrollbar);   // deep rigs overflow to the right
 				DrawPrefabTree(w, w.prefabRoot);
 				ImGui::EndChild();
 				ImGui::SameLine();
@@ -1412,9 +1806,12 @@ void EditorUI::DrawAssetEditorBody(int i)
 						ImGuizmo::PopID();
 					}
 
-					// LMB picking: ray from the preview camera through the click point.
+					// LMB picking: ray from the preview camera through the click point. The window-
+					// hover gate keeps clicks landing in OVERLAYS (the Add Component popup opens
+					// over the 3D view) from re-picking/deselecting under the popup.
 					if (w.pv->cam && w.pv->cam->transform && !w.pv->gizmoBusy
-					    && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+					    && ImGui::IsMouseClicked(ImGuiMouseButton_Left)
+					    && ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows))
 					{
 						const ImVec2 mp = ImGui::GetIO().MousePos;
 						const ImVec2 rmin = w.pv->rectMin;

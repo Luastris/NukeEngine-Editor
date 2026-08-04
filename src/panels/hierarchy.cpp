@@ -91,6 +91,15 @@ void EditorUI::DrawAtomNode(Atom* atom)
 	if (app->selectedInHieararchy == atom) fl |= ImGuiTreeNodeFlags_Selected;
 	if (atom->children.empty())            fl |= ImGuiTreeNodeFlags_Leaf;
 	if (searching)                       ImGui::SetNextItemOpen(true);   // reveal matches
+	// A selection made ELSEWHERE (viewport click, script, undo) must become visible here: the
+	// branch above it opens and the row scrolls into view, once per selection change.
+	if (hierRevealPending)
+	{
+		bool isAncestor = false;
+		for (Atom* p = app->selectedInHieararchy ? app->selectedInHieararchy->parent : nullptr; p; p = p->parent)
+			if (p == atom) { isAncestor = true; break; }
+		if (isAncestor) ImGui::SetNextItemOpen(true);
+	}
 
 	std::string rowLabel = std::string(AtomIcon(atom)) + " " + atom->GetName();
 	if (!atom->modOrigin.empty()) rowLabel += "  [" + atom->modOrigin + "]";
@@ -99,6 +108,11 @@ void EditorUI::DrawAtomNode(Atom* atom)
 	if (dim) ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
 	bool open = ImGui::TreeNodeEx(rowLabel.c_str(), fl);
 	if (dim) ImGui::PopStyleColor();
+	if (hierRevealPending && app->selectedInHieararchy == atom)
+	{
+		ImGui::SetScrollHereY(0.5f);   // centre the row
+		hierRevealPending = false;
+	}
 	if (!atom->modOrigin.empty() && ImGui::IsItemHovered())
 		ImGui::SetTooltip("Added by mod: %s", atom->modOrigin.c_str());
 	// Select on mouse RELEASE, not press: selecting on press switches the inspector mid-drag and kills
@@ -174,7 +188,8 @@ void EditorUI::DrawAtomNode(Atom* atom)
 void EditorUI::winHierarchy()
 {
 	if (!win->hierarchy) return;
-	NukeUI::DocPanel("panel:hierarchy", "Hierarchy", &win->hierarchy, window_flags, 300, 620, [this]()
+	NukeUI::DocPanel("panel:hierarchy", "Hierarchy", &win->hierarchy,
+	                 window_flags | ImGuiWindowFlags_HorizontalScrollbar, 300, 620, [this]()
 	{
 	if (bootLoading) { ImGui::TextDisabled("Loading project..."); return; }   // world still streaming in
 	AppInstance* app = AppInstance::GetSingleton();
@@ -190,6 +205,12 @@ void EditorUI::winHierarchy()
 		if (ImGui::Selectable((std::string(ICON_LC_VIDEO) + " " + cam->GetName() + "##editorcam").c_str(), sel))
 			app->selectedInHieararchy = cam;
 		ImGui::Separator();
+	}
+
+	if (app->selectedInHieararchy != hierLastSel)
+	{
+		hierLastSel = app->selectedInHieararchy;
+		hierRevealPending = app->selectedInHieararchy != nullptr;
 	}
 
 	for (Atom* atom : app->currentWorld->GetHierarchy())

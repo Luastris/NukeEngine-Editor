@@ -48,6 +48,9 @@ void EditorUI::SaveProject()
 	j["hdrPaperWhite"]   = hdrPaperWhite;    // HDR10 diffuse-white nits
 	j["hdrPeak"]         = hdrPeak;          // HDR10 peak nits
 	j["plugins"]      = enabledPlugins;
+	// The seen-plugins ledger: an entry missing from "plugins" but present here was turned OFF
+	// deliberately, so the editor must not re-enable it on the next start.
+	j["pluginsSeen"]  = std::vector<std::string>(knownPlugins.begin(), knownPlugins.end());
 	// Service choices (service -> dll). For PHASE_BOOT services a persisted choice may be a
 	// pending restart-switch, so it must never be overwritten with the live provider.
 	for (auto& m : nuke::GetModules())
@@ -115,11 +118,17 @@ void EditorUI::LoadProject()
 		for (auto& kv : j["services"].items())
 			if (kv.value().is_string()) serviceChoices[kv.key()] = kv.value().get<std::string>();
 	enabledPlugins.clear();
+	knownPlugins.clear();
 	if (j.contains("plugins") && j["plugins"].is_array())
 	{
 		pluginListLoaded = true;
 		for (auto& p : j["plugins"]) enabledPlugins.push_back(p.get<std::string>());
+		// Older projects have no ledger: everything listed counts as seen, and anything else is
+		// treated as new (offered once) rather than as a deliberate "off".
+		for (const std::string& p : enabledPlugins) knownPlugins.insert(p);
 	}
+	if (j.contains("pluginsSeen") && j["pluginsSeen"].is_array())
+		for (auto& p : j["pluginsSeen"]) knownPlugins.insert(p.get<std::string>());
 	// Render-layer slot names -> the engine's Layers registry.
 	if (j.contains("layers") && j["layers"].is_array())
 	{
@@ -303,15 +312,37 @@ void EditorUI::ApplyProjectPlugins()
 		pluginListLoaded = true;
 		SaveProject();
 	}
+	auto listed = [&](const std::string& file)
+	{ return std::find(enabledPlugins.begin(), enabledPlugins.end(), file) != enabledPlugins.end(); };
+
 	for (auto& m : mods)
 	{
 		if (m->phase() == nuke::PHASE_BOOT) continue;
-		// Editor tooling modules are always on, independent of the per-project plugin list.
-		// editorTool() is an ABI-2 slot: older module DLLs have a shorter vtable, so the ABI check is required.
-		bool want = (nuke::ModuleAbi(m.get()) >= 2 && m->editorTool())
-		         || std::find(enabledPlugins.begin(), enabledPlugins.end(), m->moduleFile) != enabledPlugins.end();
+		// An editor companion is OFFERED by default, not forced: a module the user unticked stays
+		// off (it is simply absent from the project's list), and one that appeared after the list
+		// was written is enabled on first sight and recorded. Every vtable query goes through the
+		// engine's shielded wrappers — a stale plugin must not kill the editor at startup.
+		const bool isTool = nuke::ModuleIsEditorTool(m.get());
+		bool want = listed(m->moduleFile);
+		if (!want && isTool && !knownPlugins.count(m->moduleFile))
+		{
+			want = true;
+			enabledPlugins.push_back(m->moduleFile);
+			pluginListDirty = true;
+		}
+		// A companion has nothing to edit while its runtime module is off — and its panels would
+		// reference component types that are not registered at all.
+		const std::string companion = nuke::ModuleCompanionOf(m.get());
+		if (want && !companion.empty() && !listed(companion))
+		{
+			std::cout << "[editor]	" << m->moduleFile << " stays off: its runtime module '"
+			          << companion << "' is disabled" << std::endl;
+			want = false;
+		}
+		knownPlugins.insert(m->moduleFile);
 		if (want) nuke::EnablePlugin(m.get());
 	}
+	if (pluginListDirty) { pluginListDirty = false; SaveProject(); }
 }
 
 // Rebuild the project's plugin list from what's currently loaded, and persist it.
@@ -319,7 +350,11 @@ void EditorUI::SyncEnabledPlugins()
 {
 	enabledPlugins.clear();
 	for (auto& m : nuke::GetModules())
-		if (m->loaded && m->phase() != nuke::PHASE_BOOT) enabledPlugins.push_back(m->moduleFile);
+	{
+		if (!m || m->phase() == nuke::PHASE_BOOT) continue;
+		knownPlugins.insert(m->moduleFile);          // seen, whether it ends up on or off
+		if (m->loaded) enabledPlugins.push_back(m->moduleFile);
+	}
 	SaveProject();
 }
 

@@ -33,6 +33,61 @@ static bool s_canvasGizmoHot = false;
 static bool s_riverGizmoHot = false;
 
 // Ray-picks the atom under a screen point inside the viewport image; null when nothing is hit.
+// The world point under the cursor: the first surface the ray meets, else the ground plane at
+// the camera's focus height. This is where a dropped asset belongs — the drop position IS the
+// user's intent, and "spawn at the origin, then hunt for it" is not a workflow.
+static nuke::Vector3 DropPointAt(nuke::Camera* cam, ImVec2 rmin, ImVec2 sz, ImVec2 mp)
+{
+	nuke::Vector3 out(0, 0, 0);
+	if (!cam || !cam->transform || sz.x <= 0.0f || sz.y <= 0.0f) return out;
+	nuke::Transform* t = cam->transform;
+	const float ndcx = ((mp.x - rmin.x) / sz.x) * 2.0f - 1.0f;
+	const float ndcy = 1.0f - ((mp.y - rmin.y) / sz.y) * 2.0f;
+	nuke::Vector3 o = t->globalPosition();
+	nuke::Vector3 f = t->direction(), rr = t->right(), uu = t->up();
+	const float aspect = sz.x / sz.y;
+	nuke::Vector3 dir = f;
+	if (cam->projBlend >= 0.5f)   // ortho: the origin slides, the direction is constant
+	{
+		const float halfH = (cam->orthoSize > 1e-4f) ? cam->orthoSize : 1.0f, halfW = halfH * aspect;
+		o = nuke::Vector3(o.x + ndcx * halfW * rr.x + ndcy * halfH * uu.x,
+		                  o.y + ndcx * halfW * rr.y + ndcy * halfH * uu.y,
+		                  o.z + ndcx * halfW * rr.z + ndcy * halfH * uu.z);
+	}
+	else
+	{
+		const float thf = tanf((float)cam->fov * 0.5f * 0.01745329252f);
+		dir = nuke::Vector3(f.x + ndcx * thf * aspect * rr.x + ndcy * thf * uu.x,
+		                    f.y + ndcx * thf * aspect * rr.y + ndcy * thf * uu.y,
+		                    f.z + ndcx * thf * aspect * rr.z + ndcy * thf * uu.z);
+	}
+	const double dl = std::sqrt(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
+	if (dl > 1e-9) { dir.x /= dl; dir.y /= dl; dir.z /= dl; }
+
+	float dist = 0.0f;
+	if (nuke::AppInstance::GetSingleton()->currentWorld->PickDist(o, dir, dist) && dist > 0.0f)
+		return nuke::Vector3(o.x + dir.x * dist, o.y + dir.y * dist, o.z + dir.z * dist);
+	// Nothing under the cursor: fall to y = 0, or 10 m ahead when the ray never gets there.
+	if (std::fabs(dir.y) > 1e-4 && (-o.y / dir.y) > 0.0)
+	{
+		const double t0 = -o.y / dir.y;
+		return nuke::Vector3(o.x + dir.x * t0, 0.0, o.z + dir.z * t0);
+	}
+	return nuke::Vector3(o.x + dir.x * 10.0, o.y + dir.y * 10.0, o.z + dir.z * 10.0);
+}
+
+// Landing marker drawn while the payload hovers: a ground cross + a small box, so the drop is
+// aimed rather than guessed.
+static void DrawDropPreview(const nuke::Vector3& p)
+{
+	const nuke::Color c(0.35, 0.85, 1.0, 1.0);
+	nuke::DebugDraw::WireBox(nuke::Vector3(p.x, p.y + 0.5, p.z), nuke::Vector3(0.5, 0.5, 0.5),
+	                         nuke::Quaternion(0, 0, 0, 1), c);
+	nuke::DebugDraw::Line(nuke::Vector3(p.x - 1.0, p.y, p.z), nuke::Vector3(p.x + 1.0, p.y, p.z), c);
+	nuke::DebugDraw::Line(nuke::Vector3(p.x, p.y, p.z - 1.0), nuke::Vector3(p.x, p.y, p.z + 1.0), c);
+	nuke::DebugDraw::WireCircle(p, nuke::Vector3(0, 1, 0), 0.6, c);
+}
+
 static nuke::Atom* PickAtScreen(nuke::Camera* cam, ImVec2 rmin, ImVec2 sz, ImVec2 mp)
 {
 	if (!cam || !cam->transform || sz.x <= 0.0f || sz.y <= 0.0f) return nullptr;
@@ -272,22 +327,43 @@ void EditorUI::winRender()
 		if (tex)
 		{
 			ImGui::Image((ImTextureID)tex, avail);
-			// Drop: material/texture applies to the atom under the cursor, anything else spawns.
+			// Drop: material/texture applies to the atom under the cursor, anything else spawns
+			// AT THE CURSOR — the drop point is where the object belongs, not the world origin.
 			if (ImGui::BeginDragDropTarget())
 			{
-				if (const ImGuiPayload* dp = ImGui::AcceptDragDropPayload("NUKE_ASSET"))
+				const ImVec2 dropMin = ImGui::GetItemRectMin(), dropSz = ImGui::GetItemRectSize();
+				// AcceptBeforeDelivery gives the payload while the mouse is still down, which is
+				// what makes a live preview possible.
+				if (const ImGuiPayload* dp = ImGui::AcceptDragDropPayload("NUKE_ASSET",
+				                                 ImGuiDragDropFlags_AcceptBeforeDelivery))
 				{
 					std::string dpath((const char*)dp->Data), dext;
 					size_t dot = dpath.find_last_of('.');
 					if (dot != std::string::npos) dext = dpath.substr(dot);
 					std::transform(dext.begin(), dext.end(), dext.begin(), ::tolower);
-					if (dext == ".numat" || dext == ".nutex")
+					const bool onAtom = (dext == ".numat" || dext == ".nutex");
+					nuke::Vector3 dropPos;
+					const bool spawnable = !onAtom && (dext == ".nuprefab" || dext == ".numesh");
+					if (spawnable) dropPos = DropPointAt(driveCam, dropMin, dropSz, ImGui::GetMousePos());
+					if (!dp->IsDelivery())
+					{
+						// Hovering: show WHERE it will land (wire box on the surface under the cursor).
+						if (spawnable) DrawDropPreview(dropPos);
+					}
+					else if (onAtom)
 					{
 						// Must pick with the camera that ACTUALLY renders the image (game cam while possessed).
-						if (nuke::Atom* hit = PickAtScreen(driveCam, ImGui::GetItemRectMin(), ImGui::GetItemRectSize(), ImGui::GetMousePos()))
+						if (nuke::Atom* hit = PickAtScreen(driveCam, dropMin, dropSz, ImGui::GetMousePos()))
 							DropAssetOnAtom(hit, dpath);
 					}
-					else DropAsset(dpath);
+					else if (nuke::Atom* spawned = DropAsset(dpath))
+					{
+						if (spawnable)
+						{
+							nuke::Transform& st = spawned->GetTransform();
+							st.SetGlobal(dropPos, st.globalRotation(), st.globalScale());
+						}
+					}
 				}
 				ImGui::EndDragDropTarget();
 			}
@@ -870,8 +946,21 @@ void EditorUI::winRender()
 					Vector3 dir(f.x + ndcx * thf * aspect * rr.x + ndcy * thf * uu.x,
 					            f.y + ndcx * thf * aspect * rr.y + ndcy * thf * uu.y,
 					            f.z + ndcx * thf * aspect * rr.z + ndcy * thf * uu.z);
-					AppInstance::GetSingleton()->selectedInHieararchy =
-						AppInstance::GetSingleton()->currentWorld->Pick(o, dir);
+					Atom* hit = AppInstance::GetSingleton()->currentWorld->Pick(o, dir);
+					// A model is a SUBTREE: the first click grabs the whole thing (its root), the
+					// next one drills into the part actually under the cursor, and a third returns
+					// to the root — so clicking never fights the hierarchy.
+					Atom*& sel = AppInstance::GetSingleton()->selectedInHieararchy;
+					if (!hit) sel = nullptr;
+					else
+					{
+						Atom* root = hit;
+						while (root->GetParent()) root = root->GetParent();
+						if (hit == root)          sel = root;                    // single-atom object
+						else if (sel == root)     sel = hit;                     // drill into the part
+						else if (sel == hit)      sel = root;                    // back out to the whole
+						else                      sel = root;                    // new object: whole first
+					}
 				}
 			}
 

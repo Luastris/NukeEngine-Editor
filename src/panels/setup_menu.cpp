@@ -2,6 +2,7 @@
 #include <editor/editorui.h>
 #include <import/assimporter.h>
 #include <API/Model/Package.h>
+#include <interface/AssetCreators.h>
 #include <API/Model/Jobs.h>
 #include <API/Model/StatusBar.h>
 namespace bfs = boost::filesystem;
@@ -24,7 +25,29 @@ void EditorUI::SetUp()
 		io.Fonts->AddFontDefault();
 	}
 	// Lucide glyphs sit high in the line — the 4.0f offset nudges them to centre.
+	// The editor owns the plain source/text files its own text editor opens, so it declares
+	// their icons through the same registry the engine and the modules use.
+	static const struct { const char* ext; const char* icon; } kEditorFileIcons[] = {
+		{ ".cpp", ICON_FT_CPP }, { ".hpp", ICON_FT_CPP }, { ".cc", ICON_FT_CPP }, { ".cxx", ICON_FT_CPP },
+		{ ".c", ICON_FT_C },     { ".h", ICON_FT_C },     { ".inl", ICON_FT_C },  { ".inc", ICON_FT_C },
+		{ ".py", ICON_FT_PYTHON },
+		{ ".json", ICON_FT_JSON }, { ".xml", ICON_FT_XML }, { ".html", ICON_FT_HTML },
+		{ ".css", ICON_FT_CSS },   { ".js", ICON_FT_JAVASCRIPT },
+		{ ".md", ICON_FT_MARKDOWN }, { ".txt", ICON_FT_TEXT }, { ".log", ICON_FT_TEXT },
+		{ ".ini", ICON_FT_CONFIG }, { ".cfg", ICON_FT_CONFIG }, { ".yml", ICON_FT_CONFIG },
+		{ ".yaml", ICON_FT_CONFIG }, { ".toml", ICON_FT_CONFIG },
+		{ ".cmake", ICON_FT_MAKEFILE }, { ".txt.cmake", ICON_FT_MAKEFILE },
+		{ ".bat", ICON_FT_SHELL }, { ".cmd", ICON_FT_SHELL }, { ".sh", ICON_FT_SHELL },
+		{ ".ps1", ICON_FT_POWERSHELL },
+		{ ".ttf", ICON_FT_FONT }, { ".otf", ICON_FT_FONT },
+		{ ".zip", ICON_FT_ZIP }, { ".7z", ICON_FT_ZIP }, { ".rar", ICON_FT_ZIP },
+		{ ".db", ICON_FT_DB }, { ".sqlite", ICON_FT_DB },
+	};
+	for (const auto& e : kEditorFileIcons) nuke::RegisterFileIcon(e.ext, e.icon);
+
 	NukeUI::MergeIconFont("fonts/lucide.ttf", 20.0f, 4.0f);
+	// file-type glyphs (Seti-UI), remapped into plane 15 so they cannot collide with Lucide
+	NukeUI::MergeIconFont("fonts/nukefileicons.ttf", 19.0f, 4.0f, ICON_MIN_FT, ICON_MAX_FT);
 
 	InitMenu();
 
@@ -384,6 +407,8 @@ void EditorUI::EditorMenu()
 			ImGui::MenuItem("Inspector", nullptr, &win->inspector);
 			ImGui::MenuItem("Render", nullptr, &win->render);
 			ImGui::MenuItem("Plugins", nullptr, &win->plugmgr);
+			if (ImGui::MenuItem("Profiler", nullptr, profilerOpen))
+			{ profilerOpen = !profilerOpen; profilerFocus = profilerOpen; }
 			ImGui::MenuItem("About", nullptr, &win->about);
 			ImGui::Separator();
 			ImGui::MenuItem("Project Settings", nullptr, &settingsOpen);

@@ -138,10 +138,10 @@ void EditorUI::PluginMGRWindow()
 				else
 					ImGui::TextDisabled("boot service — switching applies after restart");
 			}
-			if (selectedPlugin->loaded && selectedPlugin->HasSettings())
+			if (selectedPlugin->loaded && nuke::ModuleHasSettings(selectedPlugin.get()))
 			{
 				ImGui::SeparatorText("Settings");
-				selectedPlugin->Settings();   // plugin draws its own settings inline
+				nuke::ModuleDrawSettings(selectedPlugin.get());   // plugin draws its own settings, shielded
 			}
 		}
 		else

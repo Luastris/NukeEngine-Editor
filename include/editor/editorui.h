@@ -1,4 +1,4 @@
-#ifndef EDITORUI_H
+﻿#ifndef EDITORUI_H
 #define EDITORUI_H
 // Editor UI panels: menu, hierarchy, inspector, browser, viewport, settings.
 
@@ -6,6 +6,7 @@
 #include "imgui_internal.h"   // BeginViewportSideBar
 #include "nukeui.h"
 #include "IconsLucide.h"
+#include <interface/IconsFileTypes.h>  // ICON_FT_*: the glyphs a file type can claim
 #include "ImGuizmo.h"         // gizmo lives in NukeImGui, shares the context
 #include "config.h"
 #include "interface/AppInstance.h"
@@ -14,6 +15,7 @@
 #include "API/Model/PostProcess.h"
 #include "API/Model/UnknownComponent.h"
 #include "API/Model/resdb.h"
+#include "API/Model/SequencePlayer.h"
 #include "import/assimporter.h"
 #include "API/Model/Prefab.h"
 #include "reflect/Reflect.h"
@@ -29,6 +31,7 @@
 #include <boost/filesystem/fstream.hpp>
 #include <map>
 #include <functional>
+#include <set>
 #include <string>
 #include <vector>
 #include <cctype>
@@ -103,13 +106,15 @@ private:
 	bool fMesh = true, fMat = true, fTex = true, fPrefab = true;   // browser type filters
 	std::string contentDir = "project/content";   // project content root (imported assets live here)
 	std::string browserCwd;                        // current folder shown in the browser
-	std::string browserSel;                        // selected entry (full path; "" = none)
+	std::string browserSel;                        // primary selected entry (full path; "" = none)
+	std::set<std::string> browserMSel;             // multi-selection (ctrl/shift); superset incl. browserSel
+	std::string browserSelAnchor;                  // shift-range anchor (path of the last plain click)
 	std::vector<std::string> browserBack, browserFwd;   // folder navigation history (M4=back, M5=forward)
 	std::vector<std::string> clipboard;            // browser cut/copy buffer (full paths)
 	bool        clipboardCut = false;              // true: paste MOVES (cut); false: paste COPIES
-	std::string pendingDelete;                     // browser: path awaiting delete-confirm ("" = none)
+	std::vector<std::string> pendingDeletes;       // browser: paths awaiting delete-confirm (empty = none)
 	bool        openDeletePopup = false;           // request to open the delete-confirm modal next frame
-	std::vector<std::string> deleteDeps;           // resources depending on pendingDelete (shown in the modal)
+	std::vector<std::string> deleteDeps;           // resources depending on pendingDeletes (shown in the modal)
 	bool        unlinkOnDelete = false;            // project setting: break refs to a deleted resource
 	// Disk<->editor sync: canonical JSON of the last loaded/saved world state.
 	std::string worldOnDisk;
@@ -146,6 +151,15 @@ private:
 	// Deferred component move ("NUKE_COMPONENT" payload: inspector header -> hierarchy row).
 	struct CompDragPayload { long atomId = 0; long compId = 0; };
 	long dndCompAtomId = 0; long dndCompId = 0; Atom* dndCompDst = nullptr;
+	// Deletion requested while the hierarchy tree is being walked: destroying an atom mid-walk
+	// invalidates the list node the loop stands on, so the request is applied after the walk.
+	long pendingDeleteId = 0;
+	// Hierarchy: reveal (open the branch + scroll to) a selection made outside the panel.
+	Atom* hierLastSel = nullptr;
+	bool  hierRevealPending = false;
+	// Profiler window (Window menu / clicking the status-bar timings).
+	bool profilerOpen = false, profilerFocus = false, profilerFrozen = false;
+	char profilerFilter[64] = "";
 	// Generic undo/redo stack: each action pushes its own inverse closures (atom edits are
 	// captured as a subtree delta, never the whole world). Push via PushUndo / RecordChange<T>.
 	struct UndoCmd { std::function<void()> undo, redo; std::string label; long serial = 0; };
@@ -262,11 +276,16 @@ private:
 	void LoadPreferences();
 	void SavePreferences();
 	void winPreferences();
+	void winProfiler();                                           // live phase breakdown (CPU + GPU)
 	// Open file:line in the user's chosen editor (falls back to the built-in text editor).
 	void OpenExternal(const std::string& file, int line);
 	std::string startupWorld = "scene.nuworld";    // from the .nuproj
 	std::string lastWorld;                         // from editor_state.json: world open when the editor last exited
 	std::vector<std::string> enabledPlugins;       // per-project plugin load list (dll names)
+	// Every plugin this project has ever seen. Without it, "absent from enabledPlugins" cannot
+	// tell a module the user turned OFF from one that did not exist when the list was written.
+	std::set<std::string> knownPlugins;
+	bool pluginListDirty = false;
 	bool pluginListLoaded = false;                 // did the .nuproj specify a plugin list?
 	// Per-project service provider choice: service -> dll name. Boot services apply on next start.
 	std::map<std::string, std::string> serviceChoices;
@@ -446,6 +465,8 @@ public:
 		// Overlay gizmo hovered/grabbed; must be set by the caller INSIDE its ImGuizmo ID
 		// scope (IsUsing()/IsOver() lie outside it). Suppresses orbit while true.
 		bool    gizmoBusy = false;
+		float   flyMul = 1.0f;              // camera speed multiplier (wheel while RMB-flying)
+		float   flyMulHud = 0.0f;           // seconds left to show the speed HUD after a change
 	};
 	std::vector<PreviewWorld*> pvPool;      // every created scene (in use or free)
 	PreviewWorld* AcquirePreview();
@@ -496,6 +517,73 @@ public:
 		std::string idleI;                        // pre-edit baseline (map JSON)
 		Atom*     prefabRoot = nullptr;     // .nuprefab: loaded subtree (lives in pv->world)
 		long      prefabSelId = 0;          // selected atom in the prefab tree (stable id)
+		// .nuseq sequencer: owned editing copy + a detached preview player (atom-less; "/"
+		// paths resolve from the live world's roots) + timeline/record state.
+		nuke::Sequence*       seq = nullptr;
+		nuke::SequencePlayer* seqPv = nullptr;
+		double seqTime = 0; bool seqPlaying = false, seqRecord = false;
+		int    seqSelKind = -1, seqSelTrack = -1, seqSelKey = -1;   // curve-editor target
+		float  seqZoom = 80.0f;             // pixels per second
+		float  seqSnap[10]; bool seqSnapValid = false;   // RECORD: last-frame TRS of the selection
+		std::vector<std::string> undoQ, redoQ;   // .nuseq history (JSON)
+		std::string idleQ;                        // pre-edit baseline
+		// .nuanim animation window: owned editing copy (previewClip-served to the rig) +
+		// timeline/selection state + optional retarget side-by-side (second preview world).
+		nuke::AnimClip* anim = nullptr;
+		double anTime = 0; bool anPlaying = false; float anSpeed = 1.0f;
+		float  anZoom = 80.0f;              // pixels per second
+		int    anSelNotify = -1, anSelEvent = -1, anSelCurve = -1, anSelProp = -1;
+		std::string anRigSkel;             // preview mesh (auto-resolved by skelGuid, overridable)
+		long   anAtomId = 0;                // preview rig atom (lives in pv->world)
+		std::string anRetargetSkel;         // retarget preview: target skeleton guid ("" = off)
+		std::string anRetargetSkel2;         //   target rig mesh (auto by skelGuid, overridable)
+		PreviewWorld* anPv2 = nullptr;      //   right-hand preview world
+		long   anAtomId2 = 0;               //   target rig atom (lives in anPv2->world)
+		std::vector<std::string> undoAn, redoAn;   // clip metadata history (JSON)
+		std::string idleAn;
+		// .nusm node graph: owned editing copy + canvas state + a live preview rig driven by
+		// the controller (SetPreviewController keeps the graph on the EDITING copy).
+		nuke::AnimSM* sm = nullptr;
+		int    smLayer = 0;
+		std::vector<std::string> smPath;    // sub-machine navigation (state names from the layer)
+		std::string smSelState;             // selected state name in the CURRENT scope
+		int    smSelTrans = -1;             // selected transition index in the CURRENT scope
+		float  smPanX = 0, smPanY = 0, smZoom = 1.0f;
+		bool   smLink = false;              // add-transition mode (drag a link to the target)
+		std::string smLinkFrom;             // link source state name ("*" = Any State)
+		std::string smRigSkel;             // preview rig mesh (auto by the first clip's skeleton)
+		long   smAtomId = 0;
+		std::vector<std::string> undoSm, redoSm;
+		std::string idleSm;
+		// .nuskel skeleton editor: owned editing copy (metadata hot-applies to the live asset
+		// on save) + selection + a bind-pose rig for the overlay.
+		nuke::Skeleton* skel = nullptr;
+		int    skSelBone = -1, skSelSocket = -1, skSelGroup = -1, skSelChain = -1;
+		std::string skRigSkel;
+		long   skAtomId = 0;
+		std::vector<std::string> undoSk, redoSk;
+		std::string idleSk;
+		// .nurag ragdoll editor: owned editing copy + capsule selection + fit rig.
+		nuke::RagdollDef* rag = nullptr;
+		int    rgSelBody = -1;
+		std::string rgRigSkel;
+		long   rgAtomId = 0;
+		std::vector<std::string> undoRg, redoRg;
+		std::string idleRg;
+		// .nubonemap editor: owned editing copy + the two skeletons framing the name pairs.
+		nuke::BoneMap* bmap = nullptr;
+		std::string bmSrcSkel, bmDstSkel;
+		std::vector<std::string> undoBm, redoBm;
+		std::string idleBm;
+		// .nublend canvas: owned editing copy + an owned single-state controller driving the rig.
+		nuke::BlendSpace* blend = nullptr;
+		nuke::AnimSM*     blSm = nullptr;   // "preview-sm": one state, motion = the blend space
+		int    blSel = -1;                  // selected point
+		float  blQX = 0, blQY = 0;          // preview query marker (drives paramX/paramY)
+		std::string blRigSkel;
+		long   blAtomId = 0;
+		std::vector<std::string> undoB, redoB;
+		std::string idleB;
 		int       previewMesh = 0;          // .numat: 0 sphere / 1 cube / 2 plane
 		int       gizmoOp = 1;              // prefab 3D view: 0 none / 1 move / 2 rotate / 3 scale
 		bool      gizmoWorld = true;        // gizmo space: world / local (X toggles, like the viewport)
@@ -524,6 +612,19 @@ public:
 	void OpenAssetEditor(const std::string& path);   // open (or focus) the editor for an asset
 	void winAssetEditors();
 	void DrawSpriteSlicer(AssetEditorWin& w);        // .nutex Sprite Slicer body
+	void DrawSequenceEditor(AssetEditorWin& w);      // .nuseq timeline body (sequencer.cpp)
+	void DrawAnimEditor(AssetEditorWin& w);          // .nuanim window (animeditor.cpp)
+	void DrawSMEditor(AssetEditorWin& w);            // .nusm node graph (smeditor.cpp)
+	void DrawBlendEditor(AssetEditorWin& w);         // .nublend canvas (blendeditor.cpp)
+	void DrawSkeletonEditor(AssetEditorWin& w);      // .nuskel sockets/groups/IK rig (skeleteditor.cpp)
+	void DrawRagdollEditor(AssetEditorWin& w);       // .nurag capsules/joints (ragdolleditor.cpp)
+	void DrawBoneMapEditor(AssetEditorWin& w);       // .nubonemap name pairs (skeleteditor.cpp)
+	// Shared timeline widgets (sequencer.cpp), reused by the stage-10 editors:
+	// sorted-upsert of a key, a diamond-key row, and the per-component curve strip.
+	static void UpsertSharedKey(std::vector<nuke::AnimClip::Key>& keys, double t, const float v[4]);
+	static int  SharedKeyRow(const char* id, std::vector<nuke::AnimClip::Key>* keys, float x0, float y,
+	                         float pps, double dur, double* dragT, bool& edited);
+	static bool DrawKeysCurve(const char* id, std::vector<nuke::AnimClip::Key>& keys, int dim, float height);
 	void        DrawInputEditor(AssetEditorWin& w);  // .nuinput editor body (actions/contexts/bindings)
 	std::string InputMapJson(AssetEditorWin& w);                              // serialize w.in* -> JSON
 	void        LoadInputMapJson(AssetEditorWin& w, const std::string& json); // JSON -> w.in*
@@ -571,11 +672,18 @@ public:
 	void ResetToPrefab(Atom* a);                                 // revert this instance to the prefab's saved state
 	void BrowserPaste();                                          // paste the clipboard into the current folder (cut=move, copy=duplicate)
 	void BrowserDelete(const std::string& path);                 // delete a file/folder from disk (immediate)
+	void BrowserSelect(const std::string& path);                 // single-select: primary + multi-set + anchor
+	// The multi-selection when non-empty, else the primary (external writers only set browserSel).
+	std::vector<std::string> BrowserSelection() const;
 	void DrawDeletePopup();                                       // browser delete-confirm modal (Enter=Yes, Esc=Cancel)
-	void RequestDelete(const std::string& path);                 // compute dependents + open the confirm modal
-	void PerformDelete(const std::string& path);                 // (optionally unlink) + delete
-	std::vector<std::string> FindDependents(const std::string& guid);   // content files referencing a guid
+	void RequestDelete(const std::vector<std::string>& paths);   // compute dependents + open the confirm modal
+	void PerformDelete(const std::string& path);                 // single-path convenience (= PerformDeletes)
+	// Batch delete: ONE content scan for the whole set, whatever its size (unlink included).
+	void PerformDeletes(const std::vector<std::string>& paths);
+	// Content files referencing ANY of the guids — one pass over the content tree.
+	std::vector<std::string> FindDependents(const std::vector<std::string>& guids);
 	void UnlinkResource(const std::string& guid);                // reset refs to a guid -> defaults (all worlds/assets)
+	void UnlinkResources(const std::vector<std::string>& guids); // batch: one pass for the whole set
 	void UpdateWindowTitle();                                     // "NukeEngine Editor — <project> — <world>"
 	// Disk<->editor world sync.
 	void SyncWorldBaseline();        // call after open/new/save: snapshot the on-disk state + clear dirty
@@ -599,6 +707,9 @@ public:
 	void CreateWorldAsset(const std::string& folder);    // empty .nuworld
 	void CreateMaterialAsset(const std::string& folder); // default .numat (registered in ResDB)
 	void CreateBoneMapAsset(const std::string& folder);  // .nubonemap retarget map (JSON)
+	void CreateAnimSMAsset(const std::string& folder);   // .nusm animation state machine (JSON)
+	void CreateBlendSpaceAsset(const std::string& folder); // .nublend blend space (JSON)
+	void CreateSequenceAsset(const std::string& folder);   // .nuseq sequence (JSON)
 	void CreateShaderAsset(const std::string& folder);   // .vs/.ps.hlsl pair (registered + pipeline built)
 	void CreateRenderTextureAsset(const std::string& folder);   // .nutex RenderTexture (camera target)
 	// plugins
@@ -642,6 +753,7 @@ public:
 	void RecordReparent(Atom* a, long oldParent, int oldIndex, const std::string& beforeJson);
 	void RecordDelete(Atom* a);                                   // an atom was deleted
 	void DeleteSelectedAtom();                                    // hierarchy: delete the selected atom (undoable)
+	void ApplyPendingAtomDelete();                                // ...applied after the UI walk
 	// Atom clipboard, all undoable. Copy serializes the subtree onto the OS clipboard as a
 	// JSON envelope (so paste works across editor instances); paste clones with fresh ids.
 	void CopySelectedAtom();

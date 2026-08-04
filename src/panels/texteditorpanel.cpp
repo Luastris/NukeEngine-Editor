@@ -16,7 +16,9 @@ static TextEditor::LanguageDefinitionId LangForFile(const std::string& ext)
 		if      (ext == ".lua")                                   lang = "lua";
 		else if (ext == ".hlsl" || ext == ".fx")                  lang = "hlsl";
 		else if (ext == ".glsl" || ext == ".vert" || ext == ".frag") lang = "glsl";
-		else if (ext == ".json" || ext == ".nuproj" || ext == ".numat" || ext == ".nuworld" || ext == ".nuprefab") lang = "json";
+		else if (ext == ".json" || ext == ".nuproj" || ext == ".numat" || ext == ".nuworld" || ext == ".nuprefab"
+		         || ext == ".nusm" || ext == ".nublend" || ext == ".nuskel" || ext == ".nubonemap" || ext == ".nuseq"
+		         || ext == ".nurag") lang = "json";
 		else if (ext == ".c" || ext == ".h" || ext == ".cpp" || ext == ".hpp" || ext == ".cs"
 		         || ext == ".cc" || ext == ".inl" || ext == ".inc") lang = "cpp";
 	}
@@ -38,7 +40,7 @@ bool EditorUI::IsTextFile(const std::string& ext)
 		if (ac->textEditable) return true;
 	static const char* kText[] = { ".lua", ".hlsl", ".fx", ".glsl", ".vert", ".frag",
 	                               ".json", ".txt", ".md", ".ini", ".cfg", ".nuproj",
-	                               ".nubonemap",   // retarget map = plain JSON
+	                               ".nubonemap", ".nusm", ".nublend", ".nuskel", ".nuseq", ".nurag",   // JSON assets
 	                               ".cpp", ".h", ".hpp", ".c", ".cc", ".inl", ".inc", ".cmake" };
 	for (const char* t : kText) if (ext == t) return true;
 	return false;

@@ -397,6 +397,7 @@ void EditorUI::Draw()
 	winSettings();        // Project Settings window (default world + hotkeys)
 	winWorldSettings();   // World Settings window (global shadows etc., saved in the .nuworld)
 	winPreferences();     // engine-wide Preferences (external editor etc., %APPDATA% scope)
+	winProfiler();        // live CPU/GPU phase breakdown
 	winTextEditor();      // Text editor: opened from the browser / asset inspector
 	winAssetEditors();    // Asset editors: material / mesh / prefab windows
 	DrawSaveAsPopup();    // "Save World As" modal
@@ -412,6 +413,7 @@ void EditorUI::Draw()
 	DrawConflictPopup();  // disk changed + editor dirty -> reload/overwrite/merge/ignore
 	DrawMergeWindow();    // the resolve window
 	DispatchHotkeys();    // fire any pressed hotkey chord (after the UI, so fields take input first)
+	ApplyPendingAtomDelete();   // queued hierarchy deletion, now that no tree walk holds the atom
 
 	// Apply queued plugin toggles AFTER the window loop: DisablePlugin()'s Shutdown may
 	// PopWindow (mutating editorWindows), which would invalidate the iterator above.
@@ -602,9 +604,21 @@ void EditorUI::DeleteSelectedAtom()
 	Atom* a = app->selectedInHieararchy;
 	if (!a || a->GetName() == "Editor Camera") return;   // never delete the editor camera
 	RecordDelete(a);                                     // serialize for undo first
-	long id = a->id.id;
 	app->selectedInHieararchy = nullptr;
-	app->currentWorld->RemoveAtomById(id);               // deletes the atom + its subtree
+	// Deleting here would free the atom while the hierarchy is iterating over it (the context
+	// menu is drawn mid-walk): the request is applied at the end of the frame instead.
+	pendingDeleteId = a->id.id;
+}
+
+// Applies a queued deletion once no tree walk is standing on the atom. Called at the end of the
+// editor frame; safe to call when nothing is queued.
+void EditorUI::ApplyPendingAtomDelete()
+{
+	if (!pendingDeleteId) return;
+	const long id = pendingDeleteId;
+	pendingDeleteId = 0;
+	AppInstance* app = AppInstance::GetSingleton();
+	if (app && app->currentWorld) app->currentWorld->RemoveAtomById(id);   // atom + its subtree
 }
 
 // ---- atom clipboard (copy / cut / paste / duplicate) ----
