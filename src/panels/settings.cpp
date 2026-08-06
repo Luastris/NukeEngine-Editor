@@ -559,28 +559,35 @@ void EditorUI::winSettings()
 
 			bool changed = false;                // checkbox / auto-sort: save right away
 			static bool modsDragDirty = false;   // drag reorder: save when the mouse releases
-			if (ImGui::BeginTable("modsui", 5, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingStretchProp))
+			if (ImGui::BeginTable("modsui", 6, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingStretchProp))
 			{
 				ImGui::TableSetupColumn("Game", ImGuiTableColumnFlags_WidthFixed, 38);     // the player's list
 				ImGui::TableSetupColumn("Editor", ImGuiTableColumnFlags_WidthFixed, 44);   // this session's mounts
 				ImGui::TableSetupColumn("Mod");
 				ImGui::TableSetupColumn("Requires");
+				ImGui::TableSetupColumn("Modules");   // engine plugins the mod's content needs
 				ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthFixed, 120);
 				ImGui::TableHeadersRow();
 				for (int i = 0; i < (int)modsUi.size(); ++i)
 				{
 					ModRow& r = modsUi[i];
 					ImGui::TableNextRow();
-					if (!r.reqOk || !r.found)   // unsatisfied requirements paint the row red
+					// A missing dependency — mod or module — paints the row red; an installed but
+					// switched-off module is a warning, not a block.
+					if (!r.reqOk || !r.found || !r.modsInstalled)
 						ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, IM_COL32(150, 40, 40, 90));
 					ImGui::PushID(r.file.c_str());   // id follows the mod through reorders
 					ImGui::TableNextColumn();
-					const bool blockOn = !r.enabled && (!r.reqOk || !r.found);
+					const bool blockOn = !r.enabled && (!r.reqOk || !r.found || !r.modsInstalled);
 					ImGui::BeginDisabled(blockOn);
 					if (ImGui::Checkbox("##on", &r.enabled)) changed = true;
 					ImGui::EndDisabled();
 					if (blockOn && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-						ImGui::SetTooltip(!r.found ? "File not found." : "Enable its requirements first: %s", r.req.c_str());
+					{
+						if (!r.found)              ImGui::SetTooltip("File not found.");
+						else if (!r.modsInstalled) ImGui::SetTooltip("Needs engine module(s) that are not installed: %s", r.modReq.c_str());
+						else                       ImGui::SetTooltip("Enable its requirements first: %s", r.req.c_str());
+					}
 					ImGui::TableNextColumn();
 					ImGui::BeginDisabled(!r.found);
 					if (ImGui::Checkbox("##ed", &r.edMounted)) SaveEditorMods();
@@ -614,7 +621,19 @@ void EditorUI::winSettings()
 					else if (r.reqOk)  ImGui::TextUnformatted(r.req.c_str());
 					else               ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.4f, 1), "%s", r.req.c_str());
 					ImGui::TableNextColumn();
+					// Engine plugins: red = not installed (the mod cannot load), amber = installed
+					// but switched off (it loads, its components stay inert).
+					if (r.modReq.empty())        ImGui::TextDisabled("-");
+					else if (!r.modsInstalled)   ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.4f, 1), "%s", r.modReq.c_str());
+					else if (!r.modsEnabled)     ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.35f, 1), "%s", r.modReq.c_str());
+					else                         ImGui::TextUnformatted(r.modReq.c_str());
+					if (!r.modReq.empty() && ImGui::IsItemHovered())
+						ImGui::SetTooltip(!r.modsInstalled ? "Not installed — the mod is skipped on load."
+						                 : !r.modsEnabled  ? "Installed but disabled — its components would load inert."
+						                                   : "Installed and enabled.");
+					ImGui::TableNextColumn();
 					if      (!r.found)             ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.3f, 1), "file not found");
+					else if (!r.modsInstalled)     ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.3f, 1), "missing module");
 					else if (r.enabled && !r.reqOk) ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.3f, 1), "missing deps");
 					else if (r.mounted)            ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.4f, 1), "mounted (editor)");
 					else if (r.enabled)            ImGui::TextColored(ImVec4(0.6f, 0.75f, 1.0f, 1), "on (game)");

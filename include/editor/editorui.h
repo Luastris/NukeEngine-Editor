@@ -243,6 +243,11 @@ private:
 	{
 		std::string file, path, name, req;         // req = display string of `reqs`
 		std::vector<std::string> reqs;             // dependency names from mod.json
+		// Engine plugins the mod declares ("modules"): missing = it cannot load at all,
+		// installed-but-off = it loads with dead components.
+		std::vector<std::string> mods;
+		std::string modReq;                        // display string of `mods`
+		bool modsInstalled = true, modsEnabled = true;
 		bool enabled = false, mounted = false, found = true;
 		bool reqOk = true;                         // all requirements enabled+loadable (per frame)
 		bool edMounted = false;                    // mounted in THIS editor session (separate list)

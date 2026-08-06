@@ -5,7 +5,11 @@
 #include <API/Model/Jobs.h>
 #include <API/Model/StatusBar.h>
 #include <API/Model/World.h>    // MergeWorldLayers for the mod basis
+#include <interface/Modular.h>  // PluginForType: which plugin a packed component type needs
+#include <interface/Services.h> // the scripting backends answer for their own code
+#include <service/iScript.h>
 #include <nlohmann/json.hpp>
+#include <functional>
 #include <boost/filesystem.hpp>
 #include <boost/filesystem/fstream.hpp>
 #include <algorithm>
@@ -150,6 +154,122 @@ static bool StampExeIcon(const std::string& exePath, const std::string& icoPath)
 	return EndUpdateResourceA(h, ok ? FALSE : TRUE) != 0 && ok;
 }
 #endif
+
+// Engine plugins a packed file set is built on. Each shape of dependency is read where it
+// actually lives, and by whoever is entitled to read it:
+//   * content — every reflected component "type" in a packed JSON asset maps back to the plugin
+//               that registered it (engine built-ins map to "" and drop out). The format is the
+//               engine's own, so the engine reads it;
+//   * native  — a DLL the mod ships states what it links in its PE import table;
+//   * scripts — the SCRIPTING BACKENDS answer. Nothing here knows Lua from C#: every registered
+//               iScript service is handed the file and returns the modules its code needs.
+// Detection proposes; a "modules" list already in mod.json is authoritative.
+static std::vector<std::string> ModulesForFiles(const std::vector<std::pair<std::string, std::string>>& files)
+{
+	std::set<std::string> out;
+	std::function<void(const nlohmann::json&)> walk = [&](const nlohmann::json& j)
+	{
+		if (j.is_object())
+		{
+			auto it = j.find("type");
+			if (it != j.end() && it->is_string())
+			{
+				const char* dll = nuke::PluginForType(it->get<std::string>());
+				if (dll && *dll) out.insert(bfs::path(dll).stem().string());
+			}
+			for (auto& kv : j.items()) walk(kv.value());
+		}
+		else if (j.is_array())
+			for (const nlohmann::json& e : j) walk(e);
+	};
+	std::vector<nuke::iScript*> backends = nuke::GetServices<nuke::iScript>();
+
+	for (const auto& fp : files)
+	{
+		// Native binaries name their links themselves (headers only, never the payload).
+		for (const std::string& imp : nuke::ModuleImportsOf(fp.second)) out.insert(imp);
+
+		// Engine-authored JSON content. PEEK first: a mesh or a texture must not be pulled into
+		// memory just to learn it is not JSON.
+		{
+			bfs::ifstream f(bfs::path(fp.second), std::ios::binary);
+			if (!f) continue;
+			char head[16] = {};
+			f.read(head, sizeof(head));
+			const size_t n = (size_t)(f.gcount() > 0 ? f.gcount() : 0);
+			size_t b = 0;
+			while (b < n && (head[b] == ' ' || head[b] == '\t' || head[b] == '\r' || head[b] == '\n')) ++b;
+			if (b < n && (head[b] == '{' || head[b] == '['))
+			{
+				f.clear(); f.seekg(0);
+				std::string data((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+				nlohmann::json j = nlohmann::json::parse(data, nullptr, false);
+				if (!j.is_discarded()) { walk(j); continue; }
+			}
+		}
+		// Everything else is somebody's code: hand over the path, let its language read it.
+		for (nuke::iScript* s : backends)
+		{
+			if (!s) continue;
+			const int need = s->ModuleDeps(fp.second.c_str(), nullptr, 0);
+			if (need <= 0) continue;
+			std::vector<char> buf((size_t)need + 1, 0);
+			s->ModuleDeps(fp.second.c_str(), buf.data(), need + 1);
+			std::string all(buf.data());
+			for (size_t p = 0; p < all.size(); )
+			{
+				size_t nl = all.find('\n', p);
+				if (nl == std::string::npos) nl = all.size();
+				std::string one = all.substr(p, nl - p);
+				while (!one.empty() && (one.back() == '\r' || one.back() == ' ')) one.pop_back();
+				if (!one.empty()) out.insert(one);
+				p = nl + 1;
+			}
+		}
+	}
+	return std::vector<std::string>(out.begin(), out.end());
+}
+
+// Does this file set bind its package to one platform? Whoever owns a file answers for it: every
+// scripting backend is offered each file, and one that claims it says "any" or names the platform
+// its code is bound to. Only what nobody claims falls back to the crude rule — a binary that is
+// not somebody's runtime is machine code. Nothing here knows what a managed assembly is.
+static bool PlatformLocked(const std::vector<std::pair<std::string, std::string>>& files)
+{
+	std::vector<nuke::iScript*> backends = nuke::GetServices<nuke::iScript>();
+	auto ends = [](const std::string& s, const char* e)
+	{ const size_t n = strlen(e); return s.size() > n && s.compare(s.size() - n, n, e) == 0; };
+	for (const auto& fp : files)
+	{
+		bool claimed = false;
+		for (nuke::iScript* s : backends)
+		{
+			if (!s) continue;
+			const int need = s->PlatformOf(fp.second.c_str(), nullptr, 0);
+			if (need <= 0) continue;
+			std::vector<char> buf((size_t)need + 1, 0);
+			s->PlatformOf(fp.second.c_str(), buf.data(), need + 1);
+			claimed = true;
+			if (std::string(buf.data()) != "any")
+			{
+				std::cout << "[Package]\t" << fp.first << " is platform-bound (" << buf.data()
+				          << ") — the package is tagged for it" << std::endl;
+				return true;
+			}
+		}
+		if (claimed) continue;   // its owner said it travels
+		// Nobody's runtime claimed it. A library extension is then machine code — a crude test,
+		// but an honest one: the precise answers came from the owners above.
+		std::string low = fp.first;
+		for (char& c : low) c = (char)tolower((unsigned char)c);
+		if (ends(low, ".dll") || ends(low, ".so") || ends(low, ".dylib"))
+		{
+			std::cout << "[Package]\t" << fp.first << " is native code — the package is platform-bound" << std::endl;
+			return true;
+		}
+	}
+	return false;
+}
 
 // ---- the cooker: only used content ships ----
 // Dependency closure rooted at the manifest (startupWorld + "packInclude"); every string in
@@ -997,30 +1117,43 @@ void EditorUI::PackageMod(const std::string& modNameIn)
 			std::cout << "[Package]\tmod: nothing changed against the base — nothing to pack." << std::endl;
 		else
 		{
-			auto lowRelOf = [](const std::string& rel)
-			{ std::string low = rel; for (char& c : low) c = (char)tolower((unsigned char)c); return low; };
-			auto endsWith = [](const std::string& s, const char* e)
-			{ const size_t n = strlen(e); return s.size() > n && s.compare(s.size() - n, n, e) == 0; };
-
-			// Cross-platform ("any") unless the mod carries native binaries; managed IL doesn't count.
-			bool hasNative = false;
-			for (auto& fp : files)
-			{
-				const std::string low = lowRelOf(fp.first);
-				if ((endsWith(low, ".dll") || endsWith(low, ".so")) && low.compare(0, 8, "managed/") != 0)
-				{ hasNative = true; break; }
-			}
+			const bool hasNative = PlatformLocked(files);
 
 			auto partsOut = SplitPakFiles(files, splitMode, splitCapMB);
 			std::vector<std::string> partFiles;
 			for (auto& pr : partsOut) partFiles.push_back(name + "." + pr.first + ".numod");
 
 			// The mod's manifest rides inside it; a repacked .numod keeps its authored requires.
+			// Engine plugins the packed content is built on (empty for a pure built-in mod).
+			// A plugin the mod SHIPS (its modules/ dir is in the pak) is not an external
+			// dependency — listing it would demand a module only this very mod provides.
+			std::vector<std::string> modDeps = ModulesForFiles(files);
+			modDeps.erase(std::remove_if(modDeps.begin(), modDeps.end(), [&](const std::string& m)
+			{
+				std::string want = m;
+				for (char& c : want) c = (char)tolower((unsigned char)c);
+				for (const auto& fp : files)
+				{
+					std::string low = fp.first;
+					for (char& c : low) c = (char)tolower((unsigned char)c);
+					if (low.compare(0, 8, "modules/") == 0
+					    && bfs::path(low).stem().string() == want) return true;
+				}
+				return false;
+			}), modDeps.end());
+			if (!modDeps.empty())
+			{
+				std::string list;
+				for (const std::string& m : modDeps) list += (list.empty() ? "" : ", ") + m;
+				std::cout << "[Package]\tmod needs module(s): " << list << std::endl;
+			}
+
 			nlohmann::json man;
 			man["name"] = name;
 			man["requires"] = requires_;
 			man["platform"] = hasNative ? Package::CurrentPlatform() : "any";
 			if (!dlcDeps.empty()) man["dlc"] = dlcDeps;
+			if (!modDeps.empty()) man["modules"] = modDeps;
 			if (!partFiles.empty()) man["parts"] = partFiles;
 			if (fromMod)
 			{
@@ -1029,6 +1162,21 @@ void EditorUI::PackageMod(const std::string& modNameIn)
 				{
 					nlohmann::json old = nlohmann::json::parse(mf, nullptr, false);
 					if (!old.is_discarded() && old.contains("requires")) man["requires"] = old["requires"];
+					// An authored list is AUTHORITATIVE: detection proposes, the author disposes —
+					// a name can also turn up in a comment, and a repack must not undo the edit.
+					// What detection found beyond it is reported, not silently added.
+					if (!old.is_discarded() && old.contains("modules") && old["modules"].is_array())
+					{
+						std::set<std::string> authored;
+						for (auto& m : old["modules"]) if (m.is_string()) authored.insert(m.get<std::string>());
+						man["modules"] = std::vector<std::string>(authored.begin(), authored.end());
+						std::string extra;
+						for (const std::string& m : modDeps)
+							if (!authored.count(m)) extra += (extra.empty() ? "" : ", ") + m;
+						if (!extra.empty())
+							std::cout << "[Package]\tmod.json lists its own modules; detection also saw ["
+							          << extra << "] — add them there if they are needed." << std::endl;
+					}
 				}
 			}
 			bfs::path manTmp = bfs::path(projDir) / ".mod.json.tmp";
@@ -1111,6 +1259,31 @@ void EditorUI::PackageMod(const std::string& modNameIn)
 	});
 }
 
+// Native modules the mounted mods/DLCs brought: discover their cache dirs and ENABLE what is
+// not running yet. A modder's component must be LIVE in the session — discovered-but-disabled
+// means its components load as placeholders, which reads as "the mod is broken". Enabling is
+// consent-safe (the mod being mounted IS the consent) and placeholder atoms upgrade in place:
+// EnablePlugin already runs World::RestorePluginComponents. The host's own modules were
+// discovered at boot, so a name clash resolves to the host.
+static void EnableModCacheModules()
+{
+	for (const std::string& d : Package::ModuleCacheDirs()) nuke::DiscoverModulesIn(d);
+	auto norm = [](const std::string& p)
+	{
+		boost::system::error_code ec;
+		std::string s = bfs::absolute(bfs::path(p), ec).generic_string();
+		for (char& c : s) c = (char)tolower((unsigned char)c);
+		return s;
+	};
+	for (auto& m : nuke::GetModules())
+	{
+		if (!m || m->loaded || m->phase() == nuke::PHASE_BOOT) continue;
+		const std::string mp = norm(m->modulePath);
+		for (const std::string& d : Package::ModuleCacheDirs())
+			if (mp.rfind(norm(d), 0) == 0) { nuke::EnablePlugin(m.get()); break; }
+	}
+}
+
 // ---- Mods panel data (Project Settings "Mods" section) ----
 std::string EditorUI::GameRootFromBase() const
 {
@@ -1142,6 +1315,34 @@ void EditorUI::ScanModsUi()
 						{
 							r.reqs.push_back(q.get<std::string>());
 							r.req += (r.req.empty() ? "" : ", ") + r.reqs.back();
+						}
+				// Engine plugins: resolved against what is installed and switched on. One the mod
+				// itself ships (modules/ in its pak) is always satisfied — it loads with the mod.
+				auto shipsIt = [&](const std::string& name)
+				{
+					std::string want = bfs::path(name).stem().string();
+					for (char& c : want) c = (char)tolower((unsigned char)c);
+					for (const Package::Entry& e : pf.Entries())
+					{
+						std::string k = e.path;
+						for (char& c : k) c = (char)tolower((unsigned char)c);
+						if (k.compare(0, 8, "modules/") != 0) continue;
+						std::string st = bfs::path(e.path).stem().string();
+						for (char& c : st) c = (char)tolower((unsigned char)c);
+						if (st == want) return true;
+					}
+					return false;
+				};
+				if (j.contains("modules") && j["modules"].is_array())
+					for (auto& q : j["modules"])
+						if (q.is_string())
+						{
+							r.mods.push_back(q.get<std::string>());
+							r.modReq += (r.modReq.empty() ? "" : ", ") + r.mods.back();
+							if (shipsIt(r.mods.back())) continue;
+							bool on = false;
+							if (!nuke::ModuleInstalled(r.mods.back(), &on)) r.modsInstalled = false;
+							else if (!on) r.modsEnabled = false;
 						}
 			}
 		}
@@ -1230,6 +1431,7 @@ void EditorUI::SaveEditorMods()
 	Package::ReadPakInfo(basePakPath, basePi);
 	Package::MountDlcs(root, basePi.name);
 	int n = Package::MountModList(root, entries);   // empty list still clears the mod metadata
+	EnableModCacheModules();   // mod-shipped native modules go LIVE now, not on the next restart
 	std::cout << "[editor]\t\teditor mods remounted (base + " << n << ") — reopen the world to apply" << std::endl;
 	modsUiTick = -1;   // rescan (mounted flags)
 }
@@ -1484,6 +1686,17 @@ void EditorUI::PackageDlc(const std::string& dlcNameIn, const std::string& baseP
 			pj["name"] = name;
 			pj["base"] = basePi.name;   // "" for a legacy base: folder placement binds it
 			pj["platforms"] = nlohmann::json::array({ Package::CurrentPlatform() });
+			// Same contract as a mod: record the engine plugins this content needs.
+			{
+				const std::vector<std::string> modDeps = ModulesForFiles(files);
+				if (!modDeps.empty())
+				{
+					pj["modules"] = modDeps;
+					std::string list;
+					for (const std::string& m : modDeps) list += (list.empty() ? "" : ", ") + m;
+					std::cout << "[Package]\tDLC needs module(s): " << list << std::endl;
+				}
+			}
 			if (!partFiles.empty()) pj["parts"] = partFiles;
 			bfs::path manTmp = bfs::path(projDir) / ".dlc.json.tmp";
 			{
@@ -1716,6 +1929,7 @@ std::string EditorUI::PrepareMountedProject(const std::string& pakAbs)
 		{
 			int n = Package::MountModList(gameRoot.string(), em);
 			if (n > 0) std::cout << "[Package]\tsession: base + " << n << " EDITOR-selected mod(s)" << std::endl;
+			EnableModCacheModules();
 		}
 	}
 	if (!bfs::exists(work / "game.nuproj", ec))
@@ -1834,6 +2048,7 @@ std::string EditorUI::PrepareArchiveProject(const std::string& pakAbs)
 					}
 				}
 				int n = chain.empty() ? 0 : Package::MountModList(gameRoot.string(), chain);
+				EnableModCacheModules();
 				std::cout << "[Package]\tmod session: base game + " << n << " required dep(s) mounted under the work tree" << std::endl;
 				if (!bfs::exists(work / "game.nuproj", ec))
 				{
