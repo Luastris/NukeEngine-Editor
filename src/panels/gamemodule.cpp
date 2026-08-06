@@ -32,13 +32,43 @@ void EditorUI::CreateGameModuleScaffold(const std::string& name)
 	bfs::create_directories(proj / "modules", ec);
 
 	// Engine repo root derived from the editor's cwd (<root>/NukeEngine/x64/<cfg>);
-	// overridable through the NUKE_ENGINE_ROOT cache entry.
-	const bfs::path engineRoot = bfs::absolute(bfs::current_path(ec)).parent_path().parent_path().parent_path();
+	// overridable through the NUKE_ENGINE_ROOT cache entry. A staged dist carries the kit
+	// beside the exe instead (stage_release -Sdk): sdk\include + sdk\lib + sdk\bin — the
+	// generated CMakeLists detects that layout by the missing NukeEngine/include.
+	bfs::path engineRoot = bfs::absolute(bfs::current_path(ec)).parent_path().parent_path().parent_path();
+	if (bfs::exists(bfs::current_path(ec) / "sdk" / "include", ec))
+		engineRoot = bfs::current_path(ec) / "sdk";
 
 	{
 		bfs::ofstream f(src / "CMakeLists.txt", std::ios::binary);
 		f <<
 "cmake_minimum_required(VERSION 3.20)\n"
+"\n"
+"# The engine root: the REPO checkout (headers under NukeEngine/include, libs under\n"
+"# NukeEngine/x64/<Config>) or a staged SDK (include/, lib/<Config>, bin/). Set at scaffold\n"
+"# time; override in the cache when the project builds on another machine:\n"
+"#   cmake -DNUKE_ENGINE_ROOT=...\n"
+"set(NUKE_ENGINE_ROOT \"" << engineRoot.generic_string() << "\" CACHE PATH \"NukeEngine repo root or SDK dir\")\n"
+"\n"
+"# Dependencies come from vcpkg. A machine with a classic install (the engine dev setup)\n"
+"# uses it directly — instant. Otherwise the vcpkg.json manifest beside this file takes\n"
+"# over: the toolchain installs the engine's public dependencies into the build dir at the\n"
+"# FIRST configure (long once, cached after). The toolchain must be chosen BEFORE project().\n"
+"set(VCPKG_CLASSIC \"$ENV{VCPKG_ROOT}/installed/x64-windows\")\n"
+"if(EXISTS \"${VCPKG_CLASSIC}/include/boost\")\n"
+"    set(NUKE_VCPKG_INC \"${VCPKG_CLASSIC}/include\")\n"
+"    set(NUKE_VCPKG_LIB \"${VCPKG_CLASSIC}/$<$<CONFIG:Debug>:debug/>lib\")\n"
+"elseif(DEFINED ENV{VCPKG_ROOT})\n"
+"    # Safe standalone AND as a subdirectory: the parent may have chosen the toolchain already.\n"
+"    if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)\n"
+"        set(CMAKE_TOOLCHAIN_FILE \"$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake\" CACHE FILEPATH \"\")\n"
+"    endif()\n"
+"    set(NUKE_VCPKG_INC \"${CMAKE_BINARY_DIR}/vcpkg_installed/x64-windows/include\")\n"
+"    set(NUKE_VCPKG_LIB \"${CMAKE_BINARY_DIR}/vcpkg_installed/x64-windows/$<$<CONFIG:Debug>:debug/>lib\")\n"
+"else()\n"
+"    message(FATAL_ERROR \"Set VCPKG_ROOT (https://github.com/microsoft/vcpkg) — the engine's public headers need boost/nlohmann/glm.\")\n"
+"endif()\n"
+"\n"
 "project(" << name << " CXX)\n"
 "\n"
 "set(CMAKE_CXX_STANDARD 20)\n"
@@ -50,22 +80,31 @@ void EditorUI::CreateGameModuleScaffold(const std::string& name)
 "# (mixed CRTs -> crashes in boost/std objects). Emit it per config.\n"
 "set(CMAKE_VS_USE_DEBUG_LIBRARIES \"$<CONFIG:Debug>\")\n"
 "\n"
-"# The engine source root (headers + import libs). Set at scaffold time; override in the\n"
-"# cache when the project builds on another machine: cmake -DNUKE_ENGINE_ROOT=...\n"
-"set(NUKE_ENGINE_ROOT \"" << engineRoot.generic_string() << "\" CACHE PATH \"NukeEngine repo root\")\n"
-"set(VCPKG_INSTALLED \"$ENV{VCPKG_ROOT}/installed/x64-windows\")\n"
+"# Repo checkout vs staged SDK — same content, two layouts.\n"
+"if(EXISTS \"${NUKE_ENGINE_ROOT}/NukeEngine/include\")\n"
+"    set(NUKE_INC \"${NUKE_ENGINE_ROOT}/NukeEngine/include\")\n"
+"    set(NUKE_LIB \"${NUKE_ENGINE_ROOT}/NukeEngine/x64/$<CONFIG>\")\n"
+"    set(NUKE_GEN \"${NUKE_ENGINE_ROOT}/NukeUtils/bin/NukeGen.exe\")\n"
+"    # Typed cross-module wrappers (#include <nukesdk/NukeWater.sdk.h>): a sibling dir in the\n"
+"    # repo, already inside include/ in a staged SDK.\n"
+"    set(NUKE_SDKINC \"${NUKE_ENGINE_ROOT}/NukeUtils/sdk\")\n"
+"else()\n"
+"    set(NUKE_INC \"${NUKE_ENGINE_ROOT}/include\")\n"
+"    set(NUKE_LIB \"${NUKE_ENGINE_ROOT}/lib/$<CONFIG>\")\n"
+"    set(NUKE_GEN \"${NUKE_ENGINE_ROOT}/bin/NukeGen.exe\")\n"
+"    set(NUKE_SDKINC \"\")\n"
+"endif()\n"
 "\n"
-"# Reflection prebuild (nukegen module mode): scans this module's sources for NUKE_CLASS +\n"
+"# Reflection prebuild (NukeGen module mode): scans this module's sources for NUKE_CLASS +\n"
 "# [[nuke::prop/func]] and generates " << name << ".gen.inc (#included in-TU; call\n"
-"# NukeReflectInit_" << name << "() from OnLoad).\n"
-"find_package(Python3 COMPONENTS Interpreter)\n"
+"# NukeReflectInit_" << name << "() from OnLoad). NukeGen is a standalone native exe — no Python.\n"
 "add_custom_command(\n"
 "    OUTPUT \"${CMAKE_CURRENT_SOURCE_DIR}/" << name << ".gen.inc\"\n"
-"    COMMAND ${Python3_EXECUTABLE} \"${NUKE_ENGINE_ROOT}/NukeUtils/nukegen.py\"\n"
+"    COMMAND \"${NUKE_GEN}\"\n"
 "            --include \"${CMAKE_CURRENT_SOURCE_DIR}\" --scan-cpp --no-includes\n"
 "            --out \"${CMAKE_CURRENT_SOURCE_DIR}/" << name << ".gen.inc\"\n"
 "            --init NukeReflectInit_" << name << "\n"
-"    DEPENDS \"${CMAKE_CURRENT_SOURCE_DIR}/" << name << ".cpp\"\n"
+"    DEPENDS \"${CMAKE_CURRENT_SOURCE_DIR}/" << name << ".cpp\" \"${NUKE_GEN}\"\n"
 "    COMMENT \"nukegen: " << name << " reflection\")\n"
 "\n"
 "add_library(" << name << " SHARED\n"
@@ -80,16 +119,15 @@ void EditorUI::CreateGameModuleScaffold(const std::string& name)
 ")\n"
 "\n"
 "target_include_directories(" << name << " PRIVATE\n"
-"    ${NUKE_ENGINE_ROOT}/NukeEngine\n"
-"    ${NUKE_ENGINE_ROOT}/NukeEngine/include\n"
-"    ${NUKE_ENGINE_ROOT}/NukeEngine/deps\n"
-"    ${NUKE_ENGINE_ROOT}/NukeEngine/deps/glm\n"
-"    ${VCPKG_INSTALLED}/include\n"
+"    ${NUKE_INC}/..\n"
+"    ${NUKE_INC}\n"
+"    ${NUKE_SDKINC}\n"
+"    ${NUKE_VCPKG_INC}\n"
 ")\n"
 "\n"
 "target_link_directories(" << name << " PRIVATE\n"
-"    ${NUKE_ENGINE_ROOT}/NukeEngine/x64/$<CONFIG>\n"
-"    ${VCPKG_INSTALLED}/$<$<CONFIG:Debug>:debug/>lib\n"
+"    ${NUKE_LIB}\n"
+"    ${NUKE_VCPKG_LIB}\n"
 ")\n"
 "\n"
 "target_link_libraries(" << name << " PRIVATE NukeEngine)\n"
@@ -100,6 +138,20 @@ void EditorUI::CreateGameModuleScaffold(const std::string& name)
 "    COMMAND ${CMAKE_COMMAND} -E copy_if_different\n"
 "            \"$<TARGET_FILE:" << name << ">\" \"${CMAKE_CURRENT_SOURCE_DIR}/../../modules/\"\n"
 "    COMMENT \"Deploying " << name << ".dll to the project's modules/\")\n";
+	}
+
+	// The engine's PUBLIC dependencies — what its headers expose to anyone compiling against
+	// them. The manifest only fires on machines without a classic vcpkg install (see above),
+	// where the toolchain auto-installs these at first configure.
+	if (!bfs::exists(src / "vcpkg.json", ec))
+	{
+		bfs::ofstream f(src / "vcpkg.json", std::ios::binary);
+		f <<
+"{\n"
+"  \"name\": \"" << [&]{ std::string l = name; for (char& c : l) c = (char)tolower((unsigned char)c); return l; }() << "\",\n"
+"  \"version-string\": \"0.1\",\n"
+"  \"dependencies\": [ \"boost\", \"nlohmann-json\", \"glm\" ]\n"
+"}\n";
 	}
 
 	{
@@ -435,14 +487,29 @@ void EditorUI::BuildGameModules()
 		return;
 	}
 	// Regenerate the top-level CMakeLists every build: source/ may gain modules at any time.
+	// The vcpkg manifest/toolchain must be picked HERE, before the top-level project() — a
+	// subdirectory is too late for either.
 	if (!bfs::exists(srcDir / "CMakeLists.txt", ec) || true)
 	{
 		bfs::ofstream f(srcDir / "CMakeLists.txt", std::ios::binary);
 		f << "# AUTO-GENERATED by the editor (Build & Reload Game Modules) — add_subdirectory per module.\n"
-		     "cmake_minimum_required(VERSION 3.20)\nproject(GameModules)\n";
+		     "cmake_minimum_required(VERSION 3.20)\n"
+		     "if(NOT EXISTS \"$ENV{VCPKG_ROOT}/installed/x64-windows/include/boost\"\n"
+		     "   AND DEFINED ENV{VCPKG_ROOT} AND NOT DEFINED CMAKE_TOOLCHAIN_FILE)\n"
+		     "    set(CMAKE_TOOLCHAIN_FILE \"$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake\" CACHE FILEPATH \"\")\n"
+		     "endif()\n"
+		     "project(GameModules)\n";
 		for (bfs::directory_iterator it(srcDir, ec), end; it != end && !ec; it.increment(ec))
 			if (bfs::is_directory(it->path()) && bfs::exists(it->path() / "CMakeLists.txt"))
 				f << "add_subdirectory(\"" << it->path().filename().string() << "\")\n";
+	}
+	// Manifest for the toolchain path: the engine's PUBLIC dependencies, installed into the
+	// build dir at first configure on machines without a classic vcpkg install.
+	if (!bfs::exists(srcDir / "vcpkg.json", ec))
+	{
+		bfs::ofstream f(srcDir / "vcpkg.json", std::ios::binary);
+		f << "{\n  \"name\": \"game-modules\",\n  \"version-string\": \"0.1\",\n"
+		     "  \"dependencies\": [ \"boost\", \"nlohmann-json\", \"glm\" ]\n}\n";
 	}
 
 	// The project DLLs must leave the pool before the build can overwrite them — including the
