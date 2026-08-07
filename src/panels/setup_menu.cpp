@@ -1,6 +1,8 @@
 // EditorUI setup, boot loading, style and main menu bar.
 #include <editor/editorui.h>
 #include <import/assimporter.h>
+#include <interface/Modular.h>   // RunRoot: absolute fonts/ path (installed .app CWD is elsewhere)
+#include <boost/dll/runtime_symbol_info.hpp>   // program_location: per-app session-state dir
 #include <API/Model/Package.h>
 #include <interface/AssetCreators.h>
 #include <API/Model/Jobs.h>
@@ -15,12 +17,66 @@ void EditorUI::SetUp()
 	win = &Config::getSingleton()->window;
 
 	ImGuiIO& io = ImGui::GetIO();
-	if (!win->mainFont.empty())
+
+	// Session layout (imgui.ini). Windows: the run dir, as always. macOS/Linux: ALWAYS the
+	// per-user dir — an ini beside the .app is wrong in a dev tree too (and a deployed
+	// bundle must not self-modify at all). First run on a machine seeds the stock DOCKED
+	// layout (run dir — which also migrates an existing dev-tree ini — else the bundle's
+	// Resources copy).
 	{
-		cout << "[editorui]\t\t" << "Loading font: " << win->mainFont << endl;
-		io.Fonts->AddFontFromFileTTF(win->mainFont.c_str(), 19.0f);
+		static std::string iniPath;   // imgui keeps the pointer — static storage
+		boost::system::error_code iec;
+#ifdef _WIN32
+		const bfs::path ini = nuke::Config::writableDir() / "imgui.ini";
+#else
+		boost::system::error_code eec;
+		const bfs::path exe = boost::dll::program_location(eec);
+		const bfs::path ini = nuke::Config::userDataDir()
+		                    / (eec ? std::string("NukeEngine-Editor") : exe.stem().string())
+		                    / "imgui.ini";
+#endif
+		bfs::create_directories(ini.parent_path(), iec);
+		if (!bfs::exists(ini, iec))
+		{
+			bfs::path stock = nuke::Config::baseDir() / "imgui.ini";
+#ifdef __APPLE__
+			if (!bfs::exists(stock, iec))
+				stock = nuke::Config::baseDir().parent_path() / "Resources" / "imgui.ini";
+#endif
+			if (bfs::exists(stock, iec)) bfs::copy_file(stock, ini, iec);
+		}
+		iniPath = ini.string();
+		io.IniFilename = iniPath.c_str();
 	}
-	else
+
+	std::string mainFont = win->mainFont;
+#ifndef _WIN32
+	// No configured font: pick the OS's stock UI font. Falling back to ImGui's built-in
+	// font would leave the atlas on IMPLICIT sizing, and the icon merges below (explicit
+	// 19/20 px) assert on that combination in imgui 1.92.
+	if (mainFont.empty())
+	{
+		const char* candidates[] = {
+#ifdef __APPLE__
+			"/System/Library/Fonts/Helvetica.ttc",
+			"/System/Library/Fonts/Supplemental/Arial.ttf",
+#else
+			"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+			"/usr/share/fonts/TTF/DejaVuSans.ttf",
+#endif
+		};
+		boost::system::error_code fec;
+		for (const char* c : candidates)
+			if (bfs::exists(bfs::path(c), fec)) { mainFont = c; break; }
+	}
+#endif
+	bool explicitFont = false;
+	if (!mainFont.empty())
+	{
+		cout << "[editorui]\t\t" << "Loading font: " << mainFont << endl;
+		explicitFont = io.Fonts->AddFontFromFileTTF(mainFont.c_str(), 19.0f) != nullptr;
+	}
+	if (!explicitFont)
 	{
 		io.Fonts->AddFontDefault();
 	}
@@ -45,9 +101,13 @@ void EditorUI::SetUp()
 	};
 	for (const auto& e : kEditorFileIcons) nuke::RegisterFileIcon(e.ext, e.icon);
 
-	NukeUI::MergeIconFont("fonts/lucide.ttf", 20.0f, 4.0f);
+	// An implicit-size base font (AddFontDefault) rejects explicit-size merges (imgui 1.92):
+	// size 0 = inherit, keeping the icons legal either way. Absolute paths via the run root:
+	// an installed .app runs with CWD in Application Support, not beside its fonts/.
+	const std::string fontDir = (nuke::RunRoot() / "fonts").string() + "/";
+	NukeUI::MergeIconFont((fontDir + "lucide.ttf").c_str(), explicitFont ? 20.0f : 0.0f, 4.0f);
 	// file-type glyphs (Seti-UI), remapped into plane 15 so they cannot collide with Lucide
-	NukeUI::MergeIconFont("fonts/nukefileicons.ttf", 19.0f, 4.0f, ICON_MIN_FT, ICON_MAX_FT);
+	NukeUI::MergeIconFont((fontDir + "nukefileicons.ttf").c_str(), explicitFont ? 19.0f : 0.0f, 4.0f, ICON_MIN_FT, ICON_MAX_FT);
 
 	InitMenu();
 

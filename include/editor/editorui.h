@@ -61,8 +61,14 @@ bool        EditorRelaunch(const std::string& projectPath);   // spawn a new edi
 class TextEditor;   // vendored ImGuiColorTextEdit (src/textedit)
 
 // Register the .nuproj extension under HKEY_CURRENT_USER so double-clicking a project
-// opens this editor. Returns success.
+// opens this editor. Returns success. (macOS: LaunchServices registration of the .app.)
 bool RegisterProjectFileAssociation();
+
+// macOS: LaunchServices hands a double-clicked document over as an Apple Event, not argv.
+// Install the handler before the first event pump; the toolbar polls the queued path and
+// routes it through RequestProjectSwitch. Both are no-ops on Windows/Linux (argv covers it).
+void        EditorInstallOpenDocHandler();
+std::string EditorTakeOpenDocRequest();   // queued document path, "" when none (one-shot)
 
 // "Box (2)" -> "Box". Returns `s` unchanged when there is no trailing " (N)" counter.
 static inline std::string StripNameCounter(const std::string& s)

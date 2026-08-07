@@ -349,6 +349,14 @@ void EditorUI::Draw()
 			if (swDelay > 0) swPath = e;
 		}
 		if (swDelay > 0 && --swDelay == 0) RequestProjectSwitch(swPath);
+		// macOS odoc: a document double-clicked at launch or mid-session arrives as an Apple
+		// Event — same switch flow as the picker (dirty-confirm included). No-op elsewhere.
+		{
+			const std::string od = EditorTakeOpenDocRequest();
+			boost::system::error_code odec;
+			if (!od.empty() && !bfs::equivalent(bfs::path(od), bfs::path(projectFile), odec))
+				RequestProjectSwitch(od);
+		}
 	}
 
 	// Project hub (booted with no project): the hub is the whole UI, so its popups draw

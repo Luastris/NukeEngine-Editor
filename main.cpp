@@ -193,6 +193,31 @@ static int __cdecl NukeCrtReportHook(int reportType, char* message, int* /*retur
 }
 #endif  // _WIN32
 
+#ifndef _WIN32
+#include <execinfo.h>
+#include <csignal>
+#include <unistd.h>
+// POSIX crash trace (the SEH filter's counterpart): raw symbolized stack straight to fd 2
+// (backtrace_symbols_fd — no malloc in a signal handler), then the default action so the OS
+// crash reporter still fires.
+static void NukeCrashSignal(int sig)
+{
+	static volatile sig_atomic_t once = 0;
+	if (once++) _exit(128 + sig);
+	fprintf(stderr, "\n[CRASH] signal %d (%s)\n", sig, strsignal(sig));
+	void* frames[64];
+	const int n = backtrace(frames, 64);
+	backtrace_symbols_fd(frames, n, STDERR_FILENO);
+	signal(sig, SIG_DFL);
+	raise(sig);
+}
+static void NukeInstallCrashSignals()
+{
+	for (int s : { SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT })
+		signal(s, NukeCrashSignal);
+}
+#endif  // !_WIN32
+
 //void CreateDemoObjects(){
 //    Atom* root = new Atom("root");
 //    Atom* subroot = new Atom("subroot");
@@ -417,6 +442,8 @@ int main(int argc, char** argv)
 #ifdef _DEBUG
 	_CrtSetReportHook(NukeCrtReportHook);          // ...and on CRT asserts (IM_ASSERT)
 #endif
+#else
+	NukeInstallCrashSignals();                     // symbolized stack on any crash/abort
 #endif
 	nuke::Log::CaptureStd();   // must precede any boot logging so it lands in the Console panel
 
@@ -431,13 +458,69 @@ int main(int argc, char** argv)
 		else if (endsWith(".nupak") || endsWith(".numod")) archiveArg = bfs::absolute(bfs::path(a)).string();
 	}
 
-	// cwd = the editor's own directory: engine resources are cwd-relative, and a double-clicked
-	// .nuproj would otherwise set cwd to the project folder.
+	// cwd = the WRITABLE root (== run root on Windows and in the dev tree): engine resources
+	// are cwd-relative there, while an INSTALLED editor must aim every relative write at the
+	// per-user dir — never beside or inside the bundle. Shipped assets resolve through
+	// absolute run-root paths (RunRoot/baseDir) regardless of cwd.
 	{
 		boost::system::error_code ec;
-		bfs::path exeDir = boost::dll::program_location(ec).parent_path();
-		if (!ec && !exeDir.empty()) bfs::current_path(exeDir, ec);
+		bfs::create_directories(nuke::Config::writableDir(), ec);
+		bfs::current_path(nuke::Config::writableDir(), ec);
 	}
+#ifndef _WIN32
+	// A GUI-launched .app gets launchd's minimal PATH — the toolchains the editor spawns
+	// (cmake, dotnet) live in package-manager prefixes. Append the standard homes once;
+	// a terminal launch keeps its richer PATH in front.
+	{
+		std::string path = getenv("PATH") ? getenv("PATH") : "";
+		std::string added;
+		for (const char* extra : { "/opt/homebrew/bin", "/usr/local/bin",
+		                           "/usr/local/share/dotnet", "/Applications/CMake.app/Contents/bin" })
+		{
+			boost::system::error_code ec;
+			if (path.find(extra) == std::string::npos && bfs::is_directory(extra, ec))
+			{
+				path += std::string(":") + extra;
+				added += std::string(added.empty() ? "" : ", ") + extra;
+			}
+		}
+		setenv("PATH", path.c_str(), 1);
+		if (!added.empty())
+			cout << "[main]\t\t\tPATH += " << added << " (GUI launch: toolchains for module builds)" << endl;
+	}
+	// VCPKG_ROOT likewise never reaches a GUI launch (login-shell export). Probe the
+	// build-time location first (baked by the superbuild), then the common homes.
+	if (!getenv("VCPKG_ROOT"))
+	{
+		auto valid = [](const bfs::path& r)
+		{
+			boost::system::error_code ec;
+			return bfs::exists(r / "scripts" / "buildsystems" / "vcpkg.cmake", ec);
+		};
+		std::vector<bfs::path> probes;
+#ifdef NUKE_VCPKG_ROOT_DEF
+		probes.push_back(NUKE_VCPKG_ROOT_DEF);
+#endif
+		if (const char* home = getenv("HOME"))
+		{
+			probes.push_back(bfs::path(home) / "vcpkg");
+			probes.push_back(bfs::path(home) / "projects" / "vcpkg");
+			probes.push_back(bfs::path(home) / "dev" / "vcpkg");
+		}
+		probes.push_back("/opt/vcpkg");
+		probes.push_back("/usr/local/vcpkg");
+		for (const bfs::path& r : probes)
+			if (valid(r))
+			{
+				setenv("VCPKG_ROOT", r.string().c_str(), 1);
+				cout << "[main]\t\t\tVCPKG_ROOT = " << r.string() << " (discovered for module builds)" << endl;
+				break;
+			}
+	}
+#endif
+	// macOS: LaunchServices delivers a double-clicked document as an Apple Event, not argv —
+	// catch it before the first event pump (no-op elsewhere).
+	EditorInstallOpenDocHandler();
 
 	AppInstance* instance = AppInstance::GetSingleton();
 	instance->setEditor(true);
@@ -465,15 +548,14 @@ int main(int argc, char** argv)
 	}
 	else
 	{
-		// No explicit project: startup choice comes from the machine preferences (%APPDATA%) —
-		// last project, or the project hub. Nothing is auto-created.
+		// No explicit project: startup choice comes from the machine preferences (userDataDir:
+		// %APPDATA% / ~/Library/Application Support / XDG) — last project, or the project hub.
 		int startupMode = 0;
 		std::string lastProject;
-		if (const char* appdata = std::getenv("APPDATA"))
 		{
 			try
 			{
-				bfs::ifstream pf(bfs::path(appdata) / "NukeEngine" / "preferences.json");
+				bfs::ifstream pf(nuke::Config::userDataDir() / "NukeEngine" / "preferences.json");
 				if (pf)
 				{
 					std::stringstream ss; ss << pf.rdbuf();
@@ -554,14 +636,13 @@ int main(int argc, char** argv)
     wd.fullscreen  = config->window.fullscreen;
     wd.transparent = false;   // editor window is always opaque; per-pixel transparency is runtime-only
     wd.opacity     = config->window.opacity;
-    // Editor backend comes from the preferences (%APPDATA%), not the project config —
+    // Editor backend comes from the preferences (userDataDir scope), not the project config —
     // config/main.json window.backend is the runtime (Player) backend. Default = Vulkan.
     int editorBackend = 2; bool editorRT = true;
-    if (const char* appdata = std::getenv("APPDATA"))
     {
         try
         {
-            boost::filesystem::ifstream pf(boost::filesystem::path(appdata) / "NukeEngine" / "preferences.json");
+            boost::filesystem::ifstream pf(nuke::Config::userDataDir() / "NukeEngine" / "preferences.json");
             if (pf)
             {
                 std::stringstream ss; ss << pf.rdbuf();

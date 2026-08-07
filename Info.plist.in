@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- NukeEngine-Editor bundle manifest: LaunchServices identity + the NukeEngine document
+     types (.nuproj/.nupak/.numod as exported UTIs), so Finder association works. -->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>      <string>en</string>
+	<key>CFBundleExecutable</key>             <string>${MACOSX_BUNDLE_EXECUTABLE_NAME}</string>
+	<key>CFBundleIdentifier</key>             <string>com.luastris.nukeengine-editor</string>
+	<key>CFBundleInfoDictionaryVersion</key>  <string>6.0</string>
+	<key>CFBundleName</key>                   <string>NukeEngine Editor</string>
+	<key>CFBundleDisplayName</key>            <string>NukeEngine Editor</string>
+	<key>CFBundlePackageType</key>            <string>APPL</string>
+	<key>CFBundleIconFile</key>               <string>logo</string>
+	<key>NukeBuildArchitectures</key>         <string>@NUKE_BUILD_ARCHS@</string>
+	<key>CFBundleShortVersionString</key>     <string>1.0</string>
+	<key>CFBundleVersion</key>                <string>1</string>
+	<key>NSHighResolutionCapable</key>        <true/>
+	<key>NSPrincipalClass</key>               <string>NSApplication</string>
+
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>       <string>NukeEngine Project</string>
+			<key>CFBundleTypeRole</key>       <string>Editor</string>
+			<key>LSHandlerRank</key>          <string>Owner</string>
+			<key>LSItemContentTypes</key>     <array><string>com.luastris.nukeengine.project</string></array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>       <string>NukeEngine Packed Project</string>
+			<key>CFBundleTypeRole</key>       <string>Editor</string>
+			<key>LSHandlerRank</key>          <string>Owner</string>
+			<key>LSItemContentTypes</key>     <array><string>com.luastris.nukeengine.package</string></array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>       <string>NukeEngine Mod Package</string>
+			<key>CFBundleTypeRole</key>       <string>Editor</string>
+			<key>LSHandlerRank</key>          <string>Owner</string>
+			<key>LSItemContentTypes</key>     <array><string>com.luastris.nukeengine.mod</string></array>
+		</dict>
+	</array>
+
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>       <string>com.luastris.nukeengine.project</string>
+			<key>UTTypeDescription</key>      <string>NukeEngine Project</string>
+			<key>UTTypeConformsTo</key>       <array><string>public.data</string></array>
+			<key>UTTypeTagSpecification</key>
+			<dict><key>public.filename-extension</key><array><string>nuproj</string></array></dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>       <string>com.luastris.nukeengine.package</string>
+			<key>UTTypeDescription</key>      <string>NukeEngine Packed Project</string>
+			<key>UTTypeConformsTo</key>       <array><string>public.data</string></array>
+			<key>UTTypeTagSpecification</key>
+			<dict><key>public.filename-extension</key><array><string>nupak</string></array></dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>       <string>com.luastris.nukeengine.mod</string>
+			<key>UTTypeDescription</key>      <string>NukeEngine Mod Package</string>
+			<key>UTTypeConformsTo</key>       <array><string>public.data</string></array>
+			<key>UTTypeTagSpecification</key>
+			<dict><key>public.filename-extension</key><array><string>numod</string></array></dict>
+		</dict>
+	</array>
+</dict>
+</plist>

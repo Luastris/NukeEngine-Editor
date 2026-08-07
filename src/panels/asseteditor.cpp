@@ -1300,6 +1300,25 @@ void EditorUI::winAssetEditors()
 				const int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN), vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
 				clamped = cp.x <= vx || cp.y <= vy || cp.x >= vx + vw - 1 || cp.y >= vy + vh - 1;
 			}
+#else
+			{
+				// Virtual-screen bounds from the imgui monitor list (global coords with
+				// viewports on); the mouse pos is already in that space.
+				const ImGuiPlatformIO& pio = ImGui::GetPlatformIO();
+				if (pio.Monitors.Size > 0)
+				{
+					float vx = FLT_MAX, vy = FLT_MAX, vr = -FLT_MAX, vb = -FLT_MAX;
+					for (int mi = 0; mi < pio.Monitors.Size; ++mi)
+					{
+						const ImGuiPlatformMonitor& mon = pio.Monitors[mi];
+						vx = std::min(vx, mon.MainPos.x);
+						vy = std::min(vy, mon.MainPos.y);
+						vr = std::max(vr, mon.MainPos.x + mon.MainSize.x);
+						vb = std::max(vb, mon.MainPos.y + mon.MainSize.y);
+					}
+					clamped = m.x <= vx || m.y <= vy || m.x >= vr - 1.0f || m.y >= vb - 1.0f;
+				}
+			}
 #endif
 			if (tag && (left || clamped))
 				for (AssetEditorWin& w : assetEds)

@@ -12,6 +12,9 @@
 
 #ifdef _WIN32
 #include <Windows.h>
+#else
+#include <cstdio>     // popen/pclose (module build spawn)
+#include <sys/wait.h> // WIFEXITED/WEXITSTATUS
 #endif
 
 using namespace nuke;
@@ -31,13 +34,12 @@ void EditorUI::CreateGameModuleScaffold(const std::string& name)
 	bfs::create_directories(src, ec);
 	bfs::create_directories(proj / "modules", ec);
 
-	// Engine repo root derived from the editor's cwd (<root>/NukeEngine/x64/<cfg>);
-	// overridable through the NUKE_ENGINE_ROOT cache entry. A staged dist carries the kit
-	// beside the exe instead (stage_release -Sdk): sdk\include + sdk\lib + sdk\bin — the
-	// generated CMakeLists detects that layout by the missing NukeEngine/include.
-	bfs::path engineRoot = bfs::absolute(bfs::current_path(ec)).parent_path().parent_path().parent_path();
-	if (bfs::exists(bfs::current_path(ec) / "sdk" / "include", ec))
-		engineRoot = bfs::current_path(ec) / "sdk";
+	// Engine repo root from the RUNNING editor (RunRoot, not the CWD); overridable through
+	// the NUKE_ENGINE_ROOT cache entry. A staged dist carries the kit beside the exe
+	// (stage_release -Sdk): the generated CMakeLists detects that layout.
+	bfs::path engineRoot = nuke::RunRoot().parent_path().parent_path().parent_path();
+	if (bfs::exists(nuke::RunRoot() / "sdk" / "include", ec))
+		engineRoot = nuke::RunRoot() / "sdk";
 
 	{
 		bfs::ofstream f(src / "CMakeLists.txt", std::ios::binary);
@@ -54,17 +56,36 @@ void EditorUI::CreateGameModuleScaffold(const std::string& name)
 "# uses it directly — instant. Otherwise the vcpkg.json manifest beside this file takes\n"
 "# over: the toolchain installs the engine's public dependencies into the build dir at the\n"
 "# FIRST configure (long once, cached after). The toolchain must be chosen BEFORE project().\n"
-"set(VCPKG_CLASSIC \"$ENV{VCPKG_ROOT}/installed/x64-windows\")\n"
-"if(EXISTS \"${VCPKG_CLASSIC}/include/boost\")\n"
-"    set(NUKE_VCPKG_INC \"${VCPKG_CLASSIC}/include\")\n"
-"    set(NUKE_VCPKG_LIB \"${VCPKG_CLASSIC}/$<$<CONFIG:Debug>:debug/>lib\")\n"
+"if(WIN32)\n"
+"    set(NUKE_TRIPLET x64-windows)\n"
+"    set(NUKE_CLASSIC_TRIPLETS x64-windows)\n"
+"elseif(APPLE)\n"
+"    if(CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL \"arm64\")\n"
+"        set(NUKE_TRIPLET arm64-osx)\n"
+"    else()\n"
+"        set(NUKE_TRIPLET x64-osx)\n"
+"    endif()\n"
+"    # Engine dev machines install UNIVERSAL packages (overlay triplet) — probe those first.\n"
+"    set(NUKE_CLASSIC_TRIPLETS universal-osx ${NUKE_TRIPLET})\n"
+"else()\n"
+"    set(NUKE_TRIPLET x64-linux)\n"
+"    set(NUKE_CLASSIC_TRIPLETS x64-linux)\n"
+"endif()\n"
+"foreach(t ${NUKE_CLASSIC_TRIPLETS})\n"
+"    if(NOT DEFINED NUKE_VCPKG_INC AND EXISTS \"$ENV{VCPKG_ROOT}/installed/${t}/include/boost\")\n"
+"        set(NUKE_VCPKG_INC \"$ENV{VCPKG_ROOT}/installed/${t}/include\")\n"
+"        set(NUKE_VCPKG_LIB \"$ENV{VCPKG_ROOT}/installed/${t}/$<$<CONFIG:Debug>:debug/>lib\")\n"
+"    endif()\n"
+"endforeach()\n"
+"if(DEFINED NUKE_VCPKG_INC)\n"
+"    # classic install found — resolved above\n"
 "elseif(DEFINED ENV{VCPKG_ROOT})\n"
 "    # Safe standalone AND as a subdirectory: the parent may have chosen the toolchain already.\n"
 "    if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)\n"
 "        set(CMAKE_TOOLCHAIN_FILE \"$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake\" CACHE FILEPATH \"\")\n"
 "    endif()\n"
-"    set(NUKE_VCPKG_INC \"${CMAKE_BINARY_DIR}/vcpkg_installed/x64-windows/include\")\n"
-"    set(NUKE_VCPKG_LIB \"${CMAKE_BINARY_DIR}/vcpkg_installed/x64-windows/$<$<CONFIG:Debug>:debug/>lib\")\n"
+"    set(NUKE_VCPKG_INC \"${CMAKE_BINARY_DIR}/vcpkg_installed/${NUKE_TRIPLET}/include\")\n"
+"    set(NUKE_VCPKG_LIB \"${CMAKE_BINARY_DIR}/vcpkg_installed/${NUKE_TRIPLET}/$<$<CONFIG:Debug>:debug/>lib\")\n"
 "else()\n"
 "    message(FATAL_ERROR \"Set VCPKG_ROOT (https://github.com/microsoft/vcpkg) — the engine's public headers need boost/nlohmann/glm.\")\n"
 "endif()\n"
@@ -73,6 +94,11 @@ void EditorUI::CreateGameModuleScaffold(const std::string& name)
 "\n"
 "set(CMAKE_CXX_STANDARD 20)\n"
 "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n"
+"# Single-config generators (Makefiles/Ninja): $<CONFIG> resolves from CMAKE_BUILD_TYPE —\n"
+"# unset it collapses the engine lib dir to nothing. Debug matches the dev editor.\n"
+"if(NOT WIN32 AND NOT CMAKE_BUILD_TYPE)\n"
+"    set(CMAKE_BUILD_TYPE Debug)\n"
+"endif()\n"
 "cmake_policy(SET CMP0091 NEW)\n"
 "set(CMAKE_MSVC_RUNTIME_LIBRARY \"MultiThreaded$<$<CONFIG:Debug>:Debug>DLL\")\n"
 "# vcpkg's MSBuild integration picks debug vs release vcpkg libs from <UseDebugLibraries>;\n"
@@ -81,17 +107,28 @@ void EditorUI::CreateGameModuleScaffold(const std::string& name)
 "set(CMAKE_VS_USE_DEBUG_LIBRARIES \"$<CONFIG:Debug>\")\n"
 "\n"
 "# Repo checkout vs staged SDK — same content, two layouts.\n"
+"# Run-dir subfolder + host-tool suffix (matches NukeEngine/cmake/NukeRunDir.cmake).\n"
+"if(WIN32)\n"
+"    set(NUKE_RUN_SUBDIR x64)\n"
+"    set(NUKE_HOSTTOOL_SUFFIX .exe)\n"
+"elseif(APPLE)\n"
+"    set(NUKE_RUN_SUBDIR macos)\n"
+"    set(NUKE_HOSTTOOL_SUFFIX \"\")\n"
+"else()\n"
+"    set(NUKE_RUN_SUBDIR linux)\n"
+"    set(NUKE_HOSTTOOL_SUFFIX \"\")\n"
+"endif()\n"
 "if(EXISTS \"${NUKE_ENGINE_ROOT}/NukeEngine/include\")\n"
 "    set(NUKE_INC \"${NUKE_ENGINE_ROOT}/NukeEngine/include\")\n"
-"    set(NUKE_LIB \"${NUKE_ENGINE_ROOT}/NukeEngine/x64/$<CONFIG>\")\n"
-"    set(NUKE_GEN \"${NUKE_ENGINE_ROOT}/NukeUtils/bin/NukeGen.exe\")\n"
+"    set(NUKE_LIB \"${NUKE_ENGINE_ROOT}/NukeEngine/${NUKE_RUN_SUBDIR}/$<CONFIG>\")\n"
+"    set(NUKE_GEN \"${NUKE_ENGINE_ROOT}/NukeUtils/bin/NukeGen${NUKE_HOSTTOOL_SUFFIX}\")\n"
 "    # Typed cross-module wrappers (#include <nukesdk/NukeWater.sdk.h>): a sibling dir in the\n"
 "    # repo, already inside include/ in a staged SDK.\n"
 "    set(NUKE_SDKINC \"${NUKE_ENGINE_ROOT}/NukeUtils/sdk\")\n"
 "else()\n"
 "    set(NUKE_INC \"${NUKE_ENGINE_ROOT}/include\")\n"
 "    set(NUKE_LIB \"${NUKE_ENGINE_ROOT}/lib/$<CONFIG>\")\n"
-"    set(NUKE_GEN \"${NUKE_ENGINE_ROOT}/bin/NukeGen.exe\")\n"
+"    set(NUKE_GEN \"${NUKE_ENGINE_ROOT}/bin/NukeGen${NUKE_HOSTTOOL_SUFFIX}\")\n"
 "    set(NUKE_SDKINC \"\")\n"
 "endif()\n"
 "\n"
@@ -114,9 +151,19 @@ void EditorUI::CreateGameModuleScaffold(const std::string& name)
 "set_source_files_properties(\"${CMAKE_CURRENT_SOURCE_DIR}/" << name << ".gen.inc\" PROPERTIES HEADER_FILE_ONLY ON)\n"
 "\n"
 "target_compile_definitions(" << name << " PRIVATE\n"
-"    WIN32 _WINDOWS NOMINMAX _USE_MATH_DEFINES _CRT_SECURE_NO_WARNINGS\n"
-"    GLM_ENABLE_EXPERIMENTAL BOOST_ALL_DYN_LINK\n"
+"    _USE_MATH_DEFINES GLM_ENABLE_EXPERIMENTAL\n"
 ")\n"
+"if(WIN32)\n"
+"    target_compile_definitions(" << name << " PRIVATE\n"
+"        WIN32 _WINDOWS NOMINMAX _CRT_SECURE_NO_WARNINGS BOOST_ALL_DYN_LINK)\n"
+"else()\n"
+"    target_compile_options(" << name << " PRIVATE -Wno-c++11-narrowing -Wno-unknown-attributes)\n"
+"    # Loader matches modules by file stem; the engine dylib resolves from the build-time\n"
+"    # lib dir (this machine) or the run dir above the project's modules/.\n"
+"    set_target_properties(" << name << " PROPERTIES\n"
+"        PREFIX \"\"\n"
+"        BUILD_RPATH \"${NUKE_LIB};@loader_path/..;$ORIGIN/..\")\n"
+"endif()\n"
 "\n"
 "target_include_directories(" << name << " PRIVATE\n"
 "    ${NUKE_INC}/..\n"
@@ -132,12 +179,12 @@ void EditorUI::CreateGameModuleScaffold(const std::string& name)
 "\n"
 "target_link_libraries(" << name << " PRIVATE NukeEngine)\n"
 "\n"
-"# The DLL lands in <project>/modules/ — the editor scans it into the plugin pool.\n"
+"# The module lands in <project>/modules/ — the editor scans it into the plugin pool.\n"
 "add_custom_command(TARGET " << name << " POST_BUILD\n"
 "    COMMAND ${CMAKE_COMMAND} -E make_directory \"${CMAKE_CURRENT_SOURCE_DIR}/../../modules\"\n"
 "    COMMAND ${CMAKE_COMMAND} -E copy_if_different\n"
 "            \"$<TARGET_FILE:" << name << ">\" \"${CMAKE_CURRENT_SOURCE_DIR}/../../modules/\"\n"
-"    COMMENT \"Deploying " << name << ".dll to the project's modules/\")\n";
+"    COMMENT \"Deploying " << name << " to the project's modules/\")\n";
 	}
 
 	// The engine's PUBLIC dependencies — what its headers expose to anyone compiling against
@@ -384,7 +431,8 @@ void EditorUI::CreateGameModuleScaffold(const std::string& name)
 "};\n"
 "\n"
 "// Exported under the unmangled symbol \"plugin\" — the loader imports it via boost::dll.\n"
-"extern \"C\" __declspec(dllexport) " << name << "Module plugin;\n"
+"// BOOST_SYMBOL_EXPORT is the portable dllexport (__declspec on Windows, visibility elsewhere).\n"
+"extern \"C\" BOOST_SYMBOL_EXPORT " << name << "Module plugin;\n"
 << name << "Module plugin;\n";
 	}
 
@@ -428,7 +476,14 @@ void EditorUI::DiscoverProjectModules()
 			{
 				if (!bfs::is_directory(it->path()) || !bfs::exists(it->path() / "CMakeLists.txt")) continue;
 				const std::string name = it->path().filename().string();
-				if (!bfs::exists(dir / (name + ".dll"), ec)) { missing = true; break; }
+#ifdef _WIN32
+				const char* modExt = ".dll";
+#elif defined(__APPLE__)
+				const char* modExt = ".dylib";
+#else
+				const char* modExt = ".so";
+#endif
+				if (!bfs::exists(dir / (name + modExt), ec)) { missing = true; break; }
 			}
 		// A DLL built against an older engine ABI is refused by the loader — same end result as
 		// a missing one (no components anywhere), so treat it the same and rebuild.
@@ -494,8 +549,23 @@ void EditorUI::BuildGameModules()
 		bfs::ofstream f(srcDir / "CMakeLists.txt", std::ios::binary);
 		f << "# AUTO-GENERATED by the editor (Build & Reload Game Modules) — add_subdirectory per module.\n"
 		     "cmake_minimum_required(VERSION 3.20)\n"
-		     "if(NOT EXISTS \"$ENV{VCPKG_ROOT}/installed/x64-windows/include/boost\"\n"
-		     "   AND DEFINED ENV{VCPKG_ROOT} AND NOT DEFINED CMAKE_TOOLCHAIN_FILE)\n"
+		     "# A classic vcpkg install (the engine dev setup) beats the manifest — instant, no\n"
+		     "# from-source world rebuild. Probe the triplets the engine builds with (universal\n"
+		     "# first on macOS); the manifest toolchain engages only when none is present.\n"
+		     "if(WIN32)\n"
+		     "    set(NUKE_CLASSIC_TRIPLETS x64-windows)\n"
+		     "elseif(APPLE)\n"
+		     "    set(NUKE_CLASSIC_TRIPLETS universal-osx arm64-osx x64-osx)\n"
+		     "else()\n"
+		     "    set(NUKE_CLASSIC_TRIPLETS x64-linux)\n"
+		     "endif()\n"
+		     "set(NUKE_CLASSIC FALSE)\n"
+		     "foreach(t ${NUKE_CLASSIC_TRIPLETS})\n"
+		     "    if(EXISTS \"$ENV{VCPKG_ROOT}/installed/${t}/include/boost\")\n"
+		     "        set(NUKE_CLASSIC TRUE)\n"
+		     "    endif()\n"
+		     "endforeach()\n"
+		     "if(NOT NUKE_CLASSIC AND DEFINED ENV{VCPKG_ROOT} AND NOT DEFINED CMAKE_TOOLCHAIN_FILE)\n"
 		     "    set(CMAKE_TOOLCHAIN_FILE \"$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake\" CACHE FILEPATH \"\")\n"
 		     "endif()\n"
 		     "project(GameModules)\n";
@@ -541,6 +611,25 @@ void EditorUI::BuildGameModules()
 	{
 		auto run = [&](const std::string& cmdLine) -> bool
 		{
+#ifndef _WIN32
+			FILE* p = popen((cmdLine + " 2>&1").c_str(), "r");
+			if (!p) { std::cout << "[gamemodule]\tcan't start: " << cmdLine << std::endl; return false; }
+			std::string carry; char buf[4096]; size_t got;
+			while ((got = fread(buf, 1, sizeof(buf), p)) > 0)
+			{
+				carry.append(buf, got);
+				size_t nl;
+				while ((nl = carry.find('\n')) != std::string::npos)
+				{
+					std::string line = carry.substr(0, nl);
+					carry.erase(0, nl + 1);
+					if (!line.empty() && line.back() == '\r') line.pop_back();
+					if (!line.empty()) std::cout << "[gamemodule]\t" << line << std::endl;
+				}
+			}
+			const int st = pclose(p);
+			return WIFEXITED(st) && WEXITSTATUS(st) == 0;
+#else
 			SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
 			HANDLE rd = NULL, wr = NULL;
 			CreatePipe(&rd, &wr, &sa, 0);
@@ -576,10 +665,30 @@ void EditorUI::BuildGameModules()
 			GetExitCodeProcess(pi.hProcess, &code);
 			CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
 			return code == 0;
+#endif   // _WIN32
 		};
 
 		const std::string bld = srcStr + "/build";
-		bool ok = run("cmake -S \"" + srcStr + "\" -B \"" + bld + "\"");
+		// The RUNNING editor's engine root overrides the scaffold-baked one: the module must
+		// build against the engine that will load it. Passed only when this editor sits in a
+		// repo/SDK layout; otherwise the project's cached value stands.
+		std::string rootArg;
+		{
+			boost::system::error_code rec;
+			const bfs::path repoRoot = nuke::RunRoot().parent_path().parent_path().parent_path();
+			const bfs::path sdkRoot  = nuke::RunRoot() / "sdk";
+			if (bfs::exists(repoRoot / "NukeEngine" / "include", rec))
+				rootArg = " -DNUKE_ENGINE_ROOT=\"" + repoRoot.generic_string() + "\"";
+			else if (bfs::exists(sdkRoot / "include", rec))
+				rootArg = " -DNUKE_ENGINE_ROOT=\"" + sdkRoot.generic_string() + "\"";
+		}
+#ifndef _WIN32
+		// Single-config generators (Makefiles/Ninja): $<CONFIG> in the scaffold resolves from
+		// CMAKE_BUILD_TYPE, which nobody sets by default — the engine lib dir then loses its
+		// /Debug tail and the link fails. Pin it to the running host's config (VS ignores it).
+		rootArg += std::string(" -DCMAKE_BUILD_TYPE=") + cfg;
+#endif
+		bool ok = run("cmake -S \"" + srcStr + "\" -B \"" + bld + "\"" + rootArg);
 		if (ok) ok = run("cmake --build \"" + bld + "\" --config " + cfg + " --parallel");
 
 		nuke::Jobs::RunOnMain([this, ok]()

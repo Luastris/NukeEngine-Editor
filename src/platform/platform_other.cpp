@@ -1,6 +1,6 @@
-// Non-Windows implementation of the editor's OS-integration seam (declared in editor/editorui.h).
-// Stubs for now.
-#ifndef _WIN32
+// Linux implementation of the editor's OS-integration seam (declared in editor/editorui.h).
+// Stubs for now; Windows lives in platform_win32.cpp, macOS in platform_macos.mm.
+#if !defined(_WIN32) && !defined(__APPLE__)
 
 #include <string>
 
@@ -47,6 +47,10 @@ std::string EditorPickExeFile()
 	return std::string();
 }
 
+// Documents arrive via argv here — the Apple Event plumbing is macOS-only.
+void        EditorInstallOpenDocHandler() {}
+std::string EditorTakeOpenDocRequest()    { return std::string(); }
+
 #include <editor/exteditor.h>
 std::vector<ExtEditor> EditorDetectExternalEditors()
 {
@@ -66,4 +70,4 @@ bool EditorProcessRunning(const std::string&)
 	return false;
 }
 
-#endif // !_WIN32
+#endif // !_WIN32 && !__APPLE__

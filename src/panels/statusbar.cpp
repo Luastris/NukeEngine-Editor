@@ -7,6 +7,11 @@
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
 #include <Psapi.h>   // GetProcessMemoryInfo
+#elif defined(__APPLE__)
+#include <mach/mach.h>   // task_info / phys_footprint (status-bar RAM readout)
+#else
+#include <cstdio>
+#include <unistd.h>      // sysconf(_SC_PAGESIZE)
 #pragma comment(lib, "Psapi.lib")
 #endif
 
@@ -58,19 +63,34 @@ void EditorUI::StatusBarPanel()
 			ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.45f, 1.0f), app->playState == 1 ? "PLAY" : "PAUSE");
 		}
 
-#ifdef _WIN32
 		{
 			static int memTick = 0; static double memMB = 0.0;
 			if ((memTick++ % 30) == 0)   // cheap, but no need to query every frame
 			{
+#ifdef _WIN32
 				PROCESS_MEMORY_COUNTERS pmc{};
 				if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc)))
 					memMB = (double)pmc.WorkingSetSize / (1024.0 * 1024.0);
+#elif defined(__APPLE__)
+				// phys_footprint = what Activity Monitor reports as the app's memory.
+				task_vm_info_data_t vmi{};
+				mach_msg_type_number_t cnt = TASK_VM_INFO_COUNT;
+				if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vmi, &cnt) == KERN_SUCCESS)
+					memMB = (double)vmi.phys_footprint / (1024.0 * 1024.0);
+#else
+				// Linux: resident set from statm (pages).
+				if (FILE* f = fopen("/proc/self/statm", "r"))
+				{
+					long total = 0, resident = 0;
+					if (fscanf(f, "%ld %ld", &total, &resident) == 2)
+						memMB = (double)resident * sysconf(_SC_PAGESIZE) / (1024.0 * 1024.0);
+					fclose(f);
+				}
+#endif
 			}
 			sep();
 			ImGui::Text("%.0f MB", memMB);
 		}
-#endif
 
 		// Plugin fields in first-set order; progress fields are pulled out as jobs.
 		const std::vector<nuke::StatusBar::Entry> fields = nuke::StatusBar::All();

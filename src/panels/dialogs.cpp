@@ -187,13 +187,13 @@ void EditorUI::OpenLogSource(const nuke::LogEntry& e)
 	OpenExternal(bfs::absolute(p).string(), e.line);
 }
 
-// ---- Preferences: machine-wide editor settings (%APPDATA%/NukeEngine/preferences.json) ----
+// ---- Preferences: machine-wide editor settings ---------------------------------------------
+// <userDataDir>/NukeEngine/preferences.json: %APPDATA% on Windows, ~/Library/Application
+// Support on macOS, XDG config on Linux.
 
 static bfs::path PreferencesPath()
 {
-	const char* appdata = std::getenv("APPDATA");
-	bfs::path dir = appdata && *appdata ? bfs::path(appdata) / "NukeEngine" : bfs::path("config");
-	return dir / "preferences.json";
+	return nuke::Config::userDataDir() / "NukeEngine" / "preferences.json";
 }
 
 void EditorUI::LoadPreferences()

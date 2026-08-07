@@ -268,4 +268,8 @@ bool RegisterProjectFileAssociation()
 	return ok;
 }
 
+// Documents arrive via argv on Windows — the Apple Event plumbing is macOS-only.
+void        EditorInstallOpenDocHandler() {}
+std::string EditorTakeOpenDocRequest()    { return std::string(); }
+
 #endif // _WIN32

@@ -413,14 +413,61 @@ static std::set<std::string> CookUsedFiles(const std::string& projDir, const std
 	return c.shipped;
 }
 
-// Editor-only module? A module importing NukeImGui.dll can't load next to the Player.
-// Import tables store dll names as plain bytes, so a contents scan is a reliable test.
+#ifdef __APPLE__
+// macOS counterpart of StampExeIcon: build Contents/Resources/game.icns for the game bundle.
+// A configured icon (.ico/.png/anything sips reads) goes through sips -> iconutil; without
+// one the engine's stock logo.icns (editor bundle Resources) ships, so Finder never shows a
+// blank app. Returns the CFBundleIconFile stem, or "" when no icon could be produced.
+static std::string StampAppIconMac(const bfs::path& contentsDir, const std::string& iconSrc)
+{
+	boost::system::error_code ec;
+	const bfs::path resDir = contentsDir / "Resources";
+	bfs::create_directories(resDir, ec);
+	auto runq = [](const std::string& cmd) -> bool
+	{
+		FILE* p = popen((cmd + " >/dev/null 2>&1").c_str(), "r");
+		if (!p) return false;
+		char b[256]; while (fread(b, 1, sizeof(b), p) > 0) {}
+		const int st = pclose(p);
+		return WIFEXITED(st) && WEXITSTATUS(st) == 0;
+	};
+	if (!iconSrc.empty() && bfs::exists(bfs::path(iconSrc), ec))
+	{
+		const bfs::path iconset = contentsDir / "game.iconset";
+		bfs::remove_all(iconset, ec);
+		bfs::create_directories(iconset, ec);
+		bool ok = true;
+		for (int sz : { 16, 32, 64, 128, 256, 512 })
+			ok = runq("sips -s format png -z " + std::to_string(sz) + " " + std::to_string(sz)
+			          + " \"" + iconSrc + "\" --out \"" + (iconset / ("icon_" + std::to_string(sz) + "x" + std::to_string(sz) + ".png")).string() + "\"") && ok;
+		ok = ok && runq("iconutil -c icns \"" + iconset.string() + "\" -o \"" + (resDir / "game.icns").string() + "\"");
+		bfs::remove_all(iconset, ec);
+		if (ok) return "game";
+		std::cout << "[Package]\tgame icon conversion FAILED (sips/iconutil): " << iconSrc << " — using the stock icon" << std::endl;
+	}
+	// Stock fallback: the engine logo from the editor bundle's Resources — dev tree layout
+	// first, then the installed bundle's own (run root = Contents/MacOS).
+	for (const bfs::path& stock : { nuke::RunRoot() / "NukeEngine-Editor.app" / "Contents" / "Resources" / "logo.icns",
+	                                nuke::RunRoot().parent_path() / "Resources" / "logo.icns" })
+		if (bfs::exists(stock, ec))
+		{
+			bfs::copy_file(stock, resDir / "game.icns", bfs::copy_options::overwrite_existing, ec);
+			if (!ec) return "game";
+		}
+	return std::string();
+}
+#endif
+
+// Editor-only module? A module importing NukeImGui can't load next to the Player.
+// Import tables store library names as plain bytes (PE import dir / Mach-O LC_LOAD_DYLIB),
+// so a contents scan is a reliable test on either format.
 static bool IsEditorOnlyModule(const bfs::path& dll)
 {
 	bfs::ifstream f(dll, std::ios::binary);
 	if (!f) return false;
 	std::string bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-	return bytes.find("NukeImGui.dll") != std::string::npos;
+	return bytes.find("NukeImGui.dll") != std::string::npos
+	    || bytes.find("libNukeImGui.dylib") != std::string::npos;
 }
 
 bool EditorUI::DecodeIcoRGBA(const std::string& path, std::vector<unsigned char>& rgba, int& w, int& h)
@@ -510,9 +557,10 @@ void EditorUI::RunEngineBuild(const std::string& config, std::function<void(bool
 		nuke::Jobs::RunOnMain([onDone]() { if (onDone) onDone(true); });   // not a failure: proceed
 		return;
 	}
-	// Repo root from the running exe: <root>/NukeEngine/x64/<cfg>/NukeEngine-Editor.exe.
+	// Repo root from the running exe (<root>/NukeEngine/<rundir>/<cfg>), via RunRoot() — an
+	// installed .app then finds no superbuild here and the check below bows out gracefully.
 	boost::system::error_code ec;
-	bfs::path root = bfs::absolute(bfs::current_path(ec)).parent_path().parent_path().parent_path();
+	bfs::path root = nuke::RunRoot().parent_path().parent_path().parent_path();
 	if (!bfs::exists(root / "CMakeLists.txt", ec))
 	{
 		std::cout << "[build]\t\tno root superbuild found at " << root.string()
@@ -525,6 +573,31 @@ void EditorUI::RunEngineBuild(const std::string& config, std::function<void(bool
 	{
 		auto runPiped = [&](const std::string& cmdLine, int& outProjects) -> bool
 		{
+#ifndef _WIN32
+			FILE* p = popen((cmdLine + " 2>&1").c_str(), "r");
+			if (!p) { std::cout << "[build]\t\tcan't start: " << cmdLine << std::endl; return false; }
+			std::string carry; char buf[4096]; size_t got;
+			while ((got = fread(buf, 1, sizeof(buf), p)) > 0)
+			{
+				carry.append(buf, got);
+				size_t nl;
+				while ((nl = carry.find('\n')) != std::string::npos)
+				{
+					std::string line = carry.substr(0, nl);
+					carry.erase(0, nl + 1);
+					if (line.empty()) continue;
+					std::cout << "[build]\t" << line << std::endl;
+					if (line.find("Built target") != std::string::npos)
+					{
+						++outProjects;
+						StatusBar::Set("build", "Build: " + std::to_string(outProjects) + " project(s) done",
+						               StatusBar::kIndeterminate);
+					}
+				}
+			}
+			const int st = pclose(p);
+			return WIFEXITED(st) && WEXITSTATUS(st) == 0;
+#else
 			SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
 			HANDLE rd = NULL, wr = NULL;
 			CreatePipe(&rd, &wr, &sa, 0);
@@ -570,21 +643,39 @@ void EditorUI::RunEngineBuild(const std::string& config, std::function<void(bool
 			GetExitCodeProcess(pi.hProcess, &code);
 			CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
 			return code == 0;
+#endif   // _WIN32
 		};
 
 		int projects = 0;
 		bool ok = true;
 		boost::system::error_code ec2;
-		if (!bfs::exists(root / "build" / "CMakeCache.txt", ec2))
+#ifdef _WIN32
+		const bfs::path bldDir = root / "build";
+#else
+		// Single-config generators: one tree per configuration (build-mac = Debug default;
+		// a Release request configures its own tree).
+		const bfs::path bldDir = root / (config == "Debug" ? "build-mac" : "build-mac-release");
+#endif
+		if (!bfs::exists(bldDir / "CMakeCache.txt", ec2))
 		{
 			std::cout << "[build]\t\tconfiguring the superbuild (first run)..." << std::endl;
 			StatusBar::Set("build", "Build: configuring...", StatusBar::kIndeterminate);
-			ok = runPiped("cmake -S \"" + root.string() + "\" -B \"" + (root / "build").string()
+#ifdef _WIN32
+			ok = runPiped("cmake -S \"" + root.string() + "\" -B \"" + bldDir.string()
 			              + "\" -G \"Visual Studio 17 2022\" -A x64", projects);
+#else
+			ok = runPiped("cmake -S \"" + root.string() + "\" -B \"" + bldDir.string()
+			              + "\" -DCMAKE_BUILD_TYPE=" + config, projects);
+#endif
 		}
+#ifdef _WIN32
 		if (ok)
-			ok = runPiped("cmake --build \"" + (root / "build").string() + "\" --config " + config
+			ok = runPiped("cmake --build \"" + bldDir.string() + "\" --config " + config
 			              + " -- /m /v:m /nologo", projects);
+#else
+		if (ok)
+			ok = runPiped("cmake --build \"" + bldDir.string() + "\" --parallel", projects);
+#endif
 		const bool result = ok;
 		nuke::Jobs::RunOnMain([this, result, config, onDone]()
 		{
@@ -720,8 +811,24 @@ void EditorUI::PackageProjectNow()
 	{
 		boost::system::error_code ec;
 		for (bfs::directory_iterator it(bfs::path("modules"), ec), end; it != end; it.increment(ec))
-			if (!ec && it->path().extension() == ".dll") modules.insert(it->path().filename().string());
+		{
+			if (ec) break;
+			const std::string ext = it->path().extension().string();
+			if (ext == ".dll" || ext == ".dylib" || ext == ".so")
+				modules.insert(it->path().filename().string());
+		}
 	}
+	// Editor tooling (editorTool() == true) never ships, whatever list dragged it in — the
+	// NukeImGui-import scan below only catches the UI-bearing ones. Vtable query needs the
+	// game thread, so snapshot the stems here.
+	std::set<std::string> editorToolStems;
+	for (auto& m : nuke::GetModules())
+		if (m && nuke::ModuleIsEditorTool(m.get()))
+		{
+			std::string s = bfs::path(m->moduleFile).stem().string();
+			for (char& c : s) c = (char)tolower((unsigned char)c);
+			editorToolStems.insert(s);
+		}
 	// Module ship extras (game-thread snapshot): what each module needs beyond its DLL —
 	// into the pak (extraPak) or the dist tree (extraDist).
 	std::vector<std::string> extraPak;
@@ -731,11 +838,19 @@ void EditorUI::PackageProjectNow()
 
 	StatusBar::Set("package", "Packaging project...", StatusBar::kIndeterminate);
 	nuke::Jobs::Schedule([projDir, projFile, content, gameName, icon, method, level, splitMode, splitCapMB,
-	                      modules, distStr, guidFiles,
+	                      modules, editorToolStems, distStr, guidFiles,
 	                      extraPak, extraDist, gbSet, gbCfg, gbLogS, gbDbgS]()
 	{
 		boost::system::error_code ec;
-		const bfs::path dist = distStr;
+		// distRoot = the user-visible build folder. On macOS the shipped layout lives INSIDE
+		// <GameName>.app/Contents/MacOS (self-contained bundle: run root = exe dir), so every
+		// dist-relative path below lands in the bundle; elsewhere dist == distRoot.
+		const bfs::path distRoot = distStr;
+#ifdef __APPLE__
+		const bfs::path dist = distRoot / (gameName + ".app") / "Contents" / "MacOS";
+#else
+		const bfs::path dist = distRoot;
+#endif
 		// dist/ is a build artifact, always wiped: leftovers from an older pack would ship a
 		// broken mix. mods/ and mods.json are preserved explicitly across the wipe.
 		std::string modsJson;
@@ -750,7 +865,7 @@ void EditorUI::PackageProjectNow()
 		bfs::path dlcKeep = bfs::path(projDir) / ".dist_dlc_keep";
 		bfs::remove_all(dlcKeep, ec);
 		if (bfs::exists(dist / "content" / "dlc", ec)) bfs::rename(dist / "content" / "dlc", dlcKeep, ec);
-		bfs::remove_all(dist, ec);
+		bfs::remove_all(distRoot, ec);   // the whole build folder: stale bundles/flat layouts too
 		bfs::create_directories(dist, ec);
 		if (bfs::exists(modsKeep, ec)) bfs::rename(modsKeep, dist / "mods", ec);
 		if (bfs::exists(dlcKeep, ec))
@@ -767,7 +882,7 @@ void EditorUI::PackageProjectNow()
 
 		// 1) The project -> dist/content/game.nupak, cooked: only the manifest's dependency
 		// closure ships. "packInclude" force-adds extras the cooker can't see.
-		auto all = CollectProject(projDir, false, DistPrefix(projDir, dist.string()));
+		auto all = CollectProject(projDir, false, DistPrefix(projDir, distRoot.string()));
 		std::set<std::string> used = CookUsedFiles(projDir, content, projFile, guidFiles);
 		std::vector<std::pair<std::string, std::string>> files;
 		files.reserve(all.size());
@@ -810,13 +925,24 @@ void EditorUI::PackageProjectNow()
 		}
 		// The runtime source dir (Release preferred) must resolve BEFORE the pak builds:
 		// engine built-ins (shaders/, fonts/) ride INSIDE game.nupak so mods can override them.
-		bfs::path rt = ".";
+		// Anchored on RunRoot(), not the CWD — an installed .app runs with CWD elsewhere.
+		bfs::path rt = nuke::RunRoot();
 		{
-			bfs::path rel = bfs::path("..") / "Release";
-			if (bfs::exists(rel / "NukePlayer.exe", ec) && bfs::exists(rel / "NukeEngine.dll", ec))
+#ifdef _WIN32
+			const char* playerBin = "NukePlayer.exe";
+			const char* engineBin = "NukeEngine.dll";
+#elif defined(__APPLE__)
+			const char* playerBin = "NukePlayer";
+			const char* engineBin = "libNukeEngine.dylib";
+#else
+			const char* playerBin = "NukePlayer";
+			const char* engineBin = "libNukeEngine.so";
+#endif
+			bfs::path rel = rt.parent_path() / "Release";   // sibling config dir (dev tree only)
+			if (rel != rt && bfs::exists(rel / playerBin, ec) && bfs::exists(rel / engineBin, ec))
 				rt = rel;
-			else
-				std::cout << "[Package]\tRelease build not found (x64/Release) — bundling the CURRENT config's binaries" << std::endl;
+			else if (rel != rt)
+				std::cout << "[Package]\tRelease build not found — bundling the CURRENT config's binaries" << std::endl;
 		}
 		for (const char* dirName : { "shaders", "fonts" })
 			for (bfs::recursive_directory_iterator it(rt / dirName, ec), end; it != end && !ec; it.increment(ec))
@@ -874,6 +1000,7 @@ void EditorUI::PackageProjectNow()
 		if (ok)
 		{
 			StatusBar::Set("package", "Packaging: runtime files...", 0.75f);
+#ifdef _WIN32
 			const bfs::path gameExe = dist / (gameName + ".exe");
 			ok &= CopyOne(rt / "NukePlayer.exe", gameExe);
 			for (bfs::directory_iterator it(rt, ec), end; it != end && !ec; it.increment(ec))
@@ -884,6 +1011,58 @@ void EditorUI::PackageProjectNow()
 				if (n == "NukeImGui.dll") continue;              // editor-only UI dll
 				CopyOne(it->path(), dist / n);
 			}
+#else
+			// macOS: the game IS the .app — binary + dylibs live in Contents/MacOS (dist).
+			const bfs::path gameExe = dist / gameName;
+			ok &= CopyOne(rt / "NukePlayer", gameExe);
+			{
+				boost::system::error_code pec;
+				bfs::permissions(gameExe, bfs::perms::owner_all | bfs::perms::group_read | bfs::perms::group_exe
+				                        | bfs::perms::others_read | bfs::perms::others_exe, pec);
+			}
+			for (bfs::directory_iterator it(rt, ec), end; it != end && !ec; it.increment(ec))
+			{
+				if (bfs::is_directory(it->path())) continue;
+				std::string n = it->path().filename().string();
+				if (it->path().extension() != ".dylib") continue;
+				if (n == "libNukeImGui.dylib") continue;         // editor-only UI dylib
+				CopyOne(it->path(), dist / n);
+			}
+#ifdef __APPLE__
+			// Bundle manifest + icon: the mac equivalents of the exe rename and the .ico stamp.
+			{
+				const std::string iconStem = StampAppIconMac(dist.parent_path(), icon);
+				if (!iconStem.empty() && !icon.empty())
+					std::cout << "[Package]\tgame icon stamped (icns): " << icon << std::endl;
+				std::string safeId = gameName;
+				for (char& c : safeId)
+					if (!isalnum((unsigned char)c) && c != '-' && c != '.') c = '-';
+				bfs::ofstream pl(dist.parent_path() / "Info.plist", std::ios::trunc);
+				if (pl)
+				{
+					pl <<
+					"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+					"<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+					"<plist version=\"1.0\">\n<dict>\n"
+					"\t<key>CFBundleExecutable</key>\t<string>" << gameName << "</string>\n"
+					"\t<key>CFBundleIdentifier</key>\t<string>com.luastris.game." << safeId << "</string>\n"
+					"\t<key>CFBundleName</key>\t<string>" << gameName << "</string>\n"
+					"\t<key>CFBundlePackageType</key>\t<string>APPL</string>\n"
+					"\t<key>CFBundleShortVersionString</key>\t<string>1.0</string>\n"
+					"\t<key>CFBundleVersion</key>\t<string>1</string>\n"
+					"\t<key>NSHighResolutionCapable</key>\t<true/>\n";
+					if (!iconStem.empty())
+						pl << "\t<key>CFBundleIconFile</key>\t<string>" << iconStem << "</string>\n";
+#ifdef NUKE_BUILD_ARCHS
+					// The build's architecture set — the shipped player carries the same
+					// slices as the editor that packaged it (one superbuild).
+					pl << "\t<key>NukeBuildArchitectures</key>\t<string>" << NUKE_BUILD_ARCHS << "</string>\n";
+#endif
+					pl << "</dict>\n</plist>\n";
+				}
+			}
+#endif
+#endif
 			// The game's config is formed here: the editor's current config with the window
 			// block overridden by the Game Build dialog. No title key — the Player titles its
 			// window from game.nuproj "name".
@@ -891,7 +1070,10 @@ void EditorUI::PackageProjectNow()
 			{
 				nlohmann::json cj;
 				{
-					bfs::ifstream in(nuke::Config::baseDir() / "config" / "main.json");
+					// The editor's live config (writable), else the shipped stock one.
+				bfs::path cfgSrc = nuke::Config::writableDir() / "config" / "main.json";
+				if (!bfs::exists(cfgSrc, ec)) cfgSrc = nuke::Config::baseDir() / "config" / "main.json";
+				bfs::ifstream in(cfgSrc);
 					if (in) { std::stringstream ss; ss << in.rdbuf(); cj = nlohmann::json::parse(ss.str(), nullptr, false, true); }
 				}
 				if (!cj.is_object()) cj = nlohmann::json::object();
@@ -922,6 +1104,8 @@ void EditorUI::PackageProjectNow()
 				// Log/debug ship as the dialog set them; the editor's own values never leak in.
 				cj["logToConsole"]  = gbLogS;
 				cj["gpuValidation"] = gbDbgS;
+				boost::system::error_code cec;
+				bfs::create_directories(dist / "config", cec);   // first package: config/ doesn't exist yet
 				bfs::ofstream outc(dist / "config" / "main.json");
 				if (outc) outc << cj.dump(2);
 			}
@@ -945,16 +1129,42 @@ void EditorUI::PackageProjectNow()
 			StatusBar::Set("package", "Packaging: modules...", 0.9f);
 			for (const std::string& m : modules)
 			{
+				{
+					std::string stem = bfs::path(m).stem().string();
+					for (char& c : stem) c = (char)tolower((unsigned char)c);
+					if (editorToolStems.count(stem))
+					{
+						std::cout << "[Package]\tmodule '" << m << "' is editor tooling (editorTool) — not shipped" << std::endl;
+						continue;
+					}
+				}
 				bfs::path src = rt / "modules" / m;
+				std::string shipName = m;   // the file name that lands in dist/modules
 				// Project-local game modules (<project>/modules) ship too; editor modules win on name clash.
 				boost::system::error_code mec;
 				if (!bfs::exists(src, mec)) src = bfs::path(projDir) / "modules" / m;
+				// Cross-platform manifests carry the AUTHORING platform's file name (or a bare
+				// stem) — resolve to this platform's module extension before giving up.
+				if (!bfs::exists(src, mec))
+				{
+#ifdef _WIN32
+					const char* nativeExt = ".dll";
+#elif defined(__APPLE__)
+					const char* nativeExt = ".dylib";
+#else
+					const char* nativeExt = ".so";
+#endif
+					const std::string native = bfs::path(m).stem().string() + nativeExt;
+					src = rt / "modules" / native;
+					if (!bfs::exists(src, mec)) src = bfs::path(projDir) / "modules" / native;
+					if (bfs::exists(src, mec)) shipName = native;
+				}
 				if (IsEditorOnlyModule(src))
 				{
 					std::cout << "[Package]\tmodule '" << m << "' is editor-only (imports NukeImGui.dll) — not shipped" << std::endl;
 					continue;
 				}
-				if (!CopyOne(src, dist / "modules" / m))
+				if (!CopyOne(src, dist / "modules" / shipName))
 					std::cout << "[Package]\tmodule missing, skipped: " << m << std::endl;
 			}
 			// Module dist extras: relative sources resolve against the shipped runtime dir,
@@ -974,16 +1184,16 @@ void EditorUI::PackageProjectNow()
 			}
 		}
 
-		nuke::Jobs::RunOnMain([ok, dist]()
+		nuke::Jobs::RunOnMain([ok, distRoot]()
 		{
 			StatusBar::Remove("package");
 			if (ok)
 			{
 				uint64_t bytes = 0; int count = 0;
 				boost::system::error_code ec2;
-				for (bfs::recursive_directory_iterator it(dist, ec2), end; it != end; it.increment(ec2))
+				for (bfs::recursive_directory_iterator it(distRoot, ec2), end; it != end; it.increment(ec2))
 					if (!ec2 && !bfs::is_directory(it->path())) { bytes += bfs::file_size(it->path(), ec2); ++count; }
-				std::cout << "[Package]\tdist ready: " << dist.string() << " (" << count << " files, "
+				std::cout << "[Package]\tdist ready: " << distRoot.string() << " (" << count << " files, "
 				          << (bytes / (1024 * 1024)) << " MB)" << std::endl;
 			}
 			else std::cout << "[Package]\tPACKAGING FAILED — see messages above." << std::endl;
