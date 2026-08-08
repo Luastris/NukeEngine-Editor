@@ -73,6 +73,17 @@ void EditorUI::SetUp()
 	bool explicitFont = false;
 	if (!mainFont.empty())
 	{
+		// A relative font path ("fonts/OpenSansLight.ttf") is run-root-relative. CWD is the
+		// WRITABLE dir, which only equals the run root in dev trees — an installed image
+		// (AppImage / .app) redirects writes to the user config home, where no fonts live.
+		{
+			boost::system::error_code fec;
+			if (bfs::path(mainFont).is_relative() && !bfs::exists(bfs::path(mainFont), fec))
+			{
+				const bfs::path shipped = nuke::Config::baseDir() / mainFont;
+				if (bfs::exists(shipped, fec)) mainFont = shipped.string();
+			}
+		}
 		cout << "[editorui]\t\t" << "Loading font: " << mainFont << endl;
 		explicitFont = io.Fonts->AddFontFromFileTTF(mainFont.c_str(), 19.0f) != nullptr;
 	}
@@ -343,6 +354,13 @@ void EditorUI::ApplyStyle()
 	c[ImGuiCol_TabDimmedSelectedOverline] = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
 	c[ImGuiCol_DockingPreview]            = ImVec4(0.25f, 1.00f, 0.00f, 0.30f);
 	c[ImGuiCol_DockingEmptyBg]            = ImVec4(0.06f, 0.05f, 0.07f, 1.00f);
+
+	// Everything above is the 100% theme. Scale = OS content scale (Retina/HiDPI monitors
+	// report 1.25/1.5/2.0 — Windows at 100% DPI stays exactly as it always was) × the
+	// user's Preferences slider, re-applied LIVE when the window changes monitors. Fonts
+	// ride FontScaleMain (crisp dynamic re-raster).
+	NukeUI::CaptureStyleBaseline();
+	NukeUI::SetUserUIScale((float)uiScalePct / 100.0f);
 }
 
 // ---- menu ----

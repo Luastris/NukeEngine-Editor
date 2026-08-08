@@ -7,12 +7,12 @@
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
 #include <Psapi.h>   // GetProcessMemoryInfo
+#pragma comment(lib, "Psapi.lib")
 #elif defined(__APPLE__)
 #include <mach/mach.h>   // task_info / phys_footprint (status-bar RAM readout)
 #else
 #include <cstdio>
 #include <unistd.h>      // sysconf(_SC_PAGESIZE)
-#pragma comment(lib, "Psapi.lib")
 #endif
 
 static int CountAtoms(bc::list<Atom*>& gos)

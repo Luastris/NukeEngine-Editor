@@ -89,6 +89,40 @@ static inline void Transpose4(const float* s, float* d)
 			d[c * 4 + r] = s[r * 4 + c];
 }
 
+// Shared chrome for the settings-style windows (Preferences / Project Settings / World
+// Settings): a category sidebar on the left, a text filter on top, sections on the right.
+// Usage per frame inside the window:
+//   shell.Begin("id", cats, N);
+//   if (shell.Section("Category", "Section label", "space-separated setting keywords")) { ... }
+//   shell.End();
+// With an empty filter the active category alone shows; a live filter searches EVERY section
+// by label + keywords + category and shows the hits regardless of the selected category.
+struct SettingsShell
+{
+	char filter[96] = "";
+	int  active     = 0;
+	bool Begin(const char* id, const char* const* cats, int catCount);
+	bool Section(const char* cat, const char* label, const char* keywords = "");
+	void End();
+private:
+	const char* const* cats_ = nullptr;
+	int  catCount_ = 0;
+	bool open_     = false;
+};
+
+// Inspector-style property row for the settings windows: the LABEL comes FIRST, in a fixed
+// column, the widget after it. Returns the hidden "##label" id for the widget call:
+//   if (ImGui::Combo(LProp("Anti-aliasing").c_str(), ...))
+// `col` = label column width in font-size units — override for the odd long label.
+inline std::string LProp(const char* label, float col = 13.0f)
+{
+	ImGui::AlignTextToFramePadding();
+	ImGui::TextUnformatted(label);
+	ImGui::SameLine(ImGui::GetFontSize() * col);
+	ImGui::SetNextItemWidth(ImGui::GetFontSize() * 15.0f);
+	return std::string("##") + label;
+}
+
 class EditorUI
 {
 private:
@@ -197,7 +231,10 @@ private:
 	uint64_t    iconPrevTex = 0;                   // live preview texture of gameIcon (settings window)
 	std::string iconPrevPath;                      // which path iconPrevTex was decoded from
 	// Decode the best image of an .ico into RGBA8 (PNG-compressed and 32-bpp DIB entries).
+	// Public: the Linux AppDir icon stamp (a free function in packaging.cpp) reuses it.
+public:
 	static bool DecodeIcoRGBA(const std::string& path, std::vector<unsigned char>& rgba, int& w, int& h);
+private:
 	// New Project modal state; on OK the project is scaffolded and the editor relaunches on it.
 	bool openNewProjectPopup = false;
 	char newProjName[128] = "MyGame";
@@ -279,6 +316,9 @@ private:
 	std::string extEditorName;                     // the chosen one (persisted by name; "" = built-in)
 	std::string extCustomExe, extCustomArgs;       // the "Custom" entry ({file}/{line} template)
 	bool detachAssetEditors = false;   // asset editors as separate OS windows (else docked)
+	int  uiScalePct = 100;             // UI scale slider (25..300%); × the OS content scale
+	std::string displayBackend = "auto";   // Linux: auto (X11 for the editor) / x11 / wayland
+	SettingsShell shellPrefs, shellProj, shellWorld;   // settings-window chrome state
 	// Editor render backend (machine preference): 0=D3D11, 1=D3D12, 2=Vulkan.
 	// The RUNTIME backend is a project setting (config/main.json window.backend).
 	int editorBackend = 2;

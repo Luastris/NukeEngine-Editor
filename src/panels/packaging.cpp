@@ -458,6 +458,55 @@ static std::string StampAppIconMac(const bfs::path& contentsDir, const std::stri
 }
 #endif
 
+#if defined(__linux__)
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include <stb_image_write.h>
+// Linux counterpart of StampExeIcon/StampAppIconMac: put <stem>.png + .DirIcon into the
+// game AppDir. A .png ships as-is; a .ico decodes through DecodeIcoRGBA; without a usable
+// icon the editor's stock logo ships. Returns the Icon= stem for the .desktop, or "".
+static std::string StampAppIconLinux(const bfs::path& appDir, const std::string& iconSrc,
+                                     const std::string& gameName)
+{
+	boost::system::error_code ec;
+	std::string stem = gameName;
+	for (char& c : stem)
+		if (!isalnum((unsigned char)c) && c != '-' && c != '_') c = '-';
+	const bfs::path dst = appDir / (stem + ".png");
+	auto finish = [&]() -> std::string
+	{
+		bfs::copy_file(dst, appDir / ".DirIcon", bfs::copy_options::overwrite_existing, ec);
+		return stem;
+	};
+	if (!iconSrc.empty() && bfs::exists(bfs::path(iconSrc), ec))
+	{
+		const std::string ext = bfs::path(iconSrc).extension().string();
+		if (ext == ".png" || ext == ".PNG")
+		{
+			bfs::copy_file(iconSrc, dst, bfs::copy_options::overwrite_existing, ec);
+			if (!ec) return finish();
+		}
+		else
+		{
+			std::vector<unsigned char> rgba; int w = 0, h = 0;
+			if (EditorUI::DecodeIcoRGBA(iconSrc, rgba, w, h)
+			 && stbi_write_png(dst.string().c_str(), w, h, 4, rgba.data(), w * 4))
+				return finish();
+		}
+		std::cout << "[Package]\tgame icon conversion FAILED: " << iconSrc << " — using the stock icon" << std::endl;
+	}
+	// Stock fallback: the editor's own icon — AppImage/AppDir root first, then the dev tree.
+	for (const bfs::path& stock : { nuke::RunRoot() / "nukeengine-editor.png",
+	                                nuke::RunRoot().parent_path().parent_path().parent_path()
+	                                    / "NukeEngine-Editor" / "res" / "logo.png" })
+		if (bfs::exists(stock, ec))
+		{
+			bfs::copy_file(stock, dst, bfs::copy_options::overwrite_existing, ec);
+			if (!ec) return finish();
+		}
+	return std::string();
+}
+#endif
+
 // Editor-only module? A module importing NukeImGui can't load next to the Player.
 // Import tables store library names as plain bytes (PE import dir / Mach-O LC_LOAD_DYLIB),
 // so a contents scan is a reliable test on either format.
@@ -467,7 +516,8 @@ static bool IsEditorOnlyModule(const bfs::path& dll)
 	if (!f) return false;
 	std::string bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
 	return bytes.find("NukeImGui.dll") != std::string::npos
-	    || bytes.find("libNukeImGui.dylib") != std::string::npos;
+	    || bytes.find("libNukeImGui.dylib") != std::string::npos
+	    || bytes.find("libNukeImGui.so") != std::string::npos;
 }
 
 bool EditorUI::DecodeIcoRGBA(const std::string& path, std::vector<unsigned char>& rgba, int& w, int& h)
@@ -652,9 +702,14 @@ void EditorUI::RunEngineBuild(const std::string& config, std::function<void(bool
 #ifdef _WIN32
 		const bfs::path bldDir = root / "build";
 #else
-		// Single-config generators: one tree per configuration (build-mac = Debug default;
-		// a Release request configures its own tree).
+		// Single-config generators: one tree per configuration (Debug default; a Release
+		// request configures its own tree). Per-platform names — the same checkout can hold
+		// mac and linux trees side by side (shared drives, dual-boot).
+#ifdef __APPLE__
 		const bfs::path bldDir = root / (config == "Debug" ? "build-mac" : "build-mac-release");
+#else
+		const bfs::path bldDir = root / (config == "Debug" ? "build-linux" : "build-linux-release");
+#endif
 #endif
 		if (!bfs::exists(bldDir / "CMakeCache.txt", ec2))
 		{
@@ -848,6 +903,11 @@ void EditorUI::PackageProjectNow()
 		const bfs::path distRoot = distStr;
 #ifdef __APPLE__
 		const bfs::path dist = distRoot / (gameName + ".app") / "Contents" / "MacOS";
+#elif defined(__linux__)
+		// Linux: the shipped layout IS the AppDir — flat, run root = exe dir = image root.
+		// appimagetool squashes it into <Game>.AppImage at the end; the loose AppDir stays
+		// runnable for quick testing (./AppRun).
+		const bfs::path dist = distRoot / (gameName + ".AppDir");
 #else
 		const bfs::path dist = distRoot;
 #endif
@@ -1013,6 +1073,7 @@ void EditorUI::PackageProjectNow()
 			}
 #else
 			// macOS: the game IS the .app — binary + dylibs live in Contents/MacOS (dist).
+			// Linux: flat dist, .so's next to the binary ($ORIGIN rpath).
 			const bfs::path gameExe = dist / gameName;
 			ok &= CopyOne(rt / "NukePlayer", gameExe);
 			{
@@ -1024,8 +1085,13 @@ void EditorUI::PackageProjectNow()
 			{
 				if (bfs::is_directory(it->path())) continue;
 				std::string n = it->path().filename().string();
+#ifdef __APPLE__
 				if (it->path().extension() != ".dylib") continue;
 				if (n == "libNukeImGui.dylib") continue;         // editor-only UI dylib
+#else
+				if (n.find(".so") == std::string::npos) continue;   // libFoo.so / libglfw.so.3
+				if (n.rfind("libNukeImGui.so", 0) == 0) continue;   // editor-only UI so
+#endif
 				CopyOne(it->path(), dist / n);
 			}
 #ifdef __APPLE__
@@ -1059,6 +1125,31 @@ void EditorUI::PackageProjectNow()
 					pl << "\t<key>NukeBuildArchitectures</key>\t<string>" << NUKE_BUILD_ARCHS << "</string>\n";
 #endif
 					pl << "</dict>\n</plist>\n";
+				}
+			}
+#elif defined(__linux__)
+			// AppImage identity: AppRun + one root .desktop + the icon it names — the Linux
+			// equivalents of the exe rename and the .ico stamp.
+			{
+				boost::system::error_code lec;
+				bfs::remove(dist / "AppRun", lec);
+				bfs::create_symlink(gameName, dist / "AppRun", lec);
+				const std::string iconStem = StampAppIconLinux(dist, icon, gameName);
+				if (!iconStem.empty() && !icon.empty())
+					std::cout << "[Package]\tgame icon stamped (png): " << icon << std::endl;
+				std::string safeId = gameName;
+				for (char& c : safeId)
+					if (!isalnum((unsigned char)c) && c != '-' && c != '_') c = '-';
+				bfs::ofstream dt(dist / (safeId + ".desktop"), std::ios::trunc);
+				if (dt)
+				{
+					dt << "[Desktop Entry]\n"
+					      "Type=Application\n"
+					      "Name=" << gameName << "\n"
+					      "Exec=\"" << gameName << "\"\n";
+					if (!iconStem.empty()) dt << "Icon=" << iconStem << "\n";
+					dt << "Terminal=false\n"
+					      "Categories=Game;\n";
 				}
 			}
 #endif
@@ -1184,6 +1275,35 @@ void EditorUI::PackageProjectNow()
 			}
 		}
 
+#ifdef __linux__
+		if (ok)
+		{
+			// Squash the AppDir into <Game>.AppImage. The tool ships inside the editor image
+			// (tools/appimagetool), with the env var and PATH as dev-tree fallbacks; without
+			// it the loose AppDir still runs (./AppRun) — a notice, not a failure.
+			StatusBar::Set("package", "Packaging: AppImage...", 0.95f);
+			boost::system::error_code aec;
+			std::string tool;
+			if (bfs::exists(nuke::RunRoot() / "tools" / "appimagetool", aec))
+				tool = (nuke::RunRoot() / "tools" / "appimagetool").string();
+			else if (const char* e = std::getenv("NUKE_APPIMAGETOOL"))
+				tool = e;
+			else if (std::system("command -v appimagetool >/dev/null 2>&1") == 0)
+				tool = "appimagetool";
+			if (tool.empty())
+				std::cout << "[Package]\tappimagetool not found — shipping the loose AppDir (run it via ./AppRun)" << std::endl;
+			else
+			{
+				const bfs::path img = distRoot / (gameName + ".AppImage");
+				const std::string cmd = "APPIMAGE_EXTRACT_AND_RUN=1 ARCH=\"$(uname -m)\" \"" + tool
+				                      + "\" \"" + dist.string() + "\" \"" + img.string() + "\" >/dev/null 2>&1";
+				if (std::system(cmd.c_str()) == 0)
+					std::cout << "[Package]\tAppImage ready: " << img.string() << std::endl;
+				else
+					std::cout << "[Package]\tappimagetool FAILED — shipping the loose AppDir (run it via ./AppRun)" << std::endl;
+			}
+		}
+#endif
 		nuke::Jobs::RunOnMain([ok, distRoot]()
 		{
 			StatusBar::Remove("package");

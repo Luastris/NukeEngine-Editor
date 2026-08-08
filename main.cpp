@@ -467,6 +467,29 @@ int main(int argc, char** argv)
 		bfs::create_directories(nuke::Config::writableDir(), ec);
 		bfs::current_path(nuke::Config::writableDir(), ec);
 	}
+#if !defined(_WIN32) && !defined(__APPLE__)
+	// The EDITOR's display server — an explicit Preference (Interface -> Display server).
+	// "auto" = X11: the multi-window UX (tear-off panels, drag-to-dock, imgui viewports)
+	// needs client-side positioning and a global cursor, which native Wayland forbids by
+	// design; the single-window Player keeps the engine's native-Wayland default. Read RAW
+	// this early — render init happens long before LoadPreferences. An explicit
+	// NUKE_DISPLAY_BACKEND env var still wins (setenv flag 0 never overwrites).
+	{
+		std::string db = "auto";
+		try
+		{
+			bfs::ifstream pf(nuke::Config::userDataDir() / "NukeEngine" / "preferences.json");
+			if (pf)
+			{
+				nlohmann::json pj = nlohmann::json::parse(pf, nullptr, false);
+				if (!pj.is_discarded() && pj.is_object())
+					db = pj.value("displayBackend", std::string("auto"));
+			}
+		}
+		catch (...) {}
+		setenv("NUKE_DISPLAY_BACKEND", db == "wayland" ? "wayland" : "x11", 0);
+	}
+#endif
 #ifndef _WIN32
 	// A GUI-launched .app gets launchd's minimal PATH — the toolchains the editor spawns
 	// (cmake, dotnet) live in package-manager prefixes. Append the standard homes once;
@@ -474,9 +497,16 @@ int main(int argc, char** argv)
 	{
 		std::string path = getenv("PATH") ? getenv("PATH") : "";
 		std::string added;
-		for (const char* extra : { "/opt/homebrew/bin", "/usr/local/bin",
-		                           "/usr/local/share/dotnet", "/Applications/CMake.app/Contents/bin" })
+		std::vector<std::string> extras = { "/opt/homebrew/bin", "/usr/local/bin",
+		                           "/usr/local/share/dotnet", "/Applications/CMake.app/Contents/bin",
+		                           // Linux homes: user installs, distro dotnet layouts, snap/flatpak exports.
+		                           "/usr/lib/dotnet", "/usr/lib64/dotnet", "/usr/share/dotnet",
+		                           "/snap/bin", "/var/lib/flatpak/exports/bin" };
+		if (const char* home = getenv("HOME"))
+			extras.push_back(std::string(home) + "/.local/bin");
+		for (const std::string& extraStr : extras)
 		{
+			const char* extra = extraStr.c_str();
 			boost::system::error_code ec;
 			if (path.find(extra) == std::string::npos && bfs::is_directory(extra, ec))
 			{

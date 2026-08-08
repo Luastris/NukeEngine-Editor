@@ -111,5 +111,9 @@ else()
         COMMAND ${CMAKE_COMMAND} -E make_directory "${RUN_DIR}"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "$<TARGET_FILE:NukeEngine-Editor>" "${RUN_DIR}/"
-        COMMENT "Deploying NukeEngine-Editor to the run dir")
+        # dist/ = the editor's stock run-dir files (config/main.json, fonts/, imgui.ini with
+        # the DEFAULT DOCKED layout) — same mirror-if-newer semantics as the APPLE branch.
+        COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different
+                "${CMAKE_CURRENT_SOURCE_DIR}/dist" "${RUN_DIR}"
+        COMMENT "Deploying NukeEngine-Editor + stock run-dir files (dist/)")
 endif()

@@ -313,7 +313,13 @@ void EditorUI::ApplyProjectPlugins()
 		SaveProject();
 	}
 	auto listed = [&](const std::string& file)
-	{ return std::find(enabledPlugins.begin(), enabledPlugins.end(), file) != enabledPlugins.end(); };
+	{
+		// Stem match: a project written on Windows lists "NukeVFX.dll" — that entry must keep
+		// enabling NukeVFX.so/.dylib here (and the other way round).
+		for (const std::string& e : enabledPlugins)
+			if (nuke::ModuleFileMatches(e, file)) return true;
+		return false;
+	};
 
 	for (auto& m : mods)
 	{

@@ -187,6 +187,63 @@ void EditorUI::OpenLogSource(const nuke::LogEntry& e)
 	OpenExternal(bfs::absolute(p).string(), e.line);
 }
 
+// ---- Settings-window chrome (see SettingsShell in editorui.h) -------------------------------
+
+static bool ShellContains(const char* hay, const char* needle)
+{
+	if (!hay || !needle || !*needle) return false;
+	const size_t nh = strlen(hay), nn = strlen(needle);
+	for (size_t i = 0; i + nn <= nh; ++i)
+	{
+		size_t j = 0;
+		while (j < nn && tolower((unsigned char)hay[i + j]) == tolower((unsigned char)needle[j])) ++j;
+		if (j == nn) return true;
+	}
+	return false;
+}
+
+bool SettingsShell::Begin(const char* id, const char* const* cats, int catCount)
+{
+	cats_ = cats; catCount_ = catCount;
+	if (active >= catCount_) active = 0;
+	ImGui::PushID(id);
+	ImGui::SetNextItemWidth(-FLT_MIN);
+	ImGui::InputTextWithHint("##filter", ICON_LC_SEARCH "  Filter settings...", filter, sizeof(filter));
+	const float sideW = ImGui::GetFontSize() * 8.5f;
+	ImGui::BeginChild("##cats", ImVec2(sideW, 0), ImGuiChildFlags_None);
+	const bool filtering = filter[0] != 0;
+	for (int i = 0; i < catCount_; ++i)
+	{
+		if (filtering) ImGui::BeginDisabled();   // the filter searches EVERY category
+		if (ImGui::Selectable(cats_[i], !filtering && i == active)) active = i;
+		if (filtering) ImGui::EndDisabled();
+	}
+	ImGui::EndChild();
+	ImGui::SameLine();
+	ImGui::BeginChild("##content", ImVec2(0, 0), ImGuiChildFlags_None);
+	open_ = true;
+	return true;
+}
+
+bool SettingsShell::Section(const char* cat, const char* label, const char* keywords)
+{
+	bool show;
+	if (filter[0])
+		show = ShellContains(label, filter) || ShellContains(keywords, filter) || ShellContains(cat, filter);
+	else
+		show = cats_ && active < catCount_ && strcmp(cat, cats_[active]) == 0;
+	if (show) ImGui::SeparatorText(label);
+	return show;
+}
+
+void SettingsShell::End()
+{
+	if (!open_) return;
+	ImGui::EndChild();
+	ImGui::PopID();
+	open_ = false;
+}
+
 // ---- Preferences: machine-wide editor settings ---------------------------------------------
 // <userDataDir>/NukeEngine/preferences.json: %APPDATA% on Windows, ~/Library/Application
 // Support on macOS, XDG config on Linux.
@@ -209,6 +266,9 @@ void EditorUI::LoadPreferences()
 			extCustomExe   = j.value("customEditorExe", std::string());
 			extCustomArgs  = j.value("customEditorArgs", std::string());
 			detachAssetEditors = j.value("detachAssetEditors", false);
+			uiScalePct         = j.value("uiScale", 100);
+			if (uiScalePct < 25) uiScalePct = 25; else if (uiScalePct > 300) uiScalePct = 300;
+			displayBackend     = j.value("displayBackend", std::string("auto"));
 			editorBackend      = j.value("editorBackend", 2);   // editor default = Vulkan
 			editorRayTracing   = j.value("editorRayTracing", true);
 			startupProjectMode = j.value("startupProject", 0);  // 0 = open last, 1 = always ask (hub)
@@ -221,6 +281,9 @@ void EditorUI::LoadPreferences()
 	// Doc windows must know the default BEFORE their first frame: module draw callbacks can
 	// run ahead of winAssetEditors' per-frame refresh.
 	NukeUI::DocDetachDefault(detachAssetEditors);
+	// ApplyStyle may have run before these prefs existed in memory — re-derive the scale
+	// from the captured baseline (repeat applications never compound).
+	NukeUI::SetUserUIScale((float)uiScalePct / 100.0f);
 	if (!extCustomExe.empty())
 		extEditors.push_back({ "Custom", extCustomExe,
 		                       extCustomArgs.empty() ? "\"{file}\"" : extCustomArgs });
@@ -235,6 +298,8 @@ void EditorUI::SavePreferences()
 	j["customEditorExe"]  = extCustomExe;
 	j["customEditorArgs"] = extCustomArgs;
 	j["detachAssetEditors"] = detachAssetEditors;
+	j["uiScale"]            = uiScalePct;
+	j["displayBackend"]     = displayBackend;   // linux: auto / x11 / wayland (read RAW in main)
 	j["editorBackend"]      = editorBackend;
 	j["editorRayTracing"]   = editorRayTracing;
 	j["startupProject"]     = startupProjectMode;   // 0 = open last project, 1 = always ask (hub)
@@ -247,14 +312,16 @@ void EditorUI::winPreferences()
 {
 	if (!prefsOpen) return;
 	if (prefsFocus) { NukeUI::DocFocus("panel:preferences"); prefsFocus = false; }
-	NukeUI::DocPanel("panel:preferences", "Preferences", &prefsOpen, window_flags, 540, 460, [this]()
+	NukeUI::DocPanel("panel:preferences", "Preferences", &prefsOpen, window_flags, 640, 480, [this]()
 	{
-		ImGui::SeparatorText("Editor");
+		static const char* kCats[] = { "Editor", "Interface", "Windows", "External editor", "System" };
+		shellPrefs.Begin("prefs", kCats, IM_ARRAYSIZE(kCats));
+		if (shellPrefs.Section("Editor", "Editor", "render backend ray tracing startup project vulkan d3d12"))
 		{
 			// Editor-only backend; the runtime (Player) backend is a project setting.
 			const char* ebModes[] = { "Direct3D 11", "Direct3D 12 (ray tracing)", "Vulkan (default)" };
 			int eb = editorBackend;
-			if (ImGui::Combo("Editor Render Backend", &eb, ebModes, IM_ARRAYSIZE(ebModes)) && eb != editorBackend)
+			if (ImGui::Combo(LProp("Editor Render Backend").c_str(), &eb, ebModes, IM_ARRAYSIZE(ebModes)) && eb != editorBackend)
 			{
 				editorBackend = eb;
 				SavePreferences();
@@ -266,7 +333,7 @@ void EditorUI::winPreferences()
 				                  "Applied on the next editor restart.");
 			// Off compiles shaders for the raster path (shadow maps + SSR) — no ray queries at all.
 			bool ert = editorRayTracing;
-			if (ImGui::Checkbox("Ray Tracing (editor)", &ert) && ert != editorRayTracing)
+			if (ImGui::Checkbox(LProp("Ray Tracing (editor)").c_str(), &ert) && ert != editorRayTracing)
 			{
 				editorRayTracing = ert;
 				SavePreferences();
@@ -280,7 +347,7 @@ void EditorUI::winPreferences()
 			// Explicit opens (CLI arg, double-clicked .nuproj) always win over this.
 			const char* spModes[] = { "Open last project", "Show project window" };
 			int sp = startupProjectMode;
-			if (ImGui::Combo("On startup", &sp, spModes, IM_ARRAYSIZE(spModes)) && sp != startupProjectMode)
+			if (ImGui::Combo(LProp("On startup").c_str(), &sp, spModes, IM_ARRAYSIZE(spModes)) && sp != startupProjectMode)
 			{
 				startupProjectMode = sp;
 				SavePreferences();
@@ -291,8 +358,46 @@ void EditorUI::winPreferences()
 				                  "Show project window: always asks (create / open / recent).\n"
 				                  "Opening a .nuproj explicitly (argument, double-click) skips both.");
 		}
-		ImGui::SeparatorText("Windows");
-		if (ImGui::Checkbox("Open asset editors detached by default", &detachAssetEditors))
+		if (shellPrefs.Section("Interface", "Interface", "ui scale dpi hidpi display server wayland x11 xwayland"))
+		{
+			ImGui::SliderInt(LProp("UI Scale").c_str(), &uiScalePct, 25, 300, "%d%%", ImGuiSliderFlags_AlwaysClamp);
+			// Applied on RELEASE, not per drag frame — the dynamic font atlas would otherwise
+			// rasterize a size per pixel of mouse travel.
+			if (ImGui::IsItemDeactivatedAfterEdit())
+			{
+				SavePreferences();
+				NukeUI::SetUserUIScale((float)uiScalePct / 100.0f);
+			}
+			ImGui::SameLine(); ImGui::TextDisabled("(?)");
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("Size of the whole editor UI (text, panels, spacing).\n"
+				                  "On top of the monitor's own scale: 100%% keeps the OS-correct\n"
+				                  "size on Retina/HiDPI displays too. Applies when released.");
+#if !defined(_WIN32) && !defined(__APPLE__)
+			const char* dbModes[] = { "Auto (X11 for the editor)", "X11 (XWayland)", "Wayland (native)" };
+			int db = displayBackend == "x11" ? 1 : displayBackend == "wayland" ? 2 : 0;
+			if (ImGui::Combo(LProp("Display server").c_str(), &db, dbModes, IM_ARRAYSIZE(dbModes)))
+			{
+				displayBackend = db == 1 ? "x11" : db == 2 ? "wayland" : "auto";
+				SavePreferences();
+			}
+			ImGui::SameLine(); ImGui::TextDisabled("(?)");
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip(
+					"X11 (XWayland): the full multi-window editor — panels tear off into frameless\n"
+					"  OS windows, ride on top while dragged, and drag-dock back. The compatibility\n"
+					"  layer every Wayland desktop ships; there is no downside for a tool like this.\n"
+					"Wayland (native): no XWayland in between — but the protocol forbids apps from\n"
+					"  positioning windows or reading the global cursor, so: panels stay INSIDE the\n"
+					"  main window, torn-off windows get a system frame and cannot drag-dock back.\n"
+					"Auto: X11 here. (The game Player picks native Wayland on its own regardless —\n"
+					"  a single game window needs none of the above.)\n"
+					"Applied on the next editor restart. NUKE_DISPLAY_BACKEND overrides this.");
+#endif
+		}
+		if (shellPrefs.Section("Windows", "Windows", "detach asset editors separate os windows dock"))
+		{
+		if (ImGui::Checkbox(LProp("Open asset editors detached by default", 20.0f).c_str(), &detachAssetEditors))
 		{
 			SavePreferences();
 			// Applies to already-open editors too; hosts are torn down via wantDock on the
@@ -310,12 +415,12 @@ void EditorUI::winPreferences()
 			                  "like any panel). Either way: drag an editor's title bar past the\n"
 			                  "main-window edge to tear it off into its own OS window, and drag\n"
 			                  "the detached window's tab back onto the main window to re-dock it.");
-		ImGui::Spacing();
-		ImGui::SeparatorText("External editor");
+		}
+		if (shellPrefs.Section("External editor", "External editor", "vs code rider sublime custom exe arguments file line"))
+		{
 		ImGui::TextDisabled("Used by the Console's double-click-to-source and script/asset editing.");
 		std::string cur = extEditorName.empty() ? std::string("(built-in text editor)") : extEditorName;
-		ImGui::SetNextItemWidth(300);
-		if (ImGui::BeginCombo("Default editor", cur.c_str()))
+		if (ImGui::BeginCombo(LProp("Default editor").c_str(), cur.c_str()))
 		{
 			if (ImGui::Selectable("(built-in text editor)", extEditorName.empty()))
 			{ extEditorName.clear(); SavePreferences(); }
@@ -338,8 +443,9 @@ void EditorUI::winPreferences()
 
 		ImGui::Spacing();
 		ImGui::TextUnformatted("Custom editor");
-		std::string exeShown = extCustomExe.empty() ? std::string("(pick an .exe)") : extCustomExe;
-		if (ImGui::Button((exeShown + "##customexe").c_str(), ImVec2(300, 0)))
+		std::string exeShown = extCustomExe.empty() ? std::string("(pick an executable)") : extCustomExe;
+		LProp("Executable");
+		if (ImGui::Button((exeShown + "##customexe").c_str(), ImVec2(ImGui::GetFontSize() * 15.0f, 0)))
 		{
 			std::string p = EditorPickExeFile();
 			if (!p.empty())
@@ -351,12 +457,10 @@ void EditorUI::winPreferences()
 				                       extCustomArgs.empty() ? "\"{file}\"" : extCustomArgs });
 			}
 		}
-		ImGui::SameLine(0, 6); ImGui::TextUnformatted("Executable");
 		{
 			char buf[512];
 			strncpy(buf, extCustomArgs.c_str(), sizeof(buf) - 1); buf[sizeof(buf) - 1] = 0;
-			ImGui::SetNextItemWidth(300);
-			if (ImGui::InputText("Arguments", buf, sizeof(buf)))
+			if (ImGui::InputText(LProp("Arguments").c_str(), buf, sizeof(buf)))
 			{
 				extCustomArgs = buf;
 				SavePreferences();
@@ -367,6 +471,17 @@ void EditorUI::winPreferences()
 			if (ImGui::IsItemHovered())
 				ImGui::SetTooltip("{file} and {line} expand, e.g.:  -g \"{file}:{line}\"");
 		}
+		}
+		if (shellPrefs.Section("System", "System", "register nuproj file association double click open"))
+		{
+			// Machine-wide, not per-project — that's why it lives HERE and not in Project
+			// Settings. Windows: HKCU. macOS: LaunchServices. Linux: XDG mime + .desktop.
+			if (ImGui::Button("Register .nuproj file association"))
+				RegisterProjectFileAssociation();
+			ImGui::SameLine();
+			ImGui::TextDisabled("(current user; open .nuproj files in this editor)");
+		}
+		shellPrefs.End();
 	});
 }
 

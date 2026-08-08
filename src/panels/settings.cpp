@@ -227,7 +227,7 @@ void EditorUI::ApplyProjectSettings(const ProjectSettings& ps)
 void EditorUI::winSettings()
 {
 	if (!settingsOpen) return;
-	NukeUI::DocPanel("panel:settings", "Project Settings", &settingsOpen, 0, 460, 420, [this]()
+	NukeUI::DocPanel("panel:settings", "Project Settings", &settingsOpen, 0, 680, 500, [this]()
 	{
 		// Snapshot helpers for the undoable project settings.
 		auto capturePS = [this]() -> ProjectSettings {
@@ -265,7 +265,10 @@ void EditorUI::winSettings()
 
 		const ProjectSettings PSD = defaultPS();   // per-field default source for resetBtn
 
-		ImGui::SeparatorText("World");
+		static const char* kCats[] = { "World", "Rendering", "Packaging", "Mods", "Disk sync", "Hotkeys", "Layers" };
+		shellProj.Begin("projset", kCats, IM_ARRAYSIZE(kCats));
+		if (shellProj.Section("World", "World", "default world startup scene"))
+		{
 		std::vector<std::string> worlds;
 		{
 			boost::system::error_code ec;
@@ -280,7 +283,7 @@ void EditorUI::winSettings()
 				}
 		}
 		const char* cur = startupWorld.empty() ? "(none)" : startupWorld.c_str();
-		if (ImGui::BeginCombo("Default World", cur))
+		if (ImGui::BeginCombo(LProp("Default World").c_str(), cur))
 		{
 			for (auto& w : worlds)
 				if (ImGui::Selectable(w.c_str(), w == startupWorld) && w != startupWorld)
@@ -293,11 +296,12 @@ void EditorUI::winSettings()
 				}
 			ImGui::EndCombo();
 		}
-
-		ImGui::SeparatorText("Rendering");
+		}
+		if (shellProj.Section("Rendering", "Rendering", "anti-aliasing msaa hdr paper white peak nits rtx intensity bounces reflections"))
+		{
 		const char* aaModes[] = { "Off", "MSAA 2x", "MSAA 4x", "MSAA 8x" };
 		int aaIdx = (msaaSamples >= 8) ? 3 : (msaaSamples >= 4) ? 2 : (msaaSamples >= 2) ? 1 : 0;
-		if (ImGui::Combo("Anti-aliasing", &aaIdx, aaModes, IM_ARRAYSIZE(aaModes)))
+		if (ImGui::Combo(LProp("Anti-aliasing").c_str(), &aaIdx, aaModes, IM_ARRAYSIZE(aaModes)))
 		{
 			int s = (aaIdx == 3) ? 8 : (aaIdx == 2) ? 4 : (aaIdx == 1) ? 2 : 1;
 			msaaSamples = s;
@@ -312,7 +316,7 @@ void EditorUI::winSettings()
 		ImGui::SameLine(); ImGui::TextDisabled("(?)");
 		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Hardware multisampling for the world. Clamped to GPU support.");
 
-		if (ImGui::Checkbox("HDR", &hdrEnabled))
+		if (ImGui::Checkbox(LProp("HDR").c_str(), &hdrEnabled))
 		{
 			if (AppInstance::GetSingleton()->render) AppInstance::GetSingleton()->render->setHDR(hdrEnabled);
 			SaveProject();
@@ -323,9 +327,9 @@ void EditorUI::winSettings()
 
 		// HDR10 display mapping; only affects real HDR10 output in the Player.
 		bool nitsCh = false;
-		nitsCh |= ImGui::SliderFloat("HDR Paper White (nits)", &hdrPaperWhite, 80.0f, 400.0f, "%.0f");
+		nitsCh |= ImGui::SliderFloat(LProp("HDR Paper White (nits)").c_str(), &hdrPaperWhite, 80.0f, 400.0f, "%.0f");
 		{ ProjectSettings a = capturePS(); a.paperWhite = PSD.paperWhite; resetBtn("rst_pw", a, "Reset HDR Paper White"); }
-		nitsCh |= ImGui::SliderFloat("HDR Peak (nits)", &hdrPeak, 200.0f, 4000.0f, "%.0f");
+		nitsCh |= ImGui::SliderFloat(LProp("HDR Peak (nits)").c_str(), &hdrPeak, 200.0f, 4000.0f, "%.0f");
 		{ ProjectSettings a = capturePS(); a.peak = PSD.peak; resetBtn("rst_peak", a, "Reset HDR Peak"); }
 		if (nitsCh)
 		{
@@ -341,13 +345,13 @@ void EditorUI::winSettings()
 			{
 				nuke::NukeRT& rt = cfg->rt;
 				bool ch = false, done = false;
-				ch |= ImGui::SliderFloat("RTX Intensity", &rt.intensity, 0.0f, 2.0f, "%.2f");        done |= ImGui::IsItemDeactivatedAfterEdit();
+				ch |= ImGui::SliderFloat(LProp("RTX Intensity").c_str(), &rt.intensity, 0.0f, 2.0f, "%.2f");        done |= ImGui::IsItemDeactivatedAfterEdit();
 				{ ProjectSettings a = capturePS(); a.rtIntensity = PSD.rtIntensity; resetBtn("rst_rti", a, "Reset RTX Intensity"); }
-				ch |= ImGui::SliderFloat("RTX Max Distance", &rt.maxDist, 1.0f, 1000.0f, "%.0f");     done |= ImGui::IsItemDeactivatedAfterEdit();
+				ch |= ImGui::SliderFloat(LProp("RTX Max Distance").c_str(), &rt.maxDist, 1.0f, 1000.0f, "%.0f");     done |= ImGui::IsItemDeactivatedAfterEdit();
 				{ ProjectSettings a = capturePS(); a.rtMaxDist = PSD.rtMaxDist; resetBtn("rst_rtd", a, "Reset RTX Max Distance"); }
-				ch |= ImGui::SliderInt("RTX Bounces", &rt.bounces, 1, 7);                             done |= ImGui::IsItemDeactivatedAfterEdit();
+				ch |= ImGui::SliderInt(LProp("RTX Bounces").c_str(), &rt.bounces, 1, 7);                             done |= ImGui::IsItemDeactivatedAfterEdit();
 				{ ProjectSettings a = capturePS(); a.rtBounces = PSD.rtBounces; resetBtn("rst_rtb", a, "Reset RTX Bounces"); }
-				ch |= ImGui::SliderFloat("RTX Roughness Cutoff", &rt.roughCutoff, 0.05f, 1.0f, "%.2f"); done |= ImGui::IsItemDeactivatedAfterEdit();
+				ch |= ImGui::SliderFloat(LProp("RTX Roughness Cutoff").c_str(), &rt.roughCutoff, 0.05f, 1.0f, "%.2f"); done |= ImGui::IsItemDeactivatedAfterEdit();
 				{ ProjectSettings a = capturePS(); a.rtRoughCutoff = PSD.rtRoughCutoff; resetBtn("rst_rtr", a, "Reset RTX Roughness Cutoff"); }
 				ImGui::SameLine(); ImGui::TextDisabled("(?)");
 				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Global RT reflection quality. Add the 'rtreflect' post effect to a camera to enable RT there (needs D3D12).");
@@ -358,13 +362,14 @@ void EditorUI::winSettings()
 			}
 		}
 
+		}
 		// Packaging: the project pak is the release artifact, mod paks are editable overlays.
-		ImGui::SeparatorText("Packaging");
+		if (shellProj.Section("Packaging", "Packaging", "game name icon build path dist pak compression zstd split"))
 		{
 			// Name, icon and window title of the shipped exe, applied by Package Project.
 			char nameBuf[128];
 			strncpy(nameBuf, projectName.c_str(), sizeof(nameBuf) - 1); nameBuf[sizeof(nameBuf) - 1] = 0;
-			if (ImGui::InputText("Game name", nameBuf, sizeof(nameBuf), ImGuiInputTextFlags_EnterReturnsTrue)
+			if (ImGui::InputText(LProp("Game name").c_str(), nameBuf, sizeof(nameBuf), ImGuiInputTextFlags_EnterReturnsTrue)
 			    || (ImGui::IsItemDeactivatedAfterEdit()))
 			{
 				if (projectName != nameBuf && nameBuf[0]) { projectName = nameBuf; SaveProject(); }
@@ -384,6 +389,7 @@ void EditorUI::winSettings()
 						iconPrevTex = r->createTexture2D(rgba.data(), iw, ih);
 				}
 				const float box = 40.0f;
+				LProp("Game icon");
 				if (iconPrevTex) ImGui::Image((ImTextureID)iconPrevTex, ImVec2(box, box));
 				else
 				{
@@ -455,13 +461,13 @@ void EditorUI::winSettings()
 				ImGui::SameLine(0, 2);
 				if (ImGui::Button(ICON_LC_ROTATE_CCW "##girst")) { gameIcon.clear(); SaveProject(); }
 				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Clear (ship the default player icon)");
-				ImGui::SameLine(0, 6); ImGui::TextUnformatted("Game icon");
 				ImGui::EndGroup();
 			}
 			// Build output folder; defaults to <project>/dist. Relative paths resolve
 			// against the project.
 			{
 				std::string shown = distPath.empty() ? std::string("dist  (default, in the project root)") : distPath;
+				LProp("Build path");
 				if (ImGui::Button((shown + "##distp").c_str(), ImVec2(320, 0)))
 				{
 					std::string picked = EditorPickFolder();
@@ -485,23 +491,22 @@ void EditorUI::winSettings()
 				ImGui::SameLine(0, 2);
 				if (ImGui::Button(ICON_LC_ROTATE_CCW "##distrst")) { distPath.clear(); SaveProject(); }
 				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Reset to the default (<project>/dist)");
-				ImGui::SameLine(0, 6); ImGui::TextUnformatted("Build path");
 			}
 			const char* methods[] = { "Store (no compression)", "Zlib", "Zstd" };
-			if (ImGui::Combo("Project pak compression", &pakMethod, methods, IM_ARRAYSIZE(methods))) SaveProject();
+			if (ImGui::Combo(LProp("Project pak compression").c_str(), &pakMethod, methods, IM_ARRAYSIZE(methods))) SaveProject();
 			if (pakMethod != 0)
 			{
 				int maxLv = (pakMethod == 2) ? 22 : 9;
 				if (pakLevel > maxLv) pakLevel = maxLv;
-				if (ImGui::SliderInt("Project pak level", &pakLevel, 1, maxLv)) SaveProject();
+				if (ImGui::SliderInt(LProp("Project pak level").c_str(), &pakLevel, 1, maxLv)) SaveProject();
 			}
-			if (ImGui::Combo("Mod pak compression", &modMethod, methods, IM_ARRAYSIZE(methods))) SaveProject();
+			if (ImGui::Combo(LProp("Mod pak compression").c_str(), &modMethod, methods, IM_ARRAYSIZE(methods))) SaveProject();
 			if (modMethod != 0)
 			{
 				int maxLv = (modMethod == 2) ? 22 : 9;
 				if (modLevel < 1) modLevel = 1;
 				if (modLevel > maxLv) modLevel = maxLv;
-				if (ImGui::SliderInt("Mod pak level", &modLevel, 1, maxLv)) SaveProject();
+				if (ImGui::SliderInt(LProp("Mod pak level").c_str(), &modLevel, 1, maxLv)) SaveProject();
 			}
 			ImGui::SameLine(); ImGui::TextDisabled("(?)");
 			if (ImGui::IsItemHovered())
@@ -509,12 +514,12 @@ void EditorUI::winSettings()
 
 			// Split: heavy content moves into side "part" paks that mount with their main one.
 			// Applies to the game pak, DLC paks and mods alike.
-			if (ImGui::Combo("Pak split", &modSplitMode,
+			if (ImGui::Combo(LProp("Pak split").c_str(), &modSplitMode,
 			                 "None (single file)\0By content type (textures/audio/meshes)\0Size cap per file\0"))
 				SaveProject();
 			if (modSplitMode == 2)
 			{
-				if (ImGui::InputInt("Split cap (MB)", &modSplitCapMB, 64, 256))
+				if (ImGui::InputInt(LProp("Split cap (MB)").c_str(), &modSplitCapMB, 64, 256))
 				{
 					if (modSplitCapMB < 16) modSplitCapMB = 16;
 					SaveProject();
@@ -527,9 +532,9 @@ void EditorUI::winSettings()
 
 		// Mods list, backed by config/mods.json: checkbox = enabled, row order = load order.
 		// Mounts happen at boot, so changes apply on session reload.
-		if (basePakPath.size() > 6 && basePakPath.compare(basePakPath.size() - 6, 6, ".nupak") == 0)
+		if (basePakPath.size() > 6 && basePakPath.compare(basePakPath.size() - 6, 6, ".nupak") == 0
+		    && shellProj.Section("Mods", "Mods", "load order requires modules mount enabled"))
 		{
-			ImGui::SeparatorText("Mods");
 			// No rescan while an item is active: a drag-reorder must not have its rows rebuilt.
 			if (!ImGui::IsAnyItemActive() && (modsUiTick < 0 || ImGui::GetFrameCount() - modsUiTick > 120))
 			{ ScanModsUi(); modsUiTick = ImGui::GetFrameCount(); }
@@ -680,13 +685,15 @@ void EditorUI::winSettings()
 				ImGui::SetTooltip("Mods mount when the session opens.\nChanges are saved to config/mods.json immediately —\nthe running game picks them up on its next start too.");
 		}
 
-		ImGui::SeparatorText("Disk sync");
+		if (shellProj.Section("Disk sync", "Disk sync", "disk changed reload conflict merge overwrite"))
+		{
 		const char* cleanModes[] = { "Ask", "Auto-reload" };
-		if (ImGui::Combo("Disk changed (editor clean)", &reloadCleanMode, cleanModes, IM_ARRAYSIZE(cleanModes))) SaveProject();
+		if (ImGui::Combo(LProp("Disk changed (editor clean)", 15.0f).c_str(), &reloadCleanMode, cleanModes, IM_ARRAYSIZE(cleanModes))) SaveProject();
 		{ ProjectSettings a = capturePS(); a.reloadClean = PSD.reloadClean; resetBtn("rst_rc", a, "Reset disk (clean)"); }
 		const char* conflModes[] = { "Ask", "Reload (use disk)", "Overwrite (use editor)", "Merge / resolve" };
-		if (ImGui::Combo("Disk changed (editor dirty)", &conflictMode, conflModes, IM_ARRAYSIZE(conflModes))) SaveProject();
+		if (ImGui::Combo(LProp("Disk changed (editor dirty)", 15.0f).c_str(), &conflictMode, conflModes, IM_ARRAYSIZE(conflModes))) SaveProject();
 		{ ProjectSettings a = capturePS(); a.conflict = PSD.conflict; resetBtn("rst_cf", a, "Reset disk (dirty)"); }
+		}
 
 		// Undo for the value edits above: snapshot while idle, push one command when an edit
 		// settles. Default World and hotkeys keep their own undo and are excluded from samePS.
@@ -707,7 +714,8 @@ void EditorUI::winSettings()
 		}
 		if (!psActive) psBefore = capturePS();
 
-		ImGui::SeparatorText("Hotkeys");
+		if (shellProj.Section("Hotkeys", "Hotkeys", "rebind key binding shortcut chord"))
+		{
 		ImGui::Text("Rebind, then press a key combo. Conflicting hotkeys stay unbound — assign manually.");
 		nuke::Hotkeys* hk = nuke::Hotkeys::Get();
 		if (ImGui::BeginTable("hk", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingStretchProp))
@@ -734,8 +742,10 @@ void EditorUI::winSettings()
 			ImGui::EndTable();
 		}
 
+		}
 		// 32 named render channels (Atom.layer + Camera.layerMask filter on them).
-		ImGui::SeparatorText("Layers");
+		if (shellProj.Section("Layers", "Layers", "render channels layer mask atom camera"))
+		{
 		ImGui::Text("Named render channels. Atoms pick a Layer; cameras pick what they draw via Layer Mask.");
 		if (ImGui::BeginTable("layers", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit, ImVec2(320, 0)))
 		{
@@ -760,13 +770,12 @@ void EditorUI::winSettings()
 			ImGui::EndTable();
 		}
 
-		ImGui::SeparatorText("System");
-		if (ImGui::Button("Register .nuproj file association"))
-			RegisterProjectFileAssociation();   // HKCU only
-		ImGui::SameLine();
-		ImGui::Text("(current user; open .nuproj files in this editor)");
+		}
+		shellProj.End();
+		// (".nuproj file association" moved to Preferences -> System: it is machine-wide.)
 
 		// Capture a chord for the hotkey being rebound: first non-modifier key + current mods.
+		// Runs OUTSIDE the sections — the capture must not stop when Hotkeys scrolls away.
 		if (!rebindId.empty())
 		{
 			ImGuiIO& io = ImGui::GetIO();
@@ -776,7 +785,7 @@ void EditorUI::winSettings()
 				if (k >= ImGuiKey_LeftCtrl && k <= ImGuiKey_RightSuper) continue;   // skip pure modifier keys
 				if (ImGui::IsKeyPressed(k, false))
 				{
-					hk->Rebind(rebindId, mods | k);   // on conflict the hotkey keeps its state
+					nuke::Hotkeys::Get()->Rebind(rebindId, mods | k);   // on conflict the hotkey keeps its state
 					SaveProject();
 					rebindId.clear();
 					break;
@@ -793,7 +802,7 @@ void EditorUI::winWorldSettings()
 	if (!worldSettingsOpen) return;
 	if (worldSettingsFocus) { NukeUI::DocFocus("panel:worldsettings"); worldSettingsFocus = false; }   // menu-opened only
 	// NoFocusOnAppearing: restored-open on load must not steal the dock's active tab.
-	NukeUI::DocPanel("panel:worldsettings", "World Settings", &worldSettingsOpen, ImGuiWindowFlags_NoFocusOnAppearing, 440, 560, [this]()
+	NukeUI::DocPanel("panel:worldsettings", "World Settings", &worldSettingsOpen, ImGuiWindowFlags_NoFocusOnAppearing, 620, 560, [this]()
 	{
 		World* w = AppInstance::GetSingleton()->currentWorld;
 		if (!w) { ImGui::TextDisabled("No world loaded."); return; }
@@ -812,39 +821,45 @@ void EditorUI::winWorldSettings()
 			    && a.fixedDt == b.fixedDt;
 		};
 
-		ImGui::SeparatorText("Shadows (global)");
-		ImGui::TextDisabled("Which lights cast is per-Light; these tune all shadow maps.");
+		static const char* kCats[] = { "Shadows", "Culling", "Physics", "Wind" };
+		shellWorld.Begin("worldset", kCats, IM_ARRAYSIZE(kCats));
 		bool changed = false;
+		if (shellWorld.Section("Shadows", "Shadows (global)", "resolution distance depth normal bias softness pcf"))
+		{
+		ImGui::TextDisabled("Which lights cast is per-Light; these tune all shadow maps.");
 		const char* resLabels[] = { "1024", "2048", "4096" };
 		const int   resVals[]   = { 1024, 2048, 4096 };
 		int ri = (s.shadowRes >= 4096) ? 2 : (s.shadowRes >= 2048 ? 1 : 0);
-		if (ImGui::Combo("Resolution", &ri, resLabels, IM_ARRAYSIZE(resLabels))) { s.shadowRes = resVals[ri]; changed = true; }
-		changed |= ImGui::SliderFloat("Distance (directional)", &s.shadowDistance, 5.0f, 300.0f, "%.0f");
-		changed |= ImGui::SliderFloat("Depth Bias", &s.shadowDepthBias, 0.0f, 0.01f, "%.4f");
-		changed |= ImGui::SliderFloat("Normal Bias", &s.shadowNormalBias, 0.0f, 0.5f, "%.3f");
-		changed |= ImGui::SliderFloat("Softness (PCF)", &s.shadowSoftness, 0.0f, 4.0f, "%.2f");
-
-		ImGui::SeparatorText("Culling");
-		changed |= ImGui::Checkbox("Frustum Culling", &s.frustumCull);
+		if (ImGui::Combo(LProp("Resolution").c_str(), &ri, resLabels, IM_ARRAYSIZE(resLabels))) { s.shadowRes = resVals[ri]; changed = true; }
+		changed |= ImGui::SliderFloat(LProp("Distance (directional)").c_str(), &s.shadowDistance, 5.0f, 300.0f, "%.0f");
+		changed |= ImGui::SliderFloat(LProp("Depth Bias").c_str(), &s.shadowDepthBias, 0.0f, 0.01f, "%.4f");
+		changed |= ImGui::SliderFloat(LProp("Normal Bias").c_str(), &s.shadowNormalBias, 0.0f, 0.5f, "%.3f");
+		changed |= ImGui::SliderFloat(LProp("Softness (PCF)").c_str(), &s.shadowSoftness, 0.0f, 4.0f, "%.2f");
+		}
+		if (shellWorld.Section("Culling", "Culling", "frustum"))
+		{
+		changed |= ImGui::Checkbox(LProp("Frustum Culling").c_str(), &s.frustumCull);
 		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Skip drawing objects outside the camera frustum (perf).\nTurn off if off-screen geometry must still render (e.g. reflections).");
-
-		ImGui::SeparatorText("Physics");
-		changed |= ImGui::DragFloat3("Gravity", s.gravity, 0.05f);
+		}
+		if (shellWorld.Section("Physics", "Physics", "gravity fixed timestep"))
+		{
+		changed |= ImGui::DragFloat3(LProp("Gravity").c_str(), s.gravity, 0.05f);
 		if (ImGui::IsItemHovered()) ImGui::SetTooltip("World gravity (m/s^2), pushed to the physics service each step.");
-		changed |= ImGui::DragFloat("Fixed Timestep", &s.fixedDt, 0.0005f, 0.001f, 0.1f, "%.4f s");
+		changed |= ImGui::DragFloat(LProp("Fixed Timestep").c_str(), &s.fixedDt, 0.0005f, 0.001f, 0.1f, "%.4f s");
 		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Fixed simulation step (seconds). 1/60 by default;\nsmaller = more precise, more CPU.");
+		}
 
 		if (changed) apply(s);   // live apply + mark dirty
 
 		// The world's global wind field; local volumes are WindZone components on atoms.
-		ImGui::SeparatorText("Wind");
+		if (shellWorld.Section("Wind", "Wind", "direction yaw pitch strength gust turbulence windzone"))
 		{
 			bool wch = false;
 			nuke::Vector3 d = nuke::Wind::Direction();
 			float yawDeg = atan2f((float)d.x, (float)d.z) * 57.29578f;
 			float pitchDeg = asinf(std::max(-1.f, std::min(1.f, (float)-d.y))) * 57.29578f;
-			if (ImGui::SliderFloat("Direction (yaw)", &yawDeg, -180.0f, 180.0f, "%.0f deg")) wch = true;
-			if (ImGui::SliderFloat("Direction (pitch)", &pitchDeg, -89.0f, 89.0f, "%.0f deg")) wch = true;
+			if (ImGui::SliderFloat(LProp("Direction (yaw)").c_str(), &yawDeg, -180.0f, 180.0f, "%.0f deg")) wch = true;
+			if (ImGui::SliderFloat(LProp("Direction (pitch)").c_str(), &pitchDeg, -89.0f, 89.0f, "%.0f deg")) wch = true;
 			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Downward slope of the wind (0 = horizontal).");
 			if (wch)
 			{
@@ -852,18 +867,19 @@ void EditorUI::winWorldSettings()
 				nuke::Wind::SetDirection(nuke::Vector3(sinf(yawDeg / 57.29578f) * cy, -sinf(pitchDeg / 57.29578f), cosf(yawDeg / 57.29578f) * cy));
 			}
 			float str = (float)nuke::Wind::Strength();
-			if (ImGui::SliderFloat("Strength", &str, 0.0f, 40.0f, "%.1f m/s")) { nuke::Wind::SetStrength(str); wch = true; }
+			if (ImGui::SliderFloat(LProp("Strength").c_str(), &str, 0.0f, 40.0f, "%.1f m/s")) { nuke::Wind::SetStrength(str); wch = true; }
 			float ga = (float)nuke::Wind::GustAmount(), gf = (float)nuke::Wind::GustFrequency();
-			bool g = ImGui::SliderFloat("Gust Amount", &ga, 0.0f, 1.0f, "%.2f");
-			g     |= ImGui::SliderFloat("Gust Frequency", &gf, 0.0f, 4.0f, "%.2f");
+			bool g = ImGui::SliderFloat(LProp("Gust Amount").c_str(), &ga, 0.0f, 1.0f, "%.2f");
+			g     |= ImGui::SliderFloat(LProp("Gust Frequency").c_str(), &gf, 0.0f, 4.0f, "%.2f");
 			if (g) { nuke::Wind::SetGusts(ga, gf); wch = true; }
 			float ta = (float)nuke::Wind::TurbulenceAmount(), ts = (float)nuke::Wind::TurbulenceScale();
-			bool t = ImGui::SliderFloat("Turbulence", &ta, 0.0f, 1.0f, "%.2f");
-			t     |= ImGui::SliderFloat("Turbulence Scale", &ts, 1.0f, 200.0f, "%.0f m");
+			bool t = ImGui::SliderFloat(LProp("Turbulence").c_str(), &ta, 0.0f, 1.0f, "%.2f");
+			t     |= ImGui::SliderFloat(LProp("Turbulence Scale").c_str(), &ts, 1.0f, 200.0f, "%.0f m");
 			if (t) { nuke::Wind::SetTurbulence(ta, ts); wch = true; }
 			ImGui::TextDisabled("Local volumes: add a WindZone component to an atom.");
 			if (wch) { worldDirty = true; UpdateWindowTitle(); }   // wind saves with the world
 		}
+		shellWorld.End();
 
 		// Undo: snapshot while idle, push one command when an edit settles.
 		bool active = ImGui::IsAnyItemActive();
