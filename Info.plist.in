@@ -13,8 +13,9 @@
 	<key>CFBundlePackageType</key>            <string>APPL</string>
 	<key>CFBundleIconFile</key>               <string>logo</string>
 	<key>NukeBuildArchitectures</key>         <string>@NUKE_BUILD_ARCHS@</string>
-	<key>CFBundleShortVersionString</key>     <string>1.0</string>
+	<key>CFBundleShortVersionString</key>     <string>@NUKE_ENGINE_VERSION_STR@</string>
 	<key>CFBundleVersion</key>                <string>1</string>
+	<key>NukeEngineVersion</key>              <string>@NUKE_ENGINE_VERSION_STR@</string>
 	<key>NSHighResolutionCapable</key>        <true/>
 	<key>NSPrincipalClass</key>               <string>NSApplication</string>
 

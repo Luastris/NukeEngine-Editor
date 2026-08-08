@@ -44,6 +44,11 @@ if(APPLE)
             set(NUKE_BUILD_ARCHS "${CMAKE_HOST_SYSTEM_PROCESSOR}")
         endif()
     endif()
+    # Release name for the bundle plist — parsed from the ONE definition (NukeVersion.h),
+    # same single-source arrangement as NUKE_BUILD_ARCHS.
+    file(STRINGS "${NUKE_ROOT}/NukeEngine/include/interface/NukeVersion.h" _nuke_ver_line
+         REGEX "#define NUKE_ENGINE_VERSION ")
+    string(REGEX REPLACE ".*\"(.*)\".*" "\\1" NUKE_ENGINE_VERSION_STR "${_nuke_ver_line}")
     target_sources(NukeEngine-Editor PRIVATE res/logo.icns dist/imgui.ini)
     set_source_files_properties(res/logo.icns PROPERTIES
         MACOSX_PACKAGE_LOCATION Resources)   # Dock/Finder icon (CFBundleIconFile in the plist)

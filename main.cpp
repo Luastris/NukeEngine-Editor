@@ -567,7 +567,7 @@ int main(int argc, char** argv)
 
 	AppInstance* instance = AppInstance::GetSingleton();
 	instance->setEditor(true);
-	cout << "[main]\t\t\t" << "NukeEngine starting... Welcome!" << endl;
+	cout << "[main]\t\t\t" << "NukeEngine " << nuke::EngineVersion() << " starting... Welcome!" << endl;
 
 	// Archive argument (.nupak / .numod): resolve it to a project folder and open that.
 	if (!archiveArg.empty())

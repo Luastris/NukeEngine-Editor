@@ -4,6 +4,7 @@
 #include <nlohmann/json.hpp>
 #include <boost/filesystem/fstream.hpp>
 #include <cstdlib>
+#include <interface/NukeVersion.h>   // NUKE_ENGINE_VERSION — the release name (About)
 
 void EditorUI::winAbout()
 {
@@ -19,7 +20,7 @@ void EditorUI::winAbout()
 #endif
 		ImGui::Text("NukeEngine");
 		ImGui::SameLine();
-		ImGui::TextColored(ImVec4(0.25f, 1.00f, 0.00f, 1.00f), "Deuterium-2");
+		ImGui::TextColored(ImVec4(0.25f, 1.00f, 0.00f, 1.00f), NUKE_ENGINE_VERSION);
 		ImGui::SameLine();
 #ifdef NUKE_BUILD_ARCHS
 		ImGui::TextDisabled("%s · %s", plat, NUKE_BUILD_ARCHS);
