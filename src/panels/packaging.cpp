@@ -2148,12 +2148,21 @@ void EditorUI::DrawPackageProjectPopup()
 	if (!ImGui::BeginPopupModal("Game Build", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
 
 	{
+#ifdef _WIN32
 		const char* beModes[] = { "Direct3D 11", "Direct3D 12 (ray tracing)", "Vulkan" };
 		ImGui::Combo("Render Backend", &gbWin.backend, beModes, IM_ARRAYSIZE(beModes));
 		ImGui::SameLine(); ImGui::TextDisabled("(?)");
 		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Backend of the PACKAGED game.\n"
 		                                              "D3D12 enables ray tracing, window transparency and HDR10.\n"
 		                                              "The EDITOR's own backend is in Preferences.");
+#else
+		// This dialog packages for the CURRENT platform, and off Windows that means Vulkan —
+		// no dead D3D entries. The player heals a foreign config's backend at boot anyway.
+		gbWin.backend = 2;
+		ImGui::AlignTextToFramePadding();
+		ImGui::TextUnformatted("Render Backend"); ImGui::SameLine(ImGui::GetFontSize() * 13.0f);
+		ImGui::TextDisabled("Vulkan (the only backend on this OS)");
+#endif
 	}
 	ImGui::Checkbox("Ray Tracing", &gbWin.rayTracing);
 	ImGui::SameLine(); ImGui::TextDisabled("(?)");

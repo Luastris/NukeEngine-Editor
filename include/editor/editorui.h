@@ -318,7 +318,7 @@ private:
 	bool detachAssetEditors = false;   // asset editors as separate OS windows (else docked)
 	int  uiScalePct = 100;             // UI scale slider (25..300%); × the OS content scale
 	std::string displayBackend = "auto";   // Linux: auto (X11 for the editor) / x11 / wayland
-	SettingsShell shellPrefs, shellProj, shellWorld;   // settings-window chrome state
+	SettingsShell shellPrefs, shellProj;   // settings-window chrome (World Settings stays a flat inspector)
 	// Editor render backend (machine preference): 0=D3D11, 1=D3D12, 2=Vulkan.
 	// The RUNTIME backend is a project setting (config/main.json window.backend).
 	int editorBackend = 2;

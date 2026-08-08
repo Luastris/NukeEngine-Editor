@@ -354,7 +354,7 @@ void EditorUI::winSettings()
 				ch |= ImGui::SliderFloat(LProp("RTX Roughness Cutoff").c_str(), &rt.roughCutoff, 0.05f, 1.0f, "%.2f"); done |= ImGui::IsItemDeactivatedAfterEdit();
 				{ ProjectSettings a = capturePS(); a.rtRoughCutoff = PSD.rtRoughCutoff; resetBtn("rst_rtr", a, "Reset RTX Roughness Cutoff"); }
 				ImGui::SameLine(); ImGui::TextDisabled("(?)");
-				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Global RT reflection quality. Add the 'rtreflect' post effect to a camera to enable RT there (needs D3D12).");
+				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Global RT reflection quality. Add the 'rtreflect' post effect to a camera to enable RT there\n(needs an RT-capable backend: D3D12 on Windows, Vulkan on Linux).");
 				if (ch && AppInstance::GetSingleton()->render)   // live preview
 					AppInstance::GetSingleton()->render->setRTReflection(rt.intensity, rt.maxDist, rt.bounces, rt.roughCutoff);
 				if (done)   // persist on edit-end
@@ -802,7 +802,7 @@ void EditorUI::winWorldSettings()
 	if (!worldSettingsOpen) return;
 	if (worldSettingsFocus) { NukeUI::DocFocus("panel:worldsettings"); worldSettingsFocus = false; }   // menu-opened only
 	// NoFocusOnAppearing: restored-open on load must not steal the dock's active tab.
-	NukeUI::DocPanel("panel:worldsettings", "World Settings", &worldSettingsOpen, ImGuiWindowFlags_NoFocusOnAppearing, 620, 560, [this]()
+	NukeUI::DocPanel("panel:worldsettings", "World Settings", &worldSettingsOpen, ImGuiWindowFlags_NoFocusOnAppearing, 500, 560, [this]()
 	{
 		World* w = AppInstance::GetSingleton()->currentWorld;
 		if (!w) { ImGui::TextDisabled("No world loaded."); return; }
@@ -821,10 +821,10 @@ void EditorUI::winWorldSettings()
 			    && a.fixedDt == b.fixedDt;
 		};
 
-		static const char* kCats[] = { "Shadows", "Culling", "Physics", "Wind" };
-		shellWorld.Begin("worldset", kCats, IM_ARRAYSIZE(kCats));
+		// Inspector-style: a flat label-first prop list — four small sections never needed
+		// the category-sidebar chrome the bigger settings windows use.
 		bool changed = false;
-		if (shellWorld.Section("Shadows", "Shadows (global)", "resolution distance depth normal bias softness pcf"))
+		ImGui::SeparatorText("Shadows (global)");
 		{
 		ImGui::TextDisabled("Which lights cast is per-Light; these tune all shadow maps.");
 		const char* resLabels[] = { "1024", "2048", "4096" };
@@ -836,12 +836,12 @@ void EditorUI::winWorldSettings()
 		changed |= ImGui::SliderFloat(LProp("Normal Bias").c_str(), &s.shadowNormalBias, 0.0f, 0.5f, "%.3f");
 		changed |= ImGui::SliderFloat(LProp("Softness (PCF)").c_str(), &s.shadowSoftness, 0.0f, 4.0f, "%.2f");
 		}
-		if (shellWorld.Section("Culling", "Culling", "frustum"))
+		ImGui::SeparatorText("Culling");
 		{
 		changed |= ImGui::Checkbox(LProp("Frustum Culling").c_str(), &s.frustumCull);
 		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Skip drawing objects outside the camera frustum (perf).\nTurn off if off-screen geometry must still render (e.g. reflections).");
 		}
-		if (shellWorld.Section("Physics", "Physics", "gravity fixed timestep"))
+		ImGui::SeparatorText("Physics");
 		{
 		changed |= ImGui::DragFloat3(LProp("Gravity").c_str(), s.gravity, 0.05f);
 		if (ImGui::IsItemHovered()) ImGui::SetTooltip("World gravity (m/s^2), pushed to the physics service each step.");
@@ -852,7 +852,7 @@ void EditorUI::winWorldSettings()
 		if (changed) apply(s);   // live apply + mark dirty
 
 		// The world's global wind field; local volumes are WindZone components on atoms.
-		if (shellWorld.Section("Wind", "Wind", "direction yaw pitch strength gust turbulence windzone"))
+		ImGui::SeparatorText("Wind");
 		{
 			bool wch = false;
 			nuke::Vector3 d = nuke::Wind::Direction();
@@ -879,7 +879,6 @@ void EditorUI::winWorldSettings()
 			ImGui::TextDisabled("Local volumes: add a WindZone component to an atom.");
 			if (wch) { worldDirty = true; UpdateWindowTitle(); }   // wind saves with the world
 		}
-		shellWorld.End();
 
 		// Undo: snapshot while idle, push one command when an edit settles.
 		bool active = ImGui::IsAnyItemActive();

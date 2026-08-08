@@ -520,6 +520,19 @@ int main(int argc, char** argv)
 	}
 	// VCPKG_ROOT likewise never reaches a GUI launch (login-shell export). Probe the
 	// build-time location first (baked by the superbuild), then the common homes.
+	// FOOL-PROOFING: an env var pointing at a bare vcpkg CHECKOUT (no installed/ tree —
+	// cloned once, never used) would poison the next engine configure; classic-mode
+	// consumers need the installed tree, so such a root is treated as unset here.
+	if (const char* vr = getenv("VCPKG_ROOT"))
+	{
+		boost::system::error_code ec;
+		if (!bfs::exists(bfs::path(vr) / "installed", ec))
+		{
+			cout << "[main]\t\t\tVCPKG_ROOT = " << vr << " has no installed/ tree — ignoring it "
+			     << "(engine builds need a classic vcpkg install; probing the known roots)" << endl;
+			unsetenv("VCPKG_ROOT");
+		}
+	}
 	if (!getenv("VCPKG_ROOT"))
 	{
 		auto valid = [](const bfs::path& r)

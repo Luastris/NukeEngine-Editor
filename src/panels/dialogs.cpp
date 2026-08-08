@@ -8,10 +8,39 @@
 void EditorUI::winAbout()
 {
 	if (!win->about) return;
-	NukeUI::DocPanel("panel:about", "About", &win->about, window_flags, 480, 200, [this]()
+	NukeUI::DocPanel("panel:about", "About", &win->about, window_flags, 540, 330, [this]()
 	{
-	ImGui::TextWrapped("NukeEngine - free, modular game engine. Renderer (Diligent) and UI (ImGui) "
-	                   "are loaded as independent modules and communicate only through a neutral seam.");
+#if defined(_WIN32)
+		const char* plat = "Windows";
+#elif defined(__APPLE__)
+		const char* plat = "macOS";
+#else
+		const char* plat = "Linux";
+#endif
+		ImGui::Text("NukeEngine");
+		ImGui::SameLine();
+		ImGui::TextColored(ImVec4(0.25f, 1.00f, 0.00f, 1.00f), "Deuterium-2");
+		ImGui::SameLine();
+#ifdef NUKE_BUILD_ARCHS
+		ImGui::TextDisabled("%s · %s", plat, NUKE_BUILD_ARCHS);
+#else
+		ImGui::TextDisabled("%s", plat);
+#endif
+		ImGui::TextWrapped("Free, modular C++20 engine for single-player desktop games "
+		                   "with first-class modding.");
+		ImGui::Spacing();
+		ImGui::SeparatorText("");
+		ImGui::BulletText("Hot-pluggable modules behind POD seams — renderer, physics,\n"
+		                  "audio, scripting, runtime GUI; hot-reload with ABI gating");
+		ImGui::BulletText("Diligent renderer: D3D11 / D3D12 / Vulkan, hardware ray tracing,\n"
+		                  "HDR10, MSAA, water, VFX");
+		ImGui::BulletText("Jolt physics · C# (.NET 8) + Lua scripting · dockable ImGui editor");
+		ImGui::BulletText("Modding first-class: packed games mount read-only, mods are\n"
+		                  "point diffs, mod C# loads additively — pipeline built into the editor");
+		ImGui::BulletText("Windows, macOS, Linux — games ship self-contained\n"
+		                  "(exe / .app / AppImage), packaged straight from the editor");
+		ImGui::SeparatorText("");
+		ImGui::TextDisabled("Luastris — luastris.com");
 	});
 }
 
@@ -266,6 +295,9 @@ void EditorUI::LoadPreferences()
 			extCustomExe   = j.value("customEditorExe", std::string());
 			extCustomArgs  = j.value("customEditorArgs", std::string());
 			detachAssetEditors = j.value("detachAssetEditors", false);
+#ifndef _WIN32
+			editorBackend = 2;   // D3D is Windows-only — heal a prefs file carried over from Windows
+#endif
 			uiScalePct         = j.value("uiScale", 100);
 			if (uiScalePct < 25) uiScalePct = 25; else if (uiScalePct > 300) uiScalePct = 300;
 			displayBackend     = j.value("displayBackend", std::string("auto"));
@@ -319,6 +351,7 @@ void EditorUI::winPreferences()
 		if (shellPrefs.Section("Editor", "Editor", "render backend ray tracing startup project vulkan d3d12"))
 		{
 			// Editor-only backend; the runtime (Player) backend is a project setting.
+#ifdef _WIN32
 			const char* ebModes[] = { "Direct3D 11", "Direct3D 12 (ray tracing)", "Vulkan (default)" };
 			int eb = editorBackend;
 			if (ImGui::Combo(LProp("Editor Render Backend").c_str(), &eb, ebModes, IM_ARRAYSIZE(ebModes)) && eb != editorBackend)
@@ -331,6 +364,11 @@ void EditorUI::winPreferences()
 				ImGui::SetTooltip("Vulkan: native detachable windows (default).\n"
 				                  "D3D12: RT reflections in the editor viewport.\n"
 				                  "Applied on the next editor restart.");
+#else
+			// The D3D backends are Windows-only — offering dead options is worse than none.
+			LProp("Editor Render Backend");
+			ImGui::TextDisabled("Vulkan (the only backend on this OS)");
+#endif
 			// Off compiles shaders for the raster path (shadow maps + SSR) — no ray queries at all.
 			bool ert = editorRayTracing;
 			if (ImGui::Checkbox(LProp("Ray Tracing (editor)").c_str(), &ert) && ert != editorRayTracing)

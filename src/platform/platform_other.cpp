@@ -186,16 +186,27 @@ bool EditorProcessRunning(const std::string& exePath)
 // switching projects means relaunching); the caller closes this instance.
 bool EditorRelaunch(const std::string& projectPath)
 {
-	char exe[4096];
-	const ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
-	if (n <= 0) return false;
-	exe[n] = 0;
-	const char* argv[] = { exe, projectPath.c_str(), nullptr };
+	// AppImage: /proc/self/exe points INSIDE the mounted squashfs, and the runtime unmounts
+	// it the moment this instance exits — a child spawned from that path loses its binary
+	// and libraries mid-boot ("self-kill on project open"). Relaunch the IMAGE FILE itself
+	// ($APPIMAGE, set by the runtime): the child gets its own fresh mount.
+	std::string exePath;
+	if (const char* ai = getenv("APPIMAGE"))
+		if (*ai) exePath = ai;
+	if (exePath.empty())
+	{
+		char exe[4096];
+		const ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+		if (n <= 0) return false;
+		exe[n] = 0;
+		exePath = exe;
+	}
+	const char* argv[] = { exePath.c_str(), projectPath.c_str(), nullptr };
 	posix_spawnattr_t attr;
 	posix_spawnattr_init(&attr);
 	posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSID);
 	pid_t pid = 0;
-	const int rc = posix_spawn(&pid, exe, nullptr, &attr, (char* const*)argv, environ);
+	const int rc = posix_spawn(&pid, exePath.c_str(), nullptr, &attr, (char* const*)argv, environ);
 	posix_spawnattr_destroy(&attr);
 	return rc == 0;
 }
