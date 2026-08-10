@@ -5,6 +5,7 @@
 #include <boost/filesystem/fstream.hpp>
 #include <cstdlib>
 #include <API/Model/CrashReport.h>   // "last session crashed" viewer
+#include <API/Model/DevConsole.h>    // console command line = the same executor as in-game
 #include <interface/NukeVersion.h>   // NUKE_ENGINE_VERSION — the release name (About)
 
 void EditorUI::winAbout()
@@ -177,7 +178,8 @@ void EditorUI::winConsole()
 	}
 
 	// Horizontal scrollbar: long compiler-error lines must stay reachable, not clipped.
-	ImGui::BeginChild("##conlist", ImVec2(0, 0), ImGuiChildFlags_Borders,
+	// One input row stays reserved below the list: the console command line.
+	ImGui::BeginChild("##conlist", ImVec2(0, -ImGui::GetFrameHeightWithSpacing()), ImGuiChildFlags_Borders,
 	                  ImGuiWindowFlags_HorizontalScrollbar);
 	static uint64_t conSelId = 0;       // selected entry
 	std::string copyText;               // set when a copy is requested this frame
@@ -235,6 +237,33 @@ void EditorUI::winConsole()
 	if (conAutoScroll && grew && ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 40)
 		ImGui::SetScrollHereY(1.0f);
 	ImGui::EndChild();
+
+	// The command line: the SAME executor as the in-game console (reflected statics + Lua).
+	static char cmdBuf[1024] = { 0 };
+	static std::vector<std::string> cmdHist;
+	static int cmdPos = -1;
+	auto histCb = [](ImGuiInputTextCallbackData* d) -> int {
+		if (d->EventFlag != ImGuiInputTextFlags_CallbackHistory || cmdHist.empty()) return 0;
+		if (d->EventKey == ImGuiKey_UpArrow)        cmdPos = cmdPos < 0 ? (int)cmdHist.size() - 1 : (cmdPos > 0 ? cmdPos - 1 : 0);
+		else if (d->EventKey == ImGuiKey_DownArrow) { if (cmdPos >= 0 && ++cmdPos >= (int)cmdHist.size()) cmdPos = -1; }
+		d->DeleteChars(0, d->BufTextLen);
+		if (cmdPos >= 0 && cmdPos < (int)cmdHist.size()) d->InsertChars(0, cmdHist[cmdPos].c_str());
+		return 0;
+	};
+	ImGui::SetNextItemWidth(-1);
+	if (ImGui::InputTextWithHint("##concmd", ICON_LC_CHEVRON_RIGHT " Command (help / Type.Method args / Lua)",
+	                             cmdBuf, sizeof(cmdBuf),
+	                             ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CallbackHistory, histCb))
+	{
+		if (cmdBuf[0])
+		{
+			if (cmdHist.empty() || cmdHist.back() != cmdBuf) cmdHist.push_back(cmdBuf);
+			cmdPos = -1;
+			nuke::Console::Execute(cmdBuf);
+			cmdBuf[0] = 0;
+		}
+		ImGui::SetKeyboardFocusHere(-1);   // keep typing
+	}
 	});
 }
 
