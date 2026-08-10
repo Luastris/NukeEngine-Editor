@@ -23,6 +23,9 @@ void EditorUI::winProfiler()
 	ImGui::SameLine();
 	ImGui::Checkbox("Freeze", &profilerFrozen);
 	ImGui::SameLine();
+	if (ImGui::Button(ICON_LC_DOWNLOAD " Capture CSV"))
+		nuke::Profiler::Capture("profile.csv");   // logged with the absolute path
+	ImGui::SameLine();
 	ImGui::SetNextItemWidth(140);
 	ImGui::InputTextWithHint("##pfilter", ICON_LC_SEARCH " filter", profilerFilter, sizeof(profilerFilter));
 	ImGui::Separator();
