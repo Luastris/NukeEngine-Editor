@@ -702,6 +702,10 @@ public:
 	// dialogs
 	void winAbout();
 	void winConsole();
+	// "Last session crashed" viewer: filled at boot from CrashReport::PendingBundle().
+	void winCrash();
+	bool        crashShow = false;
+	std::string crashDir, crashInfo, crashText;
 	// browser
 	const char* ExtIcon(const std::string& ext);
 	bool ExtVisible(const std::string& ext);

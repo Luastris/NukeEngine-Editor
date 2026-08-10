@@ -7,6 +7,9 @@
 #include <interface/AssetCreators.h>
 #include <API/Model/Jobs.h>
 #include <API/Model/StatusBar.h>
+#include <API/Model/CrashReport.h>   // "last session crashed" viewer
+#include <API/Model/Log.h>
+#include <boost/filesystem/fstream.hpp>
 namespace bfs = boost::filesystem;
 
 void EditorUI::SetUp()
@@ -131,6 +134,22 @@ void EditorUI::SetUp()
 	}
 
 	AppInstance* editor = AppInstance::GetSingleton();
+
+	// Last session crashed? Load the bundle into the viewer (the marker clears on Dismiss).
+	{
+		const std::string dir = nuke::CrashReport::PendingBundle();
+		if (!dir.empty())
+		{
+			auto slurp = [](const bfs::path& p) { bfs::ifstream f(p); std::stringstream ss; ss << f.rdbuf(); return ss.str(); };
+			crashDir  = dir;
+			crashInfo = slurp(bfs::path(dir) / "info.json");
+			crashText = slurp(bfs::path(dir) / "crash.txt");
+			crashShow = true;
+			NUKE_ERR("Crash", "previous session crashed — bundle: " + dir);
+		}
+	}
+	editor->PushWindow("nukeeditor-crash", boost::bind(&EditorUI::winCrash, this));
+
 	editor->PushWindow("nukeeditor-about", boost::bind(&EditorUI::winAbout, this));
 	editor->PushWindow("nukeeditor-browser", boost::bind(&EditorUI::winBrowser, this));
 	editor->PushWindow("nukeeditor-console", boost::bind(&EditorUI::winConsole, this));

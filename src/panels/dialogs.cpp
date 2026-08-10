@@ -4,6 +4,7 @@
 #include <nlohmann/json.hpp>
 #include <boost/filesystem/fstream.hpp>
 #include <cstdlib>
+#include <API/Model/CrashReport.h>   // "last session crashed" viewer
 #include <interface/NukeVersion.h>   // NUKE_ENGINE_VERSION — the release name (About)
 
 void EditorUI::winAbout()
@@ -42,6 +43,41 @@ void EditorUI::winAbout()
 		                  "(exe / .app / AppImage), packaged straight from the editor");
 		ImGui::SeparatorText("");
 		ImGui::TextDisabled("Luastris — luastris.com");
+	});
+}
+
+// "Last session crashed": bundle loaded at SetUp from CrashReport::PendingBundle().
+void EditorUI::winCrash()
+{
+	if (!crashShow) return;
+	NukeUI::DocPanel("panel:crash", "Crash Report", &crashShow, window_flags, 620, 420, [this]()
+	{
+		ImGui::TextColored(ImVec4(1.00f, 0.40f, 0.35f, 1),
+		                   ICON_LC_CIRCLE_X "  The previous session crashed.");
+		if (!crashInfo.empty()) ImGui::TextDisabled("%s", crashInfo.c_str());
+		ImGui::TextDisabled("%s", crashDir.c_str());
+		ImGui::Separator();
+		ImGui::BeginChild("crash-text", ImVec2(0, -ImGui::GetFrameHeightWithSpacing()), ImGuiChildFlags_None,
+		                  ImGuiWindowFlags_HorizontalScrollbar);
+		ImGui::TextUnformatted(crashText.empty() ? "(no crash.txt in the bundle)" : crashText.c_str());
+		ImGui::EndChild();
+		if (ImGui::Button("Open Folder"))
+		{
+#if defined(_WIN32)
+			std::string cmd = "explorer \"" + crashDir + "\"";
+#elif defined(__APPLE__)
+			std::string cmd = "open \"" + crashDir + "\"";
+#else
+			std::string cmd = "xdg-open \"" + crashDir + "\"";
+#endif
+			std::system(cmd.c_str());
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Dismiss"))
+		{
+			nuke::CrashReport::ClearPending();
+			crashShow = false;
+		}
 	});
 }
 

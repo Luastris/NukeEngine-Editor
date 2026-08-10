@@ -14,6 +14,7 @@
 #include <interface/AppInstance.h>
 #include <import/assimporter.h>
 #include <API/Model/Jobs.h>
+#include <API/Model/CrashReport.h>   // crash bundles (config/crash) written from the filters below
 #else
 #include <interface/AppInstance.h>
 #endif
@@ -141,6 +142,8 @@ static LONG WINAPI NukeCrashTrace(EXCEPTION_POINTERS* ep)
 	}
 	fflush(stderr);
 	fflush(stdout);
+	// Persist the bundle (minidump + log tail) so the next editor boot can show the crash.
+	nuke::CrashReport::WriteBundle(ep, 0, nullptr);
 	return EXCEPTION_CONTINUE_SEARCH;   // let the system dialog / debugger take over
 }
 
@@ -208,6 +211,7 @@ static void NukeCrashSignal(int sig)
 	void* frames[64];
 	const int n = backtrace(frames, 64);
 	backtrace_symbols_fd(frames, n, STDERR_FILENO);
+	nuke::CrashReport::WriteBundle(nullptr, sig, nullptr);   // persist the bundle (signal-safe)
 	signal(sig, SIG_DFL);
 	raise(sig);
 }
@@ -437,8 +441,10 @@ void InitInput(KeyBoard *keyboard){
 
 int main(int argc, char** argv)
 {
+	// Prepare the crash-bundle paths BEFORE the host filters install: they call WriteBundle.
+	nuke::CrashReport::Install("NukeEngine-Editor");
 #ifdef _WIN32
-	SetUnhandledExceptionFilter(NukeCrashTrace);   // symbolized stack on any crash
+	SetUnhandledExceptionFilter(NukeCrashTrace);   // symbolized stack on any crash (+ bundle)
 #ifdef _DEBUG
 	_CrtSetReportHook(NukeCrtReportHook);          // ...and on CRT asserts (IM_ASSERT)
 #endif
