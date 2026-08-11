@@ -434,7 +434,9 @@ public:
 	void DispatchHotkeys();          // fire bound hotkeys whose chord is pressed (one per chord)
 	void MenuHotkeyItem(const char* label, const char* id);   // menu entry driven by a pooled hotkey
 	void SetProjectFile(const std::string& path);   // point the editor at a specific .nuproj (CLI/open-with)
-	void NewWorldCmd();              // New World (keeps the editor camera)
+	void NewWorldCmd();              // New World (dirty world -> Save/Discard/Cancel modal)
+	void DoNewWorld();               // the actual clear, pushed as ONE undoable command
+	bool openNewWorldConfirm = false;   // request to open the "New World?" modal next frame
 	void SaveWorldCmd();             // save the current world (to its path, or the project default)
 	void SaveWorldAsCmd();           // open the "Save World As" modal (pick name/location)
 	void DrawSaveAsPopup();          // the modal itself (drawn each frame)

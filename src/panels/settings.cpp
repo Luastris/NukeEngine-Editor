@@ -57,15 +57,41 @@ void EditorUI::MenuHotkeyItem(const char* label, const char* id)
 	if (ImGui::MenuItem(label, sc) && h && h->action) h->action();
 }
 
-void EditorUI::NewWorldCmd() { AppInstance::GetSingleton()->NewWorld(); ResetUndo(); SyncWorldBaseline(); }
+void EditorUI::NewWorldCmd()
+{
+	// Unsaved changes are never silently thrown away (a lost world taught us this).
+	if (WorldEditSerial() != savedWorldSerial) { openNewWorldConfirm = true; return; }
+	DoNewWorld();
+}
+
+// New World is UNDOABLE: the whole old world rides in the closure (the PIE-snapshot tech),
+// so Ctrl+Z brings everything back, path included.
+void EditorUI::DoNewWorld()
+{
+	AppInstance* app = AppInstance::GetSingleton();
+	const std::string snapshot = app->currentWorld ? app->currentWorld->SaveToString() : std::string();
+	const std::string oldPath = app->currentWorldPath;
+	app->NewWorld();
+	editing = false; editAtomId = 0;   // own command: the auto edit-detector stays out
+	PushUndo("New World",
+		[snapshot, oldPath]{
+			AppInstance* a = AppInstance::GetSingleton();
+			if (a->currentWorld && !snapshot.empty()) a->currentWorld->LoadFromString(snapshot);
+			a->currentWorldPath = oldPath;
+			if (!oldPath.empty()) a->NameWorldFromPath(oldPath);
+		},
+		[]{ AppInstance::GetSingleton()->NewWorld(); });
+	SyncWorldBaseline();
+}
 
 void EditorUI::SaveWorldCmd()
 {
 	AppInstance* app = AppInstance::GetSingleton();
-	std::string path = !app->currentWorldPath.empty() ? app->currentWorldPath
-	                 : (!startupWorld.empty() ? startupWorld : std::string("world.nuworld"));
-	app->SaveWorld(path);
-	if (startupWorld.empty()) { startupWorld = path; SaveProject(); }   // first world becomes the default
+	// No path = no guessing. The old fallback silently targeted the STARTUP world's file and
+	// once overwrote a real world with an empty one — an unsaved world goes through Save As.
+	if (app->currentWorldPath.empty()) { SaveWorldAsCmd(); return; }
+	app->SaveWorld(app->currentWorldPath);
+	if (startupWorld.empty()) { startupWorld = app->currentWorldPath; SaveProject(); }   // first world becomes the default
 	SyncWorldBaseline();
 }
 
@@ -104,6 +130,25 @@ void EditorUI::SaveAsFolderTree(const std::string& dir)
 
 void EditorUI::DrawSaveAsPopup()
 {
+	// New World over a dirty world: Save / Discard / Cancel — never a silent wipe.
+	if (openNewWorldConfirm) { ImGui::OpenPopup("New World?"); openNewWorldConfirm = false; }
+	if (ImGui::BeginPopupModal("New World?", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+	{
+		AppInstance* app = AppInstance::GetSingleton();
+		ImGui::TextUnformatted("The current world has unsaved changes.");
+		const bool canSave = !app->currentWorldPath.empty();
+		if (!canSave) ImGui::TextDisabled("This world was never saved — use Save As first to keep it.");
+		if (canSave)
+		{
+			if (ImGui::Button(ICON_LC_SAVE " Save & New")) { SaveWorldCmd(); DoNewWorld(); ImGui::CloseCurrentPopup(); }
+			ImGui::SameLine();
+		}
+		if (ImGui::Button(ICON_LC_TRASH_2 " Discard & New")) { DoNewWorld(); ImGui::CloseCurrentPopup(); }
+		ImGui::SameLine();
+		if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+		ImGui::EndPopup();
+	}
+
 	if (openSaveAsPopup) { ImGui::OpenPopup("Save World As"); openSaveAsPopup = false; }
 	if (ImGui::BeginPopupModal("Save World As", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
 	{
