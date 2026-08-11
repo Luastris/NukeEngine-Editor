@@ -133,6 +133,7 @@ void EditorUI::Toolbar()
 		if (ImGui::BeginPopup("##nuke-create"))
 		{
 			if (ImGui::MenuItem(ICON_LC_SQUARE_DASHED " Empty"))  SpawnEmpty();
+			if (ImGui::MenuItem(ICON_LC_FOLDER " Folder"))        CreateFolderAtom(nullptr);   // Q1
 			if (ImGui::MenuItem(ICON_LC_BOX    " Cube"))   SpawnPrimitive("Cube",   "builtin:cube");
 			if (ImGui::MenuItem(ICON_LC_CIRCLE " Sphere")) SpawnPrimitive("Sphere", "builtin:sphere");
 			if (ImGui::MenuItem(ICON_LC_SQUARE " Plane"))  SpawnPrimitive("Plane",  "builtin:plane");
@@ -213,6 +214,24 @@ void EditorUI::Toolbar()
 		if (ToolBtn(worldMode ? ICON_LC_GLOBE : ICON_LC_AXIS_3D,
 		            worldMode ? "World space (X)" : "Local space (X)", false, bw))
 			app->manipulationWorld = !app->manipulationWorld;
+
+		// Q5 grid snap: click toggles, right-click opens the increments (persisted per project).
+		ImGui::SameLine();
+		if (ToolBtn(ICON_LC_MAGNET, snapEnabled ? "Snap ON (Ctrl = free)\nRight-click: increments"
+		                                        : "Snap OFF (Ctrl = snap)\nRight-click: increments",
+		            snapEnabled, bw))
+			snapEnabled = !snapEnabled;
+		if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) ImGui::OpenPopup("##nuke-snap");
+		if (ImGui::BeginPopup("##nuke-snap"))
+		{
+			ImGui::TextDisabled("Snap increments (move = WORLD grid)");
+			ImGui::SetNextItemWidth(120); ImGui::DragFloat("Move",   &snapMove,  0.05f, 0.01f, 100.0f, "%.2f");
+			ImGui::SetNextItemWidth(120); ImGui::DragFloat("Rotate", &snapRot,   0.5f,  0.5f,  90.0f,  "%.1f deg");
+			ImGui::SetNextItemWidth(120); ImGui::DragFloat("Scale",  &snapScale, 0.01f, 0.01f, 10.0f,  "%.2f");
+			ImGui::Checkbox("Show world grid", &gridVisible);
+			ImGui::TextDisabled("Hold V while moving: surface snap");
+			ImGui::EndPopup();
+		}
 
 		// CENTER — PIE (Play / Pause / Stop + possess switch)
 		float winW = ImGui::GetWindowWidth();
@@ -622,11 +641,20 @@ void EditorUI::DeleteSelectedAtom()
 // editor frame; safe to call when nothing is queued.
 void EditorUI::ApplyPendingAtomDelete()
 {
-	if (!pendingDeleteId) return;
-	const long id = pendingDeleteId;
-	pendingDeleteId = 0;
 	AppInstance* app = AppInstance::GetSingleton();
-	if (app && app->currentWorld) app->currentWorld->RemoveAtomById(id);   // atom + its subtree
+	if (pendingDeleteId)
+	{
+		const long id = pendingDeleteId;
+		pendingDeleteId = 0;
+		if (app && app->currentWorld) app->currentWorld->RemoveAtomById(id);   // atom + its subtree
+	}
+	if (!pendingDeleteIds.empty())
+	{
+		std::vector<long> ids;
+		ids.swap(pendingDeleteIds);
+		if (app && app->currentWorld)
+			for (long id : ids) app->currentWorld->RemoveAtomById(id);
+	}
 }
 
 // ---- atom clipboard (copy / cut / paste / duplicate) ----

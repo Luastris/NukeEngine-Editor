@@ -13,6 +13,7 @@ static bool hierCI(const std::string& hay, const std::string& needle)
 
 const char* EditorUI::AtomIcon(Atom* atom)
 {
+	if (atom->folder)                       return ICON_LC_FOLDER;
 	if (atom->GetComponent<Camera>())       return ICON_LC_VIDEO;
 	if (Light* l = atom->GetComponent<Light>())   // light by type: sun / bulb / spotlight
 		return l->type == 0 ? ICON_LC_SUN : (l->type == 2 ? ICON_LC_SPOTLIGHT : ICON_LC_LIGHTBULB);
@@ -87,8 +88,9 @@ void EditorUI::DrawAtomNode(Atom* atom)
 	if (searching && !HierMatchDeep(atom)) return;   // hide non-matching subtrees while searching
 
 	ImGui::PushID(atom);
+	hierRows.push_back(atom);   // visible-row order: shift ranges resolve against last frame's list
 	ImGuiTreeNodeFlags fl = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth;
-	if (app->selectedInHieararchy == atom) fl |= ImGuiTreeNodeFlags_Selected;
+	if (app->IsSelected(atom)) fl |= ImGuiTreeNodeFlags_Selected;
 	if (atom->children.empty())            fl |= ImGuiTreeNodeFlags_Leaf;
 	if (searching)                       ImGui::SetNextItemOpen(true);   // reveal matches
 	// A selection made ELSEWHERE (viewport click, script, undo) must become visible here: the
@@ -121,39 +123,54 @@ void EditorUI::DrawAtomNode(Atom* atom)
 	if (ImGui::IsItemToggledOpen()) s_toggleSuppress = true;
 	if (ImGui::IsItemHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Left)
 	    && !ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left) && !s_toggleSuppress)
-		app->selectedInHieararchy = atom;
+	{
+		ImGuiIO& io = ImGui::GetIO();
+		if (io.KeyShift)     HierRange(atom, io.KeyCtrl);
+		else if (io.KeyCtrl) HierToggle(atom);
+		else                 HierSelect(atom);
+	}
 	if (!ImGui::IsMouseDown(ImGuiMouseButton_Left) && !ImGui::IsMouseReleased(ImGuiMouseButton_Left))
 		s_toggleSuppress = false;   // cleared once the click fully settles
-	if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) { app->selectedInHieararchy = atom; FocusSelected(); }
+	if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) { HierSelect(atom); FocusSelected(); }
 
+	// Explorer semantics: right-clicking INSIDE the multi-selection keeps it (ops act on all).
 	if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right))
-		app->selectedInHieararchy = atom;
+		if (!app->IsSelected(atom)) HierSelect(atom);
 	if (ImGui::BeginPopupContextItem("##atomctx"))
 	{
-		if (ImGui::MenuItem(ICON_LC_COPY " Copy"))            CopySelectedAtom();
-		if (ImGui::MenuItem(ICON_LC_SCISSORS " Cut"))         CutSelectedAtom();
-		if (ImGui::MenuItem(ICON_LC_CLIPBOARD_PASTE " Paste", nullptr, false, AtomClipboardAvailable())) PasteAtom();
-		if (ImGui::MenuItem(ICON_LC_COPY_PLUS " Duplicate"))  DuplicateSelectedAtom();
+		const int nSel = (int)std::max<size_t>(app->Selection().size(), 1);
+		const std::string sfx = nSel > 1 ? " (" + std::to_string(nSel) + ")" : "";
+		if (ImGui::MenuItem((std::string(ICON_LC_COPY " Copy") + sfx).c_str()))           CopySelection();
+		if (ImGui::MenuItem((std::string(ICON_LC_SCISSORS " Cut") + sfx).c_str()))        CutSelection();
+		if (ImGui::MenuItem(ICON_LC_CLIPBOARD_PASTE " Paste", nullptr, false, AtomClipboardAvailable())) PasteAtoms();
+		// Structural ops DEFER past the walk: reparent/insert here would corrupt the lists
+		// the tree iteration is standing on (the same reason DnD defers).
+		if (ImGui::MenuItem((std::string(ICON_LC_COPY_PLUS " Duplicate") + sfx).c_str()))
+			hierPendingOps.push_back([this]{ DuplicateSelection(); });
 		ImGui::Separator();
-		// Undo captures the ID, never the pointer: ApplyAtomState re-creates atoms.
-		if (ImGui::MenuItem("Enabled", nullptr, atom->enabled))
-		{
-			const long aid = atom->id.id; const bool nv = !atom->enabled;
-			atom->enabled = nv;
-			editing = false; editAtomId = 0;   // own command: suppress the auto edit-detector
-			PushUndo(nv ? "Enable atom" : "Disable atom",
-				[aid, nv]{ if (Atom* a = AppInstance::GetSingleton()->currentWorld->GetById(aid)) a->enabled = !nv; },
-				[aid, nv]{ if (Atom* a = AppInstance::GetSingleton()->currentWorld->GetById(aid)) a->enabled = nv; });
-		}
+		if (ImGui::MenuItem(ICON_LC_FOLDER_PLUS " New Folder"))
+			{ Atom* p = atom; hierPendingOps.push_back([this, p]{ CreateFolderAtom(p); }); }
+		if (ImGui::MenuItem((std::string(ICON_LC_GROUP " Group") + sfx).c_str(), "Ctrl+G"))
+			hierPendingOps.push_back([this]{ GroupSelection(false); });
+		if (ImGui::MenuItem((std::string(ICON_LC_FOLDER_INPUT " Group into Folder") + sfx).c_str()))
+			hierPendingOps.push_back([this]{ GroupSelection(true); });
+		if (ImGui::MenuItem(ICON_LC_UNGROUP " Ungroup", "Ctrl+Shift+G", false, !atom->children.empty()))
+			hierPendingOps.push_back([this]{ UngroupSelection(); });
 		ImGui::Separator();
-		if (ImGui::MenuItem(ICON_LC_TRASH_2 " Delete"))       DeleteSelectedAtom();
+		if (ImGui::MenuItem("Enabled", nullptr, atom->enabled)) SetSelectionEnabled(!atom->enabled);
+		ImGui::Separator();
+		if (ImGui::MenuItem((std::string(ICON_LC_TRASH_2 " Delete") + sfx).c_str()))      DeleteSelection();
 		ImGui::EndPopup();
 	}
 
 	if (ImGui::BeginDragDropSource())
 	{
+		// Payload stays a single Atom* (every existing consumer keeps working); dropping an atom
+		// that is PART of the multi-selection moves the whole selection (deferred apply below).
 		ImGui::SetDragDropPayload("NUKE_ATOM", &atom, sizeof(Atom*));
-		ImGui::TextUnformatted(atom->GetName().c_str());
+		const size_t n = app->IsSelected(atom) ? app->Selection().size() : 1;
+		if (n > 1) ImGui::Text("%zu atoms", n);
+		else       ImGui::TextUnformatted(atom->GetName().c_str());
 		ImGui::EndDragDropSource();
 	}
 	// Drop ON the row body = make a child; the gaps above/below handle reorder / level changes.
@@ -212,6 +229,8 @@ void EditorUI::winHierarchy()
 		hierLastSel = app->selectedInHieararchy;
 		hierRevealPending = app->selectedInHieararchy != nullptr;
 	}
+	hierRowsPrev.swap(hierRows);   // last frame's visible order backs shift ranges
+	hierRows.clear();
 
 	for (Atom* atom : app->currentWorld->GetHierarchy())
 		if (atom && atom->GetName() != "Editor Camera")
@@ -245,32 +264,55 @@ void EditorUI::winHierarchy()
 		nuke::Hotkey* df = hk->Find("editor.delete.force");
 		if ((d  && d->bound  && ImGui::IsKeyChordPressed((ImGuiKeyChord)d->chord)) ||
 		    (df && df->bound && ImGui::IsKeyChordPressed((ImGuiKeyChord)df->chord)))
-			DeleteSelectedAtom();
+			DeleteSelection();
 		auto chord = [&](const char* id) { nuke::Hotkey* h = hk->Find(id); return h && h->bound && ImGui::IsKeyChordPressed((ImGuiKeyChord)h->chord); };
-		if (chord("editor.copy"))      CopySelectedAtom();
-		if (chord("editor.cut"))       CutSelectedAtom();
-		if (chord("editor.paste"))     PasteAtom();
-		if (chord("editor.duplicate")) DuplicateSelectedAtom();
+		if (chord("editor.copy"))      CopySelection();
+		if (chord("editor.cut"))       CutSelection();
+		if (chord("editor.paste"))     hierPendingOps.push_back([this]{ PasteAtoms(); });
+		if (chord("editor.duplicate")) hierPendingOps.push_back([this]{ DuplicateSelection(); });
+		if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_G))
+			hierPendingOps.push_back([this]{ UngroupSelection(); });
+		else if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_G))
+			hierPendingOps.push_back([this]{ GroupSelection(false); });
+	}
+
+	// Deferred structural ops: the walk is over, the lists are safe to mutate now.
+	if (!hierPendingOps.empty())
+	{
+		std::vector<std::function<void()>> ops;
+		ops.swap(hierPendingOps);
+		for (auto& op : ops) op();
 	}
 
 	// Deferred DnD applies only after the tree is drawn: mutating the lists mid-iteration corrupts it.
 	if (dndPending && dndAtom)
 	{
-		// Snapshot BEFORE the move: undo needs the old-parent-relative transform.
-		long oldParent = dndAtom->parent ? dndAtom->parent->id.id : 0;
-		int  oldIndex  = 0;
-		{ auto& lst = dndAtom->parent ? dndAtom->parent->children : app->currentWorld->GetHierarchy();
-		  int i = 0; for (Atom* s : lst) { if (s == dndAtom) { oldIndex = i; break; } ++i; } }
-		Atom* moved = dndAtom;
-		std::string beforeJson = SaveAtomToString(moved);
-		// Keep the WORLD pose across any parent change (gap-drops reparent too).
-		Atom* wasParent = moved->parent;
-		Transform& mt = moved->GetTransform();
-		Vector3 wp = mt.globalPosition(); Quaternion wr = mt.globalRotation(); Vector3 ws = mt.globalScale();
-		if (dndBefore) app->currentWorld->ReparentBefore(dndAtom, dndBefore);
-		else           app->currentWorld->Reparent(dndAtom, dndParent);
-		if (moved->parent != wasParent) mt.SetGlobal(wp, wr, ws);
-		RecordReparent(moved, oldParent, oldIndex, beforeJson);
+		// Dragging a member of the multi-selection moves the WHOLE selection (top-level only);
+		// anything else moves just the dragged atom. Dropping onto a selected atom is a no-op.
+		std::vector<Atom*> movers;
+		if (app->IsSelected(dndAtom) && app->Selection().size() > 1) movers = SelectionTopLevel();
+		else                                                         movers.push_back(dndAtom);
+		bool badTarget = false;
+		for (Atom* m : movers)
+			if (m == dndParent || m == dndBefore) { badTarget = true; break; }
+		if (!badTarget)
+			for (Atom* moved : movers)
+			{
+				// Snapshot BEFORE the move: undo needs the old-parent-relative transform.
+				long oldParent = moved->parent ? moved->parent->id.id : 0;
+				int  oldIndex  = 0;
+				{ auto& lst = moved->parent ? moved->parent->children : app->currentWorld->GetHierarchy();
+				  int i = 0; for (Atom* s : lst) { if (s == moved) { oldIndex = i; break; } ++i; } }
+				std::string beforeJson = SaveAtomToString(moved);
+				// Keep the WORLD pose across any parent change (gap-drops reparent too).
+				Atom* wasParent = moved->parent;
+				Transform& mt = moved->GetTransform();
+				Vector3 wp = mt.globalPosition(); Quaternion wr = mt.globalRotation(); Vector3 ws = mt.globalScale();
+				if (dndBefore) app->currentWorld->ReparentBefore(moved, dndBefore);
+				else           app->currentWorld->Reparent(moved, dndParent);
+				if (moved->parent != wasParent) mt.SetGlobal(wp, wr, ws);
+				RecordReparent(moved, oldParent, oldIndex, beforeJson);
+			}
 	}
 	dndPending = false; dndAtom = dndBefore = dndParent = nullptr;
 	// Deferred component move (inspector header dropped on a row).

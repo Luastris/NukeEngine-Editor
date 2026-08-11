@@ -2,6 +2,7 @@
 #include <editor/editorui.h>
 #include <API/Model/PostProcess.h>
 #include <API/Model/Layers.h>        // render-layer slot names persist in the .nuproj
+#include <input/Input.h>             // Q6: explicit input-map list
 #include <iterator>
 
 // Point the editor at a .nuproj manifest, deriving the project directory from it.
@@ -24,6 +25,14 @@ std::string EditorUI::EarlyProjectService(const std::string& service)
 }
 
 // Write the .nuproj manifest.
+// Q6: push the enabled-map list into the engine filter. The filter gates the content SCAN,
+// so newly excluded/included files take full effect on the next project load; the live
+// merged map keeps what it already loaded (bindings only ADD at runtime).
+void EditorUI::ApplyInputMaps()
+{
+	nuke::Input::SetEnabledMaps(inputMapsAuto ? std::vector<std::string>{} : inputMapsList);
+}
+
 void EditorUI::SaveProject()
 {
 	boost::system::error_code ec; bfs::create_directories(projectDir, ec);
@@ -65,6 +74,11 @@ void EditorUI::SaveProject()
 	for (auto& kv : nuke::Hotkeys::Get()->ExportBindings()) hk[kv.first] = kv.second;
 	j["hotkeys"] = hk;
 	j["layers"] = nuke::Layers::All();   // render-layer slot names
+	// Q5 viewport snap (toggle + increments) — a project convention, not a machine preference.
+	j["snap"] = { {"on", snapEnabled}, {"move", snapMove}, {"rot", snapRot}, {"scale", snapScale},
+	              {"grid", gridVisible} };
+	// Q6 input maps: the key is ABSENT in auto mode (every .nuinput loads); present = explicit.
+	if (!inputMapsAuto) j["inputMaps"] = inputMapsList;
 	// Serialize before opening the file: ofstream truncates on open, so a dump() throw would
 	// leave a zero-byte .nuproj. `replace` turns stray non-UTF-8 bytes into U+FFFD.
 	std::string out;
@@ -102,6 +116,22 @@ void EditorUI::LoadProject()
 		bfs::ifstream bm{bfs::path(projectDir + "/.nupak_base")};
 		if (bm) std::getline(bm, basePakPath);
 	}
+	if (j.contains("snap") && j["snap"].is_object())
+	{
+		snapEnabled = j["snap"].value("on", false);
+		snapMove    = j["snap"].value("move", 0.5f);
+		snapRot     = j["snap"].value("rot", 15.0f);
+		snapScale   = j["snap"].value("scale", 0.1f);
+		gridVisible = j["snap"].value("grid", true);
+	}
+	inputMapsAuto = true; inputMapsList.clear();
+	if (j.contains("inputMaps") && j["inputMaps"].is_array())
+	{
+		inputMapsAuto = false;
+		for (auto& m : j["inputMaps"]) if (m.is_string()) inputMapsList.push_back(m.get<std::string>());
+	}
+	// BEFORE the content scan: the scan is what loads .nuinput files.
+	ApplyInputMaps();
 	msaaSamples     = j.value("msaa", 4);
 	hdrEnabled      = j.value("hdr", true);
 	hdrPaperWhite   = j.value("hdrPaperWhite", 200.0f);

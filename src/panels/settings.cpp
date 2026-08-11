@@ -3,6 +3,9 @@
 #include "nukeui.h"
 #include <API/Model/Layers.h>
 #include <API/Model/Wind.h>
+#include <input/Input.h>   // Q6: Input Maps section (filter + provenance)
+#include <map>
+#include <algorithm>
 #include <boost/filesystem.hpp>
 #include <boost/filesystem/fstream.hpp>
 #include <config.h>
@@ -265,7 +268,7 @@ void EditorUI::winSettings()
 
 		const ProjectSettings PSD = defaultPS();   // per-field default source for resetBtn
 
-		static const char* kCats[] = { "World", "Rendering", "Packaging", "Mods", "Disk sync", "Hotkeys", "Layers" };
+		static const char* kCats[] = { "World", "Rendering", "Packaging", "Mods", "Disk sync", "Hotkeys", "Layers", "Input" };
 		shellProj.Begin("projset", kCats, IM_ARRAYSIZE(kCats));
 		if (shellProj.Section("World", "World", "default world startup scene"))
 		{
@@ -770,6 +773,98 @@ void EditorUI::winSettings()
 			ImGui::EndTable();
 		}
 
+		}
+		if (shellProj.Section("Input", "Input Maps", "input nuinput bindings maps provenance conflicts"))
+		{
+		// Q6: which .nuinput files feed the merged action table, and who defined what.
+		bool autoMode = inputMapsAuto;
+		if (ImGui::RadioButton("Auto (load every .nuinput in content)", autoMode))
+		{ inputMapsAuto = true; SaveProject(); ApplyInputMaps(); }
+		if (ImGui::RadioButton("Explicit list", !autoMode))
+		{ inputMapsAuto = false; SaveProject(); ApplyInputMaps(); }
+
+		// Discovered maps (content-relative), with enable checkboxes in explicit mode.
+		std::vector<std::string> found;
+		{
+			boost::system::error_code ec;
+			bfs::path root(contentDir);
+			if (bfs::exists(root, ec))
+				for (bfs::recursive_directory_iterator it(root, ec), end; it != end; it.increment(ec))
+					if (!ec && it->path().extension() == ".nuinput")
+					{
+						std::string rel = bfs::relative(it->path(), root, ec).generic_string();
+						if (!ec) found.push_back(rel);
+					}
+		}
+		if (found.empty()) ImGui::TextDisabled("No .nuinput files in content.");
+		for (const std::string& rel : found)
+		{
+			bool on = inputMapsAuto ||
+			          std::find(inputMapsList.begin(), inputMapsList.end(), rel) != inputMapsList.end();
+			ImGui::BeginDisabled(inputMapsAuto);
+			ImGui::PushID(rel.c_str());
+			if (ImGui::Checkbox(rel.c_str(), &on))
+			{
+				if (on) inputMapsList.push_back(rel);
+				else inputMapsList.erase(std::remove(inputMapsList.begin(), inputMapsList.end(), rel),
+				                         inputMapsList.end());
+				SaveProject(); ApplyInputMaps();
+			}
+			ImGui::PopID();
+			ImGui::EndDisabled();
+		}
+
+		// PROVENANCE: the LIVE merged map — which file defined each context/action/binding, and
+		// which layer won (asset < user). Conflicts: one control driving several actions in the
+		// same context, or one action fed by several files.
+		ImGui::SeparatorText("Live map provenance");
+		for (const nuke::InputContext& c : nuke::Input::ListContexts())
+		{
+			std::string clabel = c.name + "  [" + (c.source.empty() ? "code" : c.source) + "]";
+			if (!ImGui::TreeNode(clabel.c_str())) continue;
+			// control -> set of actions in THIS context (conflict = same control, several actions)
+			std::map<std::string, std::set<std::string>> byControl;
+			for (const nuke::InputBinding& b : c.bindings)
+				for (const std::string& ctl : b.controls) byControl[ctl].insert(b.action);
+			std::map<std::string, std::set<std::string>> actionSources;
+			for (const nuke::InputBinding& b : c.bindings)
+				actionSources[b.action].insert(b.source.empty() ? "code" : b.source);
+			if (ImGui::BeginTable("prov", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+			{
+				ImGui::TableSetupColumn("Action"); ImGui::TableSetupColumn("Controls"); ImGui::TableSetupColumn("Source");
+				ImGui::TableHeadersRow();
+				for (const nuke::InputBinding& b : c.bindings)
+				{
+					ImGui::TableNextRow();
+					ImGui::TableNextColumn();
+					ImGui::TextUnformatted(b.action.c_str());
+					if (actionSources[b.action].size() > 1 && actionSources[b.action].count("user") == 0)
+					{
+						ImGui::SameLine();
+						ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), ICON_LC_TRIANGLE_ALERT);
+						if (ImGui::IsItemHovered()) ImGui::SetTooltip("Defined by several files — they all merge");
+					}
+					ImGui::TableNextColumn();
+					std::string ctls;
+					for (const std::string& ctl : b.controls) { if (!ctls.empty()) ctls += " + "; ctls += ctl; }
+					ImGui::TextUnformatted(ctls.c_str());
+					bool conflict = false;
+					for (const std::string& ctl : b.controls) if (byControl[ctl].size() > 1) conflict = true;
+					if (conflict)
+					{
+						ImGui::SameLine();
+						ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.3f, 1.0f), ICON_LC_TRIANGLE_ALERT);
+						if (ImGui::IsItemHovered()) ImGui::SetTooltip("This control also drives another action in this context");
+					}
+					ImGui::TableNextColumn();
+					const bool user = b.source == "user";
+					ImGui::TextColored(user ? ImVec4(0.5f, 0.9f, 0.5f, 1.0f) : ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled),
+					                   "%s%s", b.source.empty() ? "code" : b.source.c_str(), user ? " (wins)" : "");
+				}
+				ImGui::EndTable();
+			}
+			ImGui::TreePop();
+		}
 		}
 		shellProj.End();
 		// (".nuproj file association" moved to Preferences -> System: it is machine-wide.)

@@ -184,6 +184,7 @@ xcopy "$(SolutionDir)shaders" "$(OutDir)shaders\" /s /e /i /y /d</Command>
     <ClCompile Include="src\panels\gamemodule.cpp" />
     <ClCompile Include="src\panels\setup_menu.cpp" />
     <ClCompile Include="src\panels\hierarchy.cpp" />
+    <ClCompile Include="src\panels\selection.cpp" />
     <ClCompile Include="src\panels\inspector.cpp" />
     <ClCompile Include="src\panels\viewport.cpp" />
     <ClCompile Include="src\panels\dialogs.cpp" />

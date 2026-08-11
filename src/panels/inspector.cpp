@@ -9,6 +9,7 @@
 #include <API/Model/Package.h>  // pickers list pak/mod content too
 #include <interface/Services.h> // csclass picker: scripting providers
 #include <service/iScript.h>
+#include <reflect/ReflectBind.h>   // Q4 multi-edit: per-field mirror across the selection
 #include <set>
 #include <memory>
 #include <cmath>
@@ -1383,9 +1384,26 @@ void EditorUI::winInspector()
 	if (bootLoading) { ImGui::TextDisabled("Loading project..."); return; }   // half-deserialized selection
 	if (auto sltd = AppInstance::GetSingleton()->selectedInHieararchy)
 	{
+		// Multi-selection banner: edits below flow to every selected atom where it makes sense
+		// (layer/persistent/enabled fan out; name and components stay on the primary).
+		const std::vector<Atom*> msel = AppInstance::GetSingleton()->Selection();
+		const bool multi = msel.size() > 1;
+		if (multi) ImGui::TextDisabled(ICON_LC_LAYERS " %zu atoms selected — editing '%s'",
+		                               msel.size(), sltd->GetName().c_str());
+
 		char name[128];
 		strncpy(name, sltd->GetName().c_str(), 127); name[127] = 0;
 		if (ImGui::InputText("Name", name, 128)) sltd->SetName(name);
+
+		// Q1: a folder is pure organization — name + enabled only, transform locked to identity.
+		if (sltd->folder)
+		{
+			bool ena = sltd->enabled;
+			if (ImGui::Checkbox("Enabled", &ena)) { sltd->enabled = ena; }
+			ImGui::TextDisabled(ICON_LC_FOLDER " Folder: children keep their world poses;\n"
+			                    "the runtime treats it as a plain empty.");
+			return;
+		}
 
 		{
 			std::string cur = nuke::Layers::Name(sltd->layer);
@@ -1398,20 +1416,26 @@ void EditorUI::winInspector()
 					std::string nm = nuke::Layers::Name(i);
 					if (nm.empty() && i != sltd->layer) continue;   // unnamed slots hidden
 					if (nm.empty()) nm = "Layer " + std::to_string(i);
-					if (ImGui::Selectable(nm.c_str(), i == sltd->layer)) sltd->layer = i;
+					if (ImGui::Selectable(nm.c_str(), i == sltd->layer))
+					{
+						sltd->layer = i;
+						if (multi) for (Atom* m : msel) if (m) m->layer = i;   // fan out
+					}
 				}
 				ImGui::EndCombo();
 			}
 			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Render channel (named in Project Settings > Layers); cameras pick what they draw via Layer Mask");
 			ImGui::SameLine();
 			bool prs = sltd->persistent;
-			if (ImGui::Checkbox("Persistent", &prs)) sltd->persistent = prs;
+			if (ImGui::Checkbox("Persistent", &prs))
+			{ sltd->persistent = prs; if (multi) for (Atom* m : msel) if (m) m->persistent = prs; }
 			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Survive game world switches (Game.LoadWorld / async activation).\n"
 			                                              "Applies to ROOT atoms while PLAYING; children ride with their root.\n"
 			                                              "Editor world opens and savegame loads never carry atoms.");
 			ImGui::SameLine();
 			bool ena = sltd->enabled;
-			if (ImGui::Checkbox("Enabled", &ena)) sltd->enabled = ena;
+			if (ImGui::Checkbox("Enabled", &ena))
+			{ sltd->enabled = ena; if (multi) for (Atom* m : msel) if (m) m->enabled = ena; }
 			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Whole-atom switch: unticked disables this atom AND its subtree\n"
 			                                              "(updates, rendering, events, physics bodies).");
 		}
@@ -1583,7 +1607,35 @@ void EditorUI::winInspector()
 							const char* pl = nuke::PluginForType(cti->name);
 							if (pl && pl[0]) ImGui::Text(ICON_LC_PLUG " %s", pl);
 						}
-						DrawFields(cmp, cmp->GetType());   // auto fields from [[nuke::prop]] schema
+						// Q4 multi-edit: snapshot the fields, draw, then mirror ONLY the fields
+						// that changed to every selected atom carrying the same component type.
+						nuke::TypeInfo* mti = cmp->GetType();
+						std::vector<nuke::ReflectValue> mbefore;
+						if (multi && mti)
+							for (const nuke::Field& f : mti->fields) mbefore.push_back(nuke::Reflect_GetField(cmp, f));
+						const bool mchg = DrawFields(cmp, cmp->GetType());   // auto fields from [[nuke::prop]] schema
+						if (multi && mti && mchg)
+						{
+							size_t fi = 0;
+							for (const nuke::Field& f : mti->fields)
+							{
+								nuke::ReflectValue now = nuke::Reflect_GetField(cmp, f);
+								const nuke::ReflectValue& was = mbefore[fi++];
+								const bool same = now.type == was.type && now.b == was.b && now.num == was.num
+								               && now.str == was.str && now.atom == was.atom && now.obj == was.obj
+								               && memcmp(now.v, was.v, sizeof(now.v)) == 0;
+								if (same) continue;
+								for (Atom* m : msel)
+								{
+									if (!m || m == sltd) continue;
+									if (nuke::Component* mc = nuke::Reflect_FindComponent(m, mti->name))
+									{
+										nuke::Reflect_SetField(mc, f, now);
+										nuke::Reflect_ComponentFieldChanged(mc, f);
+									}
+								}
+							}
+						}
 						DrawDynamicProps(cmp);             // dynamic props (e.g. Lua script vars)
 
 						if (nuke::TypeInfo* cti = cmp->GetType())

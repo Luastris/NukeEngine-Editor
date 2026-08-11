@@ -51,14 +51,41 @@ void EditorUI::winAbout()
 void EditorUI::winCrash()
 {
 	if (!crashShow) return;
-	NukeUI::DocPanel("panel:crash", "Crash Report", &crashShow, window_flags, 620, 420, [this]()
+	// The window itself never scrolls: the report text lives in its own scrolling child and
+	// the buttons stay pinned at the bottom.
+	NukeUI::DocPanel("panel:crash", "Crash Report", &crashShow,
+	                 window_flags | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse,
+	                 620, 420, [this]()
 	{
 		ImGui::TextColored(ImVec4(1.00f, 0.40f, 0.35f, 1),
 		                   ICON_LC_CIRCLE_X "  The previous session crashed.");
-		if (!crashInfo.empty()) ImGui::TextDisabled("%s", crashInfo.c_str());
-		ImGui::TextDisabled("%s", crashDir.c_str());
+		// The bundle header is JSON on disk — show it as a readable line, not raw braces.
+		if (!crashInfo.empty())
+		{
+			nlohmann::json ji = nlohmann::json::parse(crashInfo, nullptr, false);
+			if (ji.is_object())
+			{
+				std::string t = ji.value("time", std::string());   // "YYYYMMDD-HHMMSS"
+				if (t.size() == 15)
+					t = t.substr(0, 4) + "-" + t.substr(4, 2) + "-" + t.substr(6, 2) + " "
+					  + t.substr(9, 2) + ":" + t.substr(11, 2) + ":" + t.substr(13, 2);
+				ImGui::TextDisabled("%s  ·  %s  ·  %s",
+				                    ji.value("host", std::string("?")).c_str(),
+				                    ji.value("platform", std::string("?")).c_str(), t.c_str());
+			}
+			else ImGui::TextDisabled("%s", crashInfo.c_str());
+		}
+		// Short path — the full one is a tooltip and the Open Folder button.
+		{
+			bfs::path cp(crashDir);
+			std::string shortDir = std::string("...") + (char)bfs::path::preferred_separator
+			                     + cp.parent_path().filename().string() + (char)bfs::path::preferred_separator
+			                     + cp.filename().string();
+			ImGui::TextDisabled(ICON_LC_FOLDER " %s", shortDir.c_str());
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", crashDir.c_str());
+		}
 		ImGui::Separator();
-		ImGui::BeginChild("crash-text", ImVec2(0, -ImGui::GetFrameHeightWithSpacing()), ImGuiChildFlags_None,
+		ImGui::BeginChild("crash-text", ImVec2(0, -ImGui::GetFrameHeightWithSpacing()), ImGuiChildFlags_Borders,
 		                  ImGuiWindowFlags_HorizontalScrollbar);
 		ImGui::TextUnformatted(crashText.empty() ? "(no crash.txt in the bundle)" : crashText.c_str());
 		ImGui::EndChild();

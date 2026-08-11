@@ -197,6 +197,15 @@ private:
 	// Hierarchy: reveal (open the branch + scroll to) a selection made outside the panel.
 	Atom* hierLastSel = nullptr;
 	bool  hierRevealPending = false;
+	// Q4 multi-select: the engine holds primary (`selectedInHieararchy`) + extras
+	// (`selectedExtra`); the panel keeps the shift anchor and the visible-row order of the
+	// LAST drawn frame (shift ranges resolve against it, browser-style).
+	long hierAnchorId = 0;
+	std::vector<Atom*> hierRows, hierRowsPrev;
+	std::vector<long>  pendingDeleteIds;   // deferred multi-delete (applied after the walk)
+	// Structural ops (group/ungroup/duplicate/paste/new-folder) requested from the context
+	// menu run AFTER the tree walk — reparenting removes list nodes the walk stands on.
+	std::vector<std::function<void()>> hierPendingOps;
 	// Profiler window (Window menu / clicking the status-bar timings).
 	bool profilerOpen = false, profilerFocus = false, profilerFrozen = false;
 	char profilerFilter[64] = "";
@@ -345,6 +354,15 @@ private:
 	int         pluginServiceFilter = 0;           // plugin window: 0=All, 1=Utility, 2+=service index
 	float camYaw = 0.0f, camPitch = 0.0f;   // editor camera look angles (radians)
 	float gizmoMatrix[16] = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };   // persistent during a gizmo drag
+	// Q5 grid snap: toolbar toggle + increments, persisted in the .nuproj. Ctrl INVERTS the
+	// toggle while held (temporary snap / temporary free); V holds surface snap while moving.
+	bool  snapEnabled = false;
+	float snapMove = 0.5f, snapRot = 15.0f, snapScale = 0.1f;
+	bool  gridVisible = true;   // the world grid (Y=0) drawn in the viewport; spacing = snapMove
+	// Q6 input maps: auto (every content .nuinput loads, historical) or an explicit list.
+	bool inputMapsAuto = true;
+	std::vector<std::string> inputMapsList;   // content-relative paths, '/' separators
+	void ApplyInputMaps();                    // push the list into the engine + reload the live map
 	std::string pieSnapshot;   // world serialized on Play, restored on Stop (PIE)
 	// Edit target captured on Play, restored on Stop: Game.LoadWorld during PIE retargets
 	// AppInstance::currentWorldPath, and the restored world must not inherit that path.
@@ -816,6 +834,21 @@ public:
 	void PasteAtom();
 	void DuplicateSelectedAtom();
 	bool AtomClipboardAvailable();                                // clipboard holds an atom envelope
+
+	// ---- Q1/Q2/Q4 selection ops (selection.cpp) ------------------------------------------------
+	void HierSelect(Atom* a);                    // plain click: collapse to a single selection
+	void HierToggle(Atom* a);                    // ctrl-click: add/remove; primary follows
+	void HierRange(Atom* a, bool additive);      // shift(+ctrl) click: anchor range over hierRowsPrev
+	std::vector<Atom*> SelectionTopLevel();      // selection minus atoms with a selected ancestor
+	void DeleteSelection();                      // whole selection, ONE undo step
+	void DuplicateSelection();
+	void CopySelection();                        // multi-atom clipboard envelope
+	void CutSelection();
+	void PasteAtoms();                           // single or multi envelope
+	void SetSelectionEnabled(bool on);           // context toggle over the whole selection
+	Atom* CreateFolderAtom(Atom* parent);        // Q1: folder node (undoable, selected)
+	void GroupSelection(bool asFolder);          // Q2: Ctrl+G — new parent at the bounds center
+	void UngroupSelection();                     // children out (world poses kept), shell removed
 	void RemoveComponent(Atom* a, Component* c);                  // inspector: remove a component (undoable)
 	void MoveComponent(Atom* src, Component* c, Atom* dst);       // DnD: move a component to another atom (undoable)
 	void RecordFileMove(const std::string& from, const std::string& to);   // a file/folder was renamed or moved

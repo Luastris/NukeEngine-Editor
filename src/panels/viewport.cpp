@@ -5,6 +5,9 @@
 static bool s_camLookWant = false;      // set by the drag handlers each frame they apply
 static bool s_camLookCapture = false;   // capture currently engaged
 #include <editor/editorui.h>
+// Q3 marquee rect-select: armed by a press on empty space, live once the drag passes threshold.
+static bool  s_marqueeArm = false, s_marqueeLive = false;
+static ImVec2 s_marqueeStart;
 #include "nukeui.h"
 #include "API/Model/Math.h"
 #include "API/Model/resdb.h"
@@ -642,11 +645,18 @@ void EditorUI::winRender()
 			{ rvDragging = false; rvDragIdx = -1; rvDragRiv = nullptr; }   // context gone (PIE/possess/deselect): abort
 		}
 
+		// The world grid is emitted ENGINE-SIDE in World::Render (in-frame with the camera —
+		// lines pushed from here land a frame late and shimmer); the editor only hands over
+		// the step. 0 = hidden.
+		AppInstance::GetSingleton()->editorGridStep =
+			(!possessed && gridVisible) ? std::max(0.01f, snapMove) : 0.0f;
+
 		// Transform gizmo over the selected object (only when a manip tool is active).
 		{
 			AppInstance* gapp = AppInstance::GetSingleton();
 			Atom* gsel = gapp->selectedInHieararchy;
-			if (!possessed && gsel && editorCam && gapp->manipulationMode != 0)
+			// Q1: folders are pure organization — no gizmo, their transform stays identity.
+			if (!possessed && gsel && !gsel->folder && editorCam && gapp->manipulationMode != 0)
 			{
 				ImGuizmo::SetOrthographic(false);
 				ImGuizmo::SetDrawlist();
@@ -687,15 +697,41 @@ void EditorUI::winRender()
 				                        : (gapp->manipulationMode == 2) ? ImGuizmo::ROTATE
 				                                                        : ImGuizmo::SCALE;
 				ImGuizmo::MODE gmode = (gop != ImGuizmo::SCALE && gapp->manipulationWorld != 0) ? ImGuizmo::WORLD : ImGuizmo::LOCAL;
-				float gsnapv   = (gop == ImGuizmo::TRANSLATE) ? 0.5f : (gop == ImGuizmo::ROTATE) ? 15.0f : 0.1f;
+				// Q5: project snap settings drive the increments; holding Ctrl INVERTS the toggle
+				// (temporary snap when off, temporary free when on). Rotate/scale snap RELATIVE
+				// increments (ImGuizmo); translate snaps ABSOLUTE to the world grid below.
+				float gsnapv   = (gop == ImGuizmo::TRANSLATE) ? snapMove : (gop == ImGuizmo::ROTATE) ? snapRot : snapScale;
 				float gsnap[3] = { gsnapv, gsnapv, gsnapv };
-				float* gsnapPtr = ImGui::GetIO().KeyCtrl ? gsnap : nullptr;   // hold Ctrl to snap
+				const bool snapNow = (snapEnabled != ImGui::GetIO().KeyCtrl) && gsnapv > 0.0f;
+				float* gsnapPtr = (snapNow && gop != ImGuizmo::TRANSLATE) ? gsnap : nullptr;
+				const glm::mat4 prevM = glm::make_mat4(gizmoMatrix);   // Q3: per-atom delta base
 				// ImGuizmo::Enable is sticky — restore it right after Manipulate.
 				ImGuizmo::Enable(!s_riverGizmoHot);
 				ImGuizmo::Manipulate(gview, gproj, gop, gmode, gizmoMatrix, nullptr, gsnapPtr);
 				ImGuizmo::Enable(true);
+
+				// Q3 multi-drag undo: one composite step for the WHOLE selection (world poses),
+				// captured at drag start and pushed on release; the single-atom auto-detector
+				// is suppressed while a multi drag is running.
+				struct GizPose { long id; Vector3 p; Quaternion r; Vector3 s; };
+				static std::vector<GizPose> s_dragBefore;
+				static bool s_dragging = false;
+				auto poseOf = [](Atom* a) {
+					Transform& t = a->GetTransform();
+					return GizPose{ (long)a->id.id, t.globalPosition(), t.globalRotation(), t.globalScale() };
+				};
+				const bool multiDrag = !gapp->selectedExtra.empty();
+
 				if (ImGuizmo::IsUsing())
 				{
+					if (multiDrag && !s_dragging)
+					{
+						s_dragging = true;
+						s_dragBefore.clear();
+						for (Atom* a : gapp->Selection()) if (a && !a->folder) s_dragBefore.push_back(poseOf(a));
+					}
+					if (multiDrag) { editing = false; editAtomId = 0; }   // composite replaces the detector
+
 					glm::mat4 nm = glm::make_mat4(gizmoMatrix);
 					glm::vec3 nS, nT, nSkew; glm::vec4 nPersp; glm::quat nR;
 					if (glm::decompose(nm, nS, nR, nT, nSkew, nPersp) &&
@@ -705,10 +741,127 @@ void EditorUI::winRender()
 						if (nS.x < 1e-3f && nS.x > -1e-3f) nS.x = 1e-3f;
 						if (nS.y < 1e-3f && nS.y > -1e-3f) nS.y = 1e-3f;
 						if (nS.z < 1e-3f && nS.z > -1e-3f) nS.z = 1e-3f;
+						// GLOBAL grid snap: the position quantizes to the WORLD grid (multiples of the
+						// step), not to increments from the drag start - objects land ON the lines.
+						if (snapNow && gop == ImGuizmo::TRANSLATE)
+						{
+							nT.x = roundf(nT.x / snapMove) * snapMove;
+							nT.y = roundf(nT.y / snapMove) * snapMove;
+							nT.z = roundf(nT.z / snapMove) * snapMove;
+							gizmoMatrix[12] = nT.x; gizmoMatrix[13] = nT.y; gizmoMatrix[14] = nT.z;
+							nm[3][0] = nT.x; nm[3][1] = nT.y; nm[3][2] = nT.z;
+						}
+						// Q5 object-to-object: while V is held during a move, the selection lands on
+						// the surface UNDER THE CURSOR (selection hidden from the ray so it can't
+						// hit itself), with closest-vertex magnetism on the hit mesh (kit-bashing).
+						if (gop == ImGuizmo::TRANSLATE && ImGui::IsKeyDown(ImGuiKey_V))
+						{
+							std::vector<Atom*> hide = SelectionTopLevel();
+							std::vector<char> hwas;
+							for (Atom* h : hide) { hwas.push_back(h->enabled ? 1 : 0); h->enabled = false; }
+							ImVec2 vmp = ImGui::GetIO().MousePos;
+							const float vndx = ((vmp.x - grmin.x) / gsz.x) * 2.0f - 1.0f;
+							const float vndy = 1.0f - ((vmp.y - grmin.y) / gsz.y) * 2.0f;
+							Transform* vct = editorCam->transform;
+							Vector3 vo = vct->globalPosition(), vfw = vct->direction(), vrt = vct->right(), vup = vct->up();
+							const float vthf = tanf((float)editorCam->fov * 0.5f * 0.01745329252f);
+							const float vasp = (gsz.y > 0.0f) ? gsz.x / gsz.y : 1.0f;
+							Vector3 vdir(vfw.x + vndx * vthf * vasp * vrt.x + vndy * vthf * vup.x,
+							             vfw.y + vndx * vthf * vasp * vrt.y + vndy * vthf * vup.y,
+							             vfw.z + vndx * vthf * vasp * vrt.z + vndy * vthf * vup.z);
+							float vdist = 0.0f;
+							Atom* vhit = gapp->currentWorld->PickDist(vo, vdir, vdist);
+							for (size_t hi = 0; hi < hide.size(); ++hi) hide[hi]->enabled = hwas[hi] != 0;
+							if (vhit && vdist > 0.0f)
+							{
+								const double vlen = std::sqrt(vdir.x * vdir.x + vdir.y * vdir.y + vdir.z * vdir.z);
+								Vector3 hp(vo.x + vdir.x / vlen * vdist,
+								           vo.y + vdir.y / vlen * vdist,
+								           vo.z + vdir.z / vlen * vdist);
+								// The nearest mesh vertex within half a grid step beats the raw point.
+								if (MeshRenderer* vmr = vhit->GetComponent<MeshRenderer>())
+									if (vmr->mesh && vmr->mesh->vertexArray && vmr->mesh->numVerts > 0)
+									{
+										Transform& ht = vhit->GetTransform();
+										Vector3 hP = ht.globalPosition(); Quaternion hR = ht.globalRotation(); Vector3 hS = ht.globalScale();
+										glm::mat4 hm = glm::translate(glm::mat4(1.0f), glm::vec3((float)hP.x, (float)hP.y, (float)hP.z))
+										             * glm::mat4_cast(glm::quat((float)hR.w, (float)hR.x, (float)hR.y, (float)hR.z))
+										             * glm::scale(glm::mat4(1.0f), glm::vec3((float)hS.x, (float)hS.y, (float)hS.z));
+										const float magnet = std::max(0.05f, snapMove * 0.5f);
+										float bestD2 = magnet * magnet;
+										glm::vec3 best(0.0f); bool haveBest = false;
+										const int nv = std::min(vmr->mesh->numVerts, 200000);   // editor-side cap
+										for (int vi = 0; vi < nv; ++vi)
+										{
+											glm::vec4 wv = hm * glm::vec4(vmr->mesh->vertexArray[vi * 3],
+																	      vmr->mesh->vertexArray[vi * 3 + 1],
+																	      vmr->mesh->vertexArray[vi * 3 + 2], 1.0f);
+											const float dx = wv.x - (float)hp.x, dy = wv.y - (float)hp.y, dz = wv.z - (float)hp.z;
+											const float d2 = dx * dx + dy * dy + dz * dz;
+											if (d2 < bestD2) { bestD2 = d2; best = glm::vec3(wv); haveBest = true; }
+										}
+										if (haveBest) hp = Vector3(best.x, best.y, best.z);
+									}
+								nT = glm::vec3((float)hp.x, (float)hp.y, (float)hp.z);
+								// The gizmo matrix follows, so the extras' delta carries the snap too.
+								gizmoMatrix[12] = nT.x; gizmoMatrix[13] = nT.y; gizmoMatrix[14] = nT.z;
+								nm[3][0] = nT.x; nm[3][1] = nT.y; nm[3][2] = nT.z;
+							}
+						}
 						gtt.SetGlobal(Vector3(nT.x, nT.y, nT.z),
 						              Quaternion(nR.x, nR.y, nR.z, nR.w),
 						              Vector3(nS.x, nS.y, nS.z));
+						// The gizmo drives the PRIMARY; every other selected atom follows by the
+						// same world-space delta (the common pivot is the primary's frame).
+						if (multiDrag)
+						{
+							const glm::mat4 delta = nm * glm::inverse(prevM);
+							for (unsigned long id : gapp->selectedExtra)
+							{
+								Atom* ex = gapp->currentWorld->GetById((long)id);
+								if (!ex || ex->folder || ex == gsel) continue;
+								bool covered = false;   // a selected ancestor already carries it
+								for (Atom* p = ex->parent; p && !covered; p = p->parent)
+									if (gapp->IsSelected(p)) covered = true;
+								if (covered) continue;
+								Transform& et = ex->GetTransform();
+								Vector3 eP = et.globalPosition(); Quaternion eR = et.globalRotation(); Vector3 eS = et.globalScale();
+								glm::mat4 ew = glm::translate(glm::mat4(1.0f), glm::vec3((float)eP.x, (float)eP.y, (float)eP.z))
+								             * glm::mat4_cast(glm::quat((float)eR.w, (float)eR.x, (float)eR.y, (float)eR.z))
+								             * glm::scale(glm::mat4(1.0f), glm::vec3((float)eS.x, (float)eS.y, (float)eS.z));
+								glm::mat4 nw = delta * ew;
+								glm::vec3 wS, wT, wSk; glm::vec4 wPp; glm::quat wR;
+								if (glm::decompose(nw, wS, wR, wT, wSk, wPp) &&
+								    std::isfinite(wT.x) && std::isfinite(wT.y) && std::isfinite(wT.z))
+									if (snapNow && gop == ImGuizmo::TRANSLATE)
+									{
+										wT.x = roundf(wT.x / snapMove) * snapMove;
+										wT.y = roundf(wT.y / snapMove) * snapMove;
+										wT.z = roundf(wT.z / snapMove) * snapMove;
+									}
+									et.SetGlobal(Vector3(wT.x, wT.y, wT.z),
+									             Quaternion(wR.x, wR.y, wR.z, wR.w),
+									             Vector3(wS.x, wS.y, wS.z));
+							}
+						}
 					}
+				}
+				else if (s_dragging)
+				{
+					s_dragging = false;
+					std::vector<GizPose> before = s_dragBefore, after;
+					for (const GizPose& b : before)
+						if (Atom* a = gapp->currentWorld->GetById(b.id)) after.push_back(poseOf(a));
+					s_dragBefore.clear();
+					editing = false; editAtomId = 0;   // own command: keep the detector out
+					auto apply = [](const std::vector<GizPose>& v) {
+						World* w = AppInstance::GetSingleton()->currentWorld;
+						for (const GizPose& g : v)
+							if (Atom* a = w->GetById(g.id)) a->GetTransform().SetGlobal(g.p, g.r, g.s);
+					};
+					PushUndo("Move " + std::to_string(before.size()) + " atoms",
+						[apply, before]{ apply(before); },
+						[apply, after] { apply(after); });
 				}
 			}
 		}
@@ -934,7 +1087,9 @@ void EditorUI::winRender()
 						break;
 					}
 				if (iconPick)
-					AppInstance::GetSingleton()->selectedInHieararchy = iconPick;
+				{
+					if (io.KeyCtrl) HierToggle(iconPick); else HierSelect(iconPick);   // Q3 ctrl adds
+				}
 				else
 				{
 					float ndcx = ((mp.x - rmin.x) / sz.x) * 2.0f - 1.0f;
@@ -947,22 +1102,86 @@ void EditorUI::winRender()
 					            f.y + ndcx * thf * aspect * rr.y + ndcy * thf * uu.y,
 					            f.z + ndcx * thf * aspect * rr.z + ndcy * thf * uu.z);
 					Atom* hit = AppInstance::GetSingleton()->currentWorld->Pick(o, dir);
-					// A model is a SUBTREE: the first click grabs the whole thing (its root), the
-					// next one drills into the part actually under the cursor, and a third returns
-					// to the root — so clicking never fights the hierarchy.
-					Atom*& sel = AppInstance::GetSingleton()->selectedInHieararchy;
-					if (!hit) sel = nullptr;
+					if (io.KeyCtrl)   // Q3: ctrl-click toggles the hit object in the multi-selection
+					{
+						if (hit)
+						{
+							Atom* root = hit;
+							while (root->GetParent()) root = root->GetParent();
+							HierToggle(root);
+						}
+					}
 					else
 					{
-						Atom* root = hit;
-						while (root->GetParent()) root = root->GetParent();
-						if (hit == root)          sel = root;                    // single-atom object
-						else if (sel == root)     sel = hit;                     // drill into the part
-						else if (sel == hit)      sel = root;                    // back out to the whole
-						else                      sel = root;                    // new object: whole first
+						// A model is a SUBTREE: the first click grabs the whole thing (its root), the
+						// next one drills into the part actually under the cursor, and a third returns
+						// to the root — so clicking never fights the hierarchy.
+						Atom* sel = AppInstance::GetSingleton()->selectedInHieararchy;
+						if (!hit) HierSelect(nullptr);
+						else
+						{
+							Atom* root = hit;
+							while (root->GetParent()) root = root->GetParent();
+							if (hit == root)          HierSelect(root);          // single-atom object
+							else if (sel == root)     HierSelect(hit);           // drill into the part
+							else if (sel == hit)      HierSelect(root);          // back out to the whole
+							else                      HierSelect(root);          // new object: whole first
+						}
 					}
+					// Q3 marquee: a drag that starts on EMPTY space rubber-bands a rect; every
+					// pickable root whose world position projects inside gets selected on release.
+					if (!hit && !io.KeyCtrl) { s_marqueeArm = true; s_marqueeStart = mp; }
 				}
 			}
+
+			// Q3 marquee select: armed by an empty-space press, active past the drag threshold.
+			if (s_marqueeArm && ImGui::IsMouseDown(ImGuiMouseButton_Left)
+			    && ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left) && !ImGuizmo::IsUsing())
+			{
+				ImVec2 mp = io.MousePos;
+				ImVec2 a(std::min(s_marqueeStart.x, mp.x), std::min(s_marqueeStart.y, mp.y));
+				ImVec2 b(std::max(s_marqueeStart.x, mp.x), std::max(s_marqueeStart.y, mp.y));
+				ImDrawList* dl = ImGui::GetWindowDrawList();
+				dl->AddRectFilled(a, b, IM_COL32(80, 160, 255, 28));
+				dl->AddRect(a, b, IM_COL32(80, 160, 255, 200));
+				s_marqueeLive = true;
+			}
+			if (s_marqueeArm && ImGui::IsMouseReleased(ImGuiMouseButton_Left))
+			{
+				if (s_marqueeLive)
+				{
+					ImVec2 mp = io.MousePos;
+					ImVec2 ra(std::min(s_marqueeStart.x, mp.x), std::min(s_marqueeStart.y, mp.y));
+					ImVec2 rb(std::max(s_marqueeStart.x, mp.x), std::max(s_marqueeStart.y, mp.y));
+					ImVec2 rmin = ImGui::GetItemRectMin();
+					ImVec2 sz   = ImGui::GetItemRectSize();
+					AppInstance* app = AppInstance::GetSingleton();
+					Transform* ct = editorCam->transform;
+					Vector3 co = ct->globalPosition(), cf = ct->direction(), cr = ct->right(), cu = ct->up();
+					const float thf = tanf((float)editorCam->fov * 0.5f * 0.01745329252f);
+					const float aspect = (sz.y > 0.0f) ? sz.x / sz.y : 1.0f;
+					HierSelect(nullptr);
+					Atom* first = nullptr;
+					for (Atom* atom : app->currentWorld->GetHierarchy())
+					{
+						if (!atom || !atom->enabled || atom->GetName() == "Editor Camera") continue;
+						Vector3 p = atom->GetTransform().globalPosition();
+						Vector3 d(p.x - co.x, p.y - co.y, p.z - co.z);
+						const double fz = d.x * cf.x + d.y * cf.y + d.z * cf.z;   // camera-space depth
+						if (fz <= 0.0) continue;                                  // behind the camera
+						const double lx = (d.x * cr.x + d.y * cr.y + d.z * cr.z) / (fz * thf * aspect);
+						const double ly = (d.x * cu.x + d.y * cu.y + d.z * cu.z) / (fz * thf);
+						const float px = rmin.x + (float)((lx + 1.0) * 0.5) * sz.x;
+						const float py = rmin.y + (float)((1.0 - ly) * 0.5) * sz.y;
+						if (px < ra.x || px > rb.x || py < ra.y || py > rb.y) continue;
+						if (!first) { first = atom; HierSelect(atom); }
+						else HierToggle(atom);
+					}
+				}
+				s_marqueeArm = s_marqueeLive = false;
+			}
+			if (!ImGui::IsMouseDown(ImGuiMouseButton_Left) && !ImGui::IsMouseReleased(ImGuiMouseButton_Left))
+				s_marqueeArm = s_marqueeLive = false;
 
 			// Sync orbit angles at drag start from the FORWARD vector, never EulerDeg(): its
 			// quat->euler recompute uses a different order/range and drops roll.
