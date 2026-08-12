@@ -3,6 +3,7 @@
 #include "nukeui.h"
 #include <API/Model/Layers.h>
 #include <API/Model/Wind.h>
+#include <API/Model/Surface.h>
 #include <input/Input.h>   // Q6: Input Maps section (filter + provenance)
 #include <map>
 #include <algorithm>
@@ -1018,6 +1019,43 @@ void EditorUI::winWorldSettings()
 			if (t) { nuke::Wind::SetTurbulence(ta, ts); wch = true; }
 			ImGui::TextDisabled("Local volumes: add a WindZone component to an atom.");
 			if (wch) { worldDirty = true; UpdateWindowTitle(); }   // wind saves with the world
+		}
+
+		// Global surface conditions (LiveMaterial): named 0..1 values live materials respond to.
+		ImGui::SeparatorText("Surface Conditions");
+		{
+			bool sch = false;
+			std::string killState;
+			for (const auto& kv : nuke::Surface::All())
+			{
+				ImGui::PushID(kv.first.c_str());
+				float v = kv.second;
+				ImGui::SetNextItemWidth(std::max(80.0f, ImGui::CalcItemWidth()
+					- ImGui::CalcTextSize(ICON_LC_TRASH_2).x - ImGui::GetStyle().FramePadding.x * 2.0f
+					- ImGui::GetStyle().ItemSpacing.x));
+				if (ImGui::DragFloat(LProp(kv.first.c_str()).c_str(), &v, 0.01f, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp))
+				{
+					// 0 must not drop the row mid-edit: keep a tiny epsilon until deleted explicitly.
+					nuke::Surface::SetCondition(kv.first, v > 0.0f ? v : 0.001f);
+					sch = true;
+				}
+				ImGui::SameLine();
+				if (ImGui::SmallButton(ICON_LC_TRASH_2)) { killState = kv.first; sch = true; }
+				ImGui::PopID();
+			}
+			if (!killState.empty()) nuke::Surface::SetCondition(killState, 0.0);
+			static char newState[64] = "";
+			ImGui::SetNextItemWidth(160);
+			ImGui::InputTextWithHint("##newcond", "wet / snow / dust / rust ...", newState, sizeof(newState));
+			ImGui::SameLine();
+			if (ImGui::Button(ICON_LC_PLUS " Add Condition") && newState[0])
+			{
+				nuke::Surface::SetCondition(newState, 0.5);
+				newState[0] = 0;
+				sch = true;
+			}
+			ImGui::TextDisabled("Per-atom: SurfaceState component. Painted patches: SurfaceMask component.");
+			if (sch) { worldDirty = true; UpdateWindowTitle(); }   // conditions save with the world
 		}
 
 		// Undo: snapshot while idle, push one command when an edit settles.

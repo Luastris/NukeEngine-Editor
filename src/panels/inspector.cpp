@@ -5,6 +5,7 @@
 #include <API/Model/Camera.h>
 #include <API/Model/CharacterController.h>
 #include <API/Model/Foliage.h>
+#include <API/Model/Surface.h>
 #include <API/Model/StatusBar.h>
 #include <API/Model/Package.h>  // pickers list pak/mod content too
 #include <interface/Services.h> // csclass picker: scripting providers
@@ -237,8 +238,13 @@ bool EditorUI::AssetPicker(const char* label, std::string& guid, const std::stri
 
 	ImGui::PushID(label);
 	float full = ImGui::CalcItemWidth();
+	// The value button + the two icon buttons must fit EXACTLY in the item width — a fixed
+	// reserve under-counted the icons' frame padding and the row spilled past the panel edge.
+	const ImGuiStyle& ast = ImGui::GetStyle();
+	const float icoW = ImGui::CalcTextSize(ICON_LC_FOLDER_SEARCH).x + ast.FramePadding.x * 2.0f
+	                 + ImGui::CalcTextSize(ICON_LC_ROTATE_CCW).x   + ast.FramePadding.x * 2.0f + 4.0f;
 	std::string cur = disp(guid);
-	if (ImGui::Button((cur + "##cur").c_str(), ImVec2(full - 52, 0))) { assetFilter[0] = 0; ImGui::OpenPopup("##assetpop"); }
+	if (ImGui::Button((cur + "##cur").c_str(), ImVec2(std::max(40.0f, full - icoW), 0))) { assetFilter[0] = 0; ImGui::OpenPopup("##assetpop"); }
 
 	// Drag from the browser — only accepted if the file's type matches this field's kind.
 	if (ImGui::BeginDragDropTarget())
@@ -265,7 +271,19 @@ bool EditorUI::AssetPicker(const char* label, std::string& guid, const std::stri
 		if      (kind == "script" || kind == "audio" || IsFileKind(kind)) { if (!guid.empty()) path = (bfs::path(contentDir) / guid).string(); }
 		else if (kind == "shader" && db->GetShader(guid)) path = db->GetShader(guid)->vsPath;
 		else                       path = db->PathForGuid(guid);
-		if (!path.empty()) { BrowserNavigate(bfs::path(path).parent_path().string()); BrowserSelect(path); if (win) win->browser = true; }
+		if (!path.empty())
+		{
+			// Navigate in the browser's own path form (native separators): its selection compares
+			// paths as strings against directory-iterator output, so a mixed-separator path from an
+			// asset value would highlight nothing. The draw resolves browserLocate by filesystem
+			// equivalence and scrolls the row into view.
+			bfs::path bp = bfs::path(path).make_preferred();
+			BrowserNavigate(bp.parent_path().string());
+			BrowserSelect(bp.string());
+			browserLocate = bp.string();
+			if (win) win->browser = true;
+			NukeUI::DocFocus("panel:browser");
+		}
 	}
 	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Go to file");
 	ImGui::SameLine(0, 2);
@@ -402,6 +420,34 @@ void EditorUI::RegisterInspectorOverrides()
 		if (ImGui::IsItemHovered())
 			ImGui::SetTooltip("Set Pivot/Capsule Offset/Height/Radius from the sibling mesh's bounds.");
 	};
+	inspectorOverrides["SurfaceMask"] = [this](nuke::Component* c) {
+		auto* m = static_cast<nuke::SurfaceMask*>(c);
+		bool paint = maskBrush == 1, erase = maskBrush == 2;
+		if (ImGui::Checkbox("Paint##mask", &paint)) maskBrush = paint ? 1 : 0;
+		ImGui::SameLine();
+		if (ImGui::Checkbox("Erase##mask", &erase)) maskBrush = erase ? 2 : 0;
+		ImGui::SameLine();
+		if (ImGui::Button("Clear Mask")) { m->Clear(); worldDirty = true; }
+		if (maskBrush != 0)
+		{
+			// Channel labels come from the mask's own state bindings.
+			const std::string chLbl[4] = {
+				"R: " + (m->state0.empty() ? std::string("(unbound)") : m->state0),
+				"G: " + (m->state1.empty() ? std::string("(unbound)") : m->state1),
+				"B: " + (m->state2.empty() ? std::string("(unbound)") : m->state2),
+				"A: " + (m->state3.empty() ? std::string("(unbound)") : m->state3) };
+			if (maskBrushChannel < 0 || maskBrushChannel > 3) maskBrushChannel = 0;
+			if (ImGui::BeginCombo("Channel", chLbl[maskBrushChannel].c_str()))
+			{
+				for (int i = 0; i < 4; ++i)
+					if (ImGui::Selectable(chLbl[i].c_str(), i == maskBrushChannel)) maskBrushChannel = i;
+				ImGui::EndCombo();
+			}
+			ImGui::DragFloat("Brush Radius", &maskBrushRadius, 0.05f, 0.1f, 50.0f, "%.2f m", ImGuiSliderFlags_AlwaysClamp);
+			ImGui::DragFloat("Brush Strength", &maskBrushStrength, 0.05f, 0.1f, 10.0f, "%.2f /s", ImGuiSliderFlags_AlwaysClamp);
+			ImGui::TextDisabled("LMB in the viewport: %s", maskBrush == 1 ? "paint the condition" : "erase");
+		}
+	};
 	inspectorOverrides["Foliage"] = [this](nuke::Component* c) {
 		auto* fol = static_cast<nuke::Foliage*>(c);
 		const float half = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
@@ -422,8 +468,8 @@ void EditorUI::RegisterInspectorOverrides()
 		ImGui::TextDisabled("(%d)", fol->InstanceCount());
 		if (foliageBrush != 0)
 		{
-			ImGui::SliderFloat("Brush Radius", &foliageBrushRadius, 0.25f, 20.0f, "%.2f m");
-			if (foliageBrush == 1) ImGui::SliderFloat("Brush Density", &foliageBrushDensity, 0.1f, 4.0f, "x%.2f");
+			ImGui::DragFloat("Brush Radius", &foliageBrushRadius, 0.1f, 0.25f, 100.0f, "%.2f m", ImGuiSliderFlags_AlwaysClamp);
+			if (foliageBrush == 1) ImGui::DragFloat("Brush Density", &foliageBrushDensity, 0.02f, 0.1f, 16.0f, "x%.2f", ImGuiSliderFlags_AlwaysClamp);
 			ImGui::TextDisabled("LMB in the viewport: %s", foliageBrush == 1 ? "paint" : "erase");
 		}
 	};
@@ -735,10 +781,15 @@ bool EditorUI::DrawFields(void* obj, nuke::TypeInfo* ti)
 					ImGui::EndCombo();
 				}
 			}
+			else if (f.fmax > f.fmin)   // [[prop(min,max)]]: clamped drag — double-click edits as text
+				changed |= ImGui::DragInt(w, (int*)a, std::max(0.02f, (f.fmax - f.fmin) / 250.0f),
+				                          (int)f.fmin, (int)f.fmax, "%d", ImGuiSliderFlags_AlwaysClamp);
 			else changed |= ImGui::InputInt(w, (int*)a);
 			break;
 		case nuke::FT::Float:
-			if (f.fmax > f.fmin) changed |= ImGui::SliderFloat(w, (float*)a, f.fmin, f.fmax);   // [[prop(min,max)]]
+			// [[prop(min,max)]]: clamped drag, NOT a slider — double-click still edits as text.
+			if (f.fmax > f.fmin) changed |= ImGui::DragFloat(w, (float*)a, std::max(0.001f, (f.fmax - f.fmin) / 250.0f),
+			                                                 f.fmin, f.fmax, "%.3f", ImGuiSliderFlags_AlwaysClamp);
 			else                 changed |= ImGui::DragFloat(w, (float*)a, 0.05f);
 			break;
 		case nuke::FT::Double: changed |= ImGui::InputDouble(w, (double*)a); break;
@@ -1923,7 +1974,7 @@ void EditorUI::DrawAssetInspector(const std::string& path)
 			ImGui::ColorEdit3("##chroma", inspChroma, ImGuiColorEditFlags_NoInputs);
 			ImGui::SameLine();
 			if (ImGui::Button(inspChromaPick ? "Picking\xE2\x80\xA6 (click image)" : "Pick")) inspChromaPick = !inspChromaPick;
-			ImGui::SetNextItemWidth(160); ImGui::SliderInt("Tolerance", &inspChromaTol, 0, 128);
+			ImGui::SetNextItemWidth(160); ImGui::DragInt("Tolerance", &inspChromaTol, 0.5f, 0, 128, "%d", ImGuiSliderFlags_AlwaysClamp);
 			ImGui::Checkbox("Outside only (keep enclosed areas)", &inspChromaOutside);
 			if (ImGui::IsItemHovered()) ImGui::SetTooltip("On: clears only the background touching the image edge (white eyes etc. stay).\nOff: clears every matching pixel.");
 			if (ImGui::Button("Apply Chroma Key") && inspTex)

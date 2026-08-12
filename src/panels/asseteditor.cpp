@@ -401,6 +401,253 @@ static void RestoreMaterialState(EditorUI::AssetEditorWin& w, nuke::Material* sn
 	w.dirty = true;   // editedNow deliberately not raised: this IS undo/redo
 }
 
+// LiveMaterial sections of the .numat editor: condition-state responses, typed hit reactions,
+// the surface's sound identity and shape/variation. Returns true when anything changed —
+// the caller marks the window dirty and refreshes the preview clone.
+bool EditorUI::DrawLiveMaterialSections(nuke::Material* m)
+{
+	bool ch = false;
+	ImGui::Separator();
+	ImGui::TextDisabled("LiveMaterial — surface behaviour (all sections optional)");
+
+	if (ImGui::CollapsingHeader("Condition States"))
+	{
+		ImGui::TextDisabled("Response to wet/snow/dust/rust/... driven by world, atom or masks.");
+		int kill = -1;
+		for (int i = 0; i < (int)m->liveStates.size(); ++i)
+		{
+			nuke::LiveState& s = m->liveStates[i];
+			ImGui::PushID(i);
+			bool open = ImGui::TreeNode("##state", "%s", s.state.empty() ? "(unnamed state)" : s.state.c_str());
+			ImGui::SameLine(ImGui::GetContentRegionAvail().x - 18);
+			if (ImGui::SmallButton(ICON_LC_TRASH_2)) kill = i;
+			if (open)
+			{
+				char buf[64]; strncpy(buf, s.state.c_str(), 63); buf[63] = 0;
+				if (ImGui::InputTextWithHint("State", "wet / snow / dust / rust / mud ...", buf, sizeof(buf)))
+				{ s.state = buf; ch = true; }
+				ch |= AssetPicker("Albedo", s.albedoGuid, "texture");
+				ch |= AssetPicker("Normal", s.normalGuid, "texture");
+				ch |= AssetPicker("Metal-Rough", s.mrGuid, "texture");
+				float col[4] = { (float)s.color.r, (float)s.color.g, (float)s.color.b, (float)s.color.a };
+				if (ImGui::ColorEdit4("Tint", col))
+				{ s.color = nuke::Color(col[0], col[1], col[2], col[3]); ch = true; }
+				ch |= ImGui::DragFloat("Metallic", &s.metallic, 0.01f, -1.0f, 1.0f, "%.2f (-1 keep)", ImGuiSliderFlags_AlwaysClamp);
+				ch |= ImGui::DragFloat("Roughness", &s.roughness, 0.01f, -1.0f, 1.0f, "%.2f (-1 keep)", ImGuiSliderFlags_AlwaysClamp);
+				ch |= ImGui::DragFloat("Threshold", &s.threshold, 0.01f, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+				ch |= ImGui::DragFloat("Feather", &s.feather, 0.01f, 0.01f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+				ch |= ImGui::DragFloat("Top Only", &s.topOnly, 0.01f, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+				if (ImGui::IsItemHovered()) ImGui::SetTooltip("1 = the state settles on up-facing surfaces only (snow, dust)");
+				ch |= ImGui::DragFloat("Displace", &s.displace, 0.005f, 0.0f, 1.0f, "%.3f m", ImGuiSliderFlags_AlwaysClamp);
+				ImGui::TreePop();
+			}
+			ImGui::PopID();
+		}
+		if (kill >= 0) { m->liveStates.erase(m->liveStates.begin() + kill); ch = true; }
+		if (ImGui::Button(ICON_LC_PLUS " Add State", ImVec2(-1, 0))) { m->liveStates.push_back({}); ch = true; }
+	}
+
+	if (ImGui::CollapsingHeader("Static Layers"))
+	{
+		ImGui::TextDisabled("Always-on overlays blended through a mask map (rust, moss, grime).");
+		int kill = -1;
+		for (int i = 0; i < (int)m->liveLayers.size(); ++i)
+		{
+			nuke::LiveLayer& ly = m->liveLayers[i];
+			ImGui::PushID(6000 + i);
+			bool open = ImGui::TreeNode("##layer", "Layer %d", i);
+			ImGui::SameLine(ImGui::GetContentRegionAvail().x - 18);
+			if (ImGui::SmallButton(ICON_LC_TRASH_2)) kill = i;
+			if (open)
+			{
+				ch |= AssetPicker("Albedo", ly.albedoGuid, "texture");
+				ch |= AssetPicker("Normal", ly.normalGuid, "texture");
+				ch |= AssetPicker("Metal-Rough", ly.mrGuid, "texture");
+				ch |= AssetPicker("Mask", ly.maskGuid, "texture");
+				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Grayscale blend mask in the material's UV space (empty = uniform)");
+				float col[4] = { (float)ly.color.r, (float)ly.color.g, (float)ly.color.b, (float)ly.color.a };
+				if (ImGui::ColorEdit4("Tint", col))
+				{ ly.color = nuke::Color(col[0], col[1], col[2], col[3]); ch = true; }
+				ch |= ImGui::DragFloat("Metallic", &ly.metallic, 0.01f, -1.0f, 1.0f, "%.2f (-1 keep)", ImGuiSliderFlags_AlwaysClamp);
+				ch |= ImGui::DragFloat("Roughness", &ly.roughness, 0.01f, -1.0f, 1.0f, "%.2f (-1 keep)", ImGuiSliderFlags_AlwaysClamp);
+				ch |= ImGui::DragFloat("Weight", &ly.value, 0.01f, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+				ch |= ImGui::DragFloat("Threshold", &ly.threshold, 0.01f, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+				ch |= ImGui::DragFloat("Feather", &ly.feather, 0.01f, 0.01f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+				ch |= ImGui::DragFloat("Top Only", &ly.topOnly, 0.01f, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+				ImGui::TreePop();
+			}
+			ImGui::PopID();
+		}
+		if (kill >= 0) { m->liveLayers.erase(m->liveLayers.begin() + kill); ch = true; }
+		if (ImGui::Button(ICON_LC_PLUS " Add Layer", ImVec2(-1, 0))) { m->liveLayers.push_back({}); ch = true; }
+		if ((int)m->liveLayers.size() + (int)m->liveStates.size() > nuke::Material::kOverlaySlots)
+			ImGui::TextDisabled("%d GPU slots render at once (layers first, then ACTIVE states; dormant states take none).",
+			                    nuke::Material::kOverlaySlots);
+	}
+
+	if (ImGui::CollapsingHeader("Hit Reactions"))
+	{
+		ImGui::TextDisabled("Typed hits spawn the surface's own particles/decals/sounds.");
+		int kill = -1;
+		for (int i = 0; i < (int)m->liveHits.size(); ++i)
+		{
+			nuke::LiveHit& h = m->liveHits[i];
+			ImGui::PushID(1000 + i);
+			bool open = ImGui::TreeNode("##hit", "%s", h.hitType.empty() ? "(any hit)" : h.hitType.c_str());
+			ImGui::SameLine(ImGui::GetContentRegionAvail().x - 18);
+			if (ImGui::SmallButton(ICON_LC_TRASH_2)) kill = i;
+			if (open)
+			{
+				char buf[64]; strncpy(buf, h.hitType.c_str(), 63); buf[63] = 0;
+				if (ImGui::InputTextWithHint("Hit Type", "bullet / blunt / slash / explosion ... (empty = any)", buf, sizeof(buf)))
+				{ h.hitType = buf; ch = true; }
+				ch |= AssetPicker("Spawn Prefab", h.prefabGuid, "file:.nuprefab");
+				ch |= AssetPicker("Decal", h.decalGuid, "texture");
+				ch |= AssetPicker("Sound", h.soundGuid, "audio");
+				ch |= ImGui::DragFloat("Min Impulse", &h.minImpulse, 0.1f, 0.0f, 10000.0f, "%.1f", ImGuiSliderFlags_AlwaysClamp);
+				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Scripted hits gate by their impulse; automatic contact hits gate by closing speed (m/s)");
+				ch |= ImGui::DragFloat("Lifetime", &h.lifetime, 0.1f, 0.0f, 120.0f, "%.1f s (0 keep)", ImGuiSliderFlags_AlwaysClamp);
+				ch |= ImGui::DragFloat("Decal Size", &h.decalSize, 0.05f, 0.05f, 8.0f, "%.2f m", ImGuiSliderFlags_AlwaysClamp);
+				ImGui::TreePop();
+			}
+			ImGui::PopID();
+		}
+		if (kill >= 0) { m->liveHits.erase(m->liveHits.begin() + kill); ch = true; }
+		if (ImGui::Button(ICON_LC_PLUS " Add Reaction", ImVec2(-1, 0))) { m->liveHits.push_back({}); ch = true; }
+	}
+
+	if (ImGui::CollapsingHeader("Foliage"))
+	{
+		ImGui::TextDisabled("Grown automatically on every surface using this material.");
+		int kill = -1;
+		for (int i = 0; i < (int)m->liveFoliage.size(); ++i)
+		{
+			nuke::LiveFoliage& f = m->liveFoliage[i];
+			ImGui::PushID(3000 + i);
+			bool open = ImGui::TreeNode("##fol", "Layer %d", i);
+			ImGui::SameLine(ImGui::GetContentRegionAvail().x - 18);
+			if (ImGui::SmallButton(ICON_LC_TRASH_2)) kill = i;
+			if (open)
+			{
+				ch |= AssetPicker("Mesh", f.meshGuid, "mesh");
+				ch |= AssetPicker("Material", f.matGuid, "material");
+				ch |= ImGui::DragFloat("Density", &f.density, 0.05f, 0.01f, 64.0f, "%.2f /m2", ImGuiSliderFlags_AlwaysClamp);
+				ch |= ImGui::DragFloat("Scale Min", &f.scaleMin, 0.01f, 0.01f, 10.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+				ch |= ImGui::DragFloat("Scale Max", &f.scaleMax, 0.01f, 0.01f, 10.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+				ch |= ImGui::DragFloat("Max Slope", &f.maxSlope, 0.5f, 0.0f, 90.0f, "%.0f deg", ImGuiSliderFlags_AlwaysClamp);
+				ch |= ImGui::DragFloat("Align To Normal", &f.align, 0.01f, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+				ch |= ImGui::DragFloat("Wind Bend", &f.windBend, 0.01f, 0.0f, 2.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+				ch |= ImGui::DragFloat("Interaction Bend", &f.interBend, 0.01f, 0.0f, 2.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+				ch |= ImGui::DragInt("Seed", &f.seed, 1.0f, 0, 1000000, "%d", ImGuiSliderFlags_AlwaysClamp);
+				ImGui::TreePop();
+			}
+			ImGui::PopID();
+		}
+		if (kill >= 0) { m->liveFoliage.erase(m->liveFoliage.begin() + kill); ch = true; }
+		if (ImGui::Button(ICON_LC_PLUS " Add Foliage Layer", ImVec2(-1, 0))) { m->liveFoliage.push_back({}); ch = true; }
+	}
+
+	if (ImGui::CollapsingHeader("Tweens"))
+	{
+		ImGui::TextDisabled("Parameter animations from game time (stateless), bezier-eased.");
+		static const char* kParams[] = { "uv", "wipe", "color", "emissive", "emissiveIntensity",
+		                                 "metallic", "roughness", "specular" };
+		int kill = -1;
+		for (int i = 0; i < (int)m->liveTweens.size(); ++i)
+		{
+			nuke::LiveTween& tw = m->liveTweens[i];
+			ImGui::PushID(4000 + i);
+			bool open = ImGui::TreeNode("##tw", "%s", tw.param.empty() ? "(no target)" : tw.param.c_str());
+			ImGui::SameLine(ImGui::GetContentRegionAvail().x - 18);
+			if (ImGui::SmallButton(ICON_LC_TRASH_2)) kill = i;
+			if (open)
+			{
+				if (ImGui::BeginCombo("Param", tw.param.empty() ? "(pick)" : tw.param.c_str()))
+				{
+					for (const char* p : kParams)
+						if (ImGui::Selectable(p, tw.param == p)) { tw.param = p; ch = true; }
+					ImGui::EndCombo();
+				}
+				char pbuf[64]; strncpy(pbuf, tw.param.c_str(), 63); pbuf[63] = 0;
+				if (ImGui::InputTextWithHint("Custom", "or a shader MatCB prop (g_...)", pbuf, sizeof(pbuf)))
+				{ tw.param = pbuf; ch = true; }
+				ch |= ImGui::DragFloat4("From", tw.from, 0.01f);
+				ch |= ImGui::DragFloat4("To", tw.to, 0.01f);
+				ch |= ImGui::DragFloat("Duration", &tw.duration, 0.01f, 0.01f, 600.0f, "%.2f s", ImGuiSliderFlags_AlwaysClamp);
+				static const char* kLoop[] = { "Once", "Loop", "Ping-Pong" };
+				if (tw.loop < 0 || tw.loop > 2) tw.loop = 1;
+				if (ImGui::BeginCombo("Loop", kLoop[tw.loop]))
+				{
+					for (int l = 0; l < 3; ++l)
+						if (ImGui::Selectable(kLoop[l], l == tw.loop)) { tw.loop = l; ch = true; }
+					ImGui::EndCombo();
+				}
+				ch |= ImGui::DragFloat("Ease In", &tw.bez1, 0.01f, -1.0f, 2.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+				ch |= ImGui::DragFloat("Ease Out", &tw.bez2, 0.01f, -1.0f, 2.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+				if (ImGui::IsItemHovered() || ImGui::IsItemActive())
+					ImGui::SetTooltip("Cubic bezier control Ys (x = 1/3, 2/3).\n0.33/0.67 = linear, 0/1 = ease-in-out, beyond [0,1] = overshoot.");
+				// Curve preview: the easing over one leg.
+				{
+					float pts[33];
+					for (int k = 0; k <= 32; ++k)
+					{
+						const float u = k / 32.0f, iu = 1.0f - u;
+						pts[k] = 3 * iu * iu * u * tw.bez1 + 3 * iu * u * u * tw.bez2 + u * u * u;
+					}
+					ImGui::PlotLines("##ease", pts, 33, 0, nullptr, -0.25f, 1.25f, ImVec2(ImGui::CalcItemWidth(), 48));
+				}
+				ImGui::TreePop();
+			}
+			ImGui::PopID();
+		}
+		if (kill >= 0) { m->liveTweens.erase(m->liveTweens.begin() + kill); ch = true; }
+		if (ImGui::Button(ICON_LC_PLUS " Add Tween", ImVec2(-1, 0))) { m->liveTweens.push_back({}); ch = true; }
+		ImGui::TextDisabled("\"uv\" scroll + \"wipe\" dissolve draw with the LM render pass (LM-3).");
+	}
+
+	if (ImGui::CollapsingHeader("Sound"))
+	{
+		ImGui::TextDisabled("The surface's sound identity: footsteps, ambient, wind.");
+		int kill = -1;
+		for (int i = 0; i < (int)m->liveSound.footsteps.size(); ++i)
+		{
+			ImGui::PushID(2000 + i);
+			// Shrink the picker so the trash button fits on the row (icon width + padding).
+			ImGui::SetNextItemWidth(std::max(80.0f, ImGui::CalcItemWidth()
+				- ImGui::CalcTextSize(ICON_LC_TRASH_2).x - ImGui::GetStyle().FramePadding.x * 2.0f
+				- ImGui::GetStyle().ItemSpacing.x));
+			ch |= AssetPicker(("Step " + std::to_string(i)).c_str(), m->liveSound.footsteps[i], "audio");
+			ImGui::SameLine();
+			if (ImGui::SmallButton(ICON_LC_TRASH_2)) kill = i;
+			ImGui::PopID();
+		}
+		if (kill >= 0) { m->liveSound.footsteps.erase(m->liveSound.footsteps.begin() + kill); ch = true; }
+		if (ImGui::Button(ICON_LC_PLUS " Add Footstep", ImVec2(-1, 0))) { m->liveSound.footsteps.push_back(""); ch = true; }
+		ch |= ImGui::DragFloat("Step Volume", &m->liveSound.footVolume, 0.01f, 0.0f, 2.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		ch |= AssetPicker("Ambient Loop", m->liveSound.ambientGuid, "audio");
+		ch |= ImGui::DragFloat("Ambient Volume", &m->liveSound.ambientVolume, 0.01f, 0.0f, 2.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		ch |= AssetPicker("Wind Loop", m->liveSound.windGuid, "audio");
+		ch |= ImGui::DragFloat("Wind Volume", &m->liveSound.windVolume, 0.01f, 0.0f, 2.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+	}
+
+	if (ImGui::CollapsingHeader("Surface Shape"))
+	{
+		ImGui::TextDisabled("Displacement height + anti-tiling variation.");
+		ch |= AssetPicker("Height Map", m->liveSurface.heightGuid, "texture");
+		ch |= ImGui::DragFloat("Parallax", &m->liveSurface.parallax, 0.002f, 0.0f, 0.3f, "%.3f", ImGuiSliderFlags_AlwaysClamp);
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Parallax occlusion depth (UV space); 0 = off, typical 0.02-0.1");
+		ch |= ImGui::DragFloat("Disp Scale", &m->liveSurface.dispScale, 0.005f, 0.0f, 2.0f, "%.3f m", ImGuiSliderFlags_AlwaysClamp);
+		ch |= ImGui::DragFloat("Disp Mid", &m->liveSurface.dispMid, 0.01f, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		ch |= ImGui::DragFloat("Variation", &m->liveSurface.varAmount, 0.01f, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Anti-tiling: per-cell UV jitter/rotation strength");
+		ch |= ImGui::DragFloat("Var Cell", &m->liveSurface.varScale, 0.1f, 0.5f, 64.0f, "%.1f repeats", ImGuiSliderFlags_AlwaysClamp);
+		ch |= ImGui::DragFloat("Var Hue", &m->liveSurface.varHue, 0.01f, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+	}
+
+	if (ch) m->Resolve();   // rebind state/height textures after guid edits
+	return ch;
+}
+
 void EditorUI::AssetEditorUndo(AssetEditorWin& w)
 {
 	if (w.ext == ".nuprefab" && w.prefabRoot && !w.undoP.empty())
@@ -1656,13 +1903,15 @@ void EditorUI::DrawAssetEditorBody(int i)
 					FramePreview(*w.pv, nullptr);
 				}
 				ImGui::Separator();
-				if (nuke::TypeInfo* ti = w.mat->GetType())
-					if (DrawFields(w.mat, ti))
-					{
-						w.dirty = true; w.editedNow = true;
-						if (w.pv->mr->mat) delete w.pv->mr->mat;   // live preview: fresh clone
-						w.pv->mr->mat = w.mat->Clone();
-					}
+				bool matCh = false;
+				if (nuke::TypeInfo* ti = w.mat->GetType()) matCh |= DrawFields(w.mat, ti);
+				matCh |= DrawLiveMaterialSections(w.mat);
+				if (matCh)
+				{
+					w.dirty = true; w.editedNow = true;
+					if (w.pv->mr->mat) delete w.pv->mr->mat;   // live preview: fresh clone
+					w.pv->mr->mat = w.mat->Clone();
+				}
 				ImGui::EndChild();
 				ImGui::SameLine();
 				DrawPreviewImage(*w.pv, ImGui::GetContentRegionAvail());

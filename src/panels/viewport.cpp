@@ -4,6 +4,9 @@
 // (hidden, unbounded deltas) so rotation never dies at the screen edge.
 static bool s_camLookWant = false;      // set by the drag handlers each frame they apply
 static bool s_camLookCapture = false;   // capture currently engaged
+// Fly-speed multiplier: wheel while RMB is held scales it (wheel without RMB still dollies).
+static float  s_flyMul = 1.0f;
+static double s_flyMulShowUntil = 0.0;   // brief on-screen readout after a change
 #include <editor/editorui.h>
 // Q3 marquee rect-select: armed by a press on empty space, live once the drag passes threshold.
 static bool  s_marqueeArm = false, s_marqueeLive = false;
@@ -18,6 +21,7 @@ static ImVec2 s_marqueeStart;
 #include "API/Model/Canvas.h"
 #include <interface/ComponentIcons.h>
 #include <API/Model/Foliage.h>
+#include <API/Model/Surface.h>
 #include <reflect/Reflect.h>            // WaterRiver type lives in the water plugin — reached by name
 #include <API/Model/DebugDraw.h>
 #include <functional>
@@ -651,6 +655,57 @@ void EditorUI::winRender()
 		AppInstance::GetSingleton()->editorGridStep =
 			(!possessed && gridVisible) ? std::max(0.01f, snapMove) : 0.0f;
 
+		// Viewport tool feed (abi 16): cursor ray + stroke state for MODULE viewport tools
+		// (terrain brushes...). Same ray math as PickAtScreen. The undo seam installs here —
+		// module tools push their strokes onto the SAME editor command stack.
+		{
+			AppInstance* fapp = AppInstance::GetSingleton();
+			if (fapp->editorUndoHook.empty())
+				fapp->editorUndoHook = [this](const std::string& label,
+				                              boost::function<void()> u, boost::function<void()> r)
+				{ PushUndo(label, u, r, true); };
+			ImVec2 fmin = ImGui::GetItemRectMin(), fsz = ImGui::GetItemRectSize();
+			ImVec2 fmp  = ImGui::GetMousePos();
+			const bool over = !possessed && editorCam && editorCam->transform
+			               && fsz.x > 0.0f && fsz.y > 0.0f
+			               && fmp.x >= fmin.x && fmp.y >= fmin.y
+			               && fmp.x < fmin.x + fsz.x && fmp.y < fmin.y + fsz.y
+			               && ImGui::IsWindowHovered() && !ImGuizmo::IsUsing() && !s_marqueeLive;
+			fapp->editorRayValid = over;
+			if (over)
+			{
+				Transform* ft = editorCam->transform;
+				const float ndcx = ((fmp.x - fmin.x) / fsz.x) * 2.0f - 1.0f;
+				const float ndcy = 1.0f - ((fmp.y - fmin.y) / fsz.y) * 2.0f;
+				Vector3 fo = ft->globalPosition();
+				Vector3 ff = ft->direction(), frr = ft->right(), fuu = ft->up();
+				const float faspect = fsz.x / fsz.y;
+				Vector3 fdir = ff;
+				if (editorCam->projBlend >= 0.5f)   // ortho: the origin slides, rays stay parallel
+				{
+					const float halfH = (editorCam->orthoSize > 1e-4f) ? editorCam->orthoSize : 1.0f;
+					const float halfW = halfH * faspect;
+					fo = Vector3(fo.x + ndcx * halfW * frr.x + ndcy * halfH * fuu.x,
+					             fo.y + ndcx * halfW * frr.y + ndcy * halfH * fuu.y,
+					             fo.z + ndcx * halfW * frr.z + ndcy * halfH * fuu.z);
+				}
+				else
+				{
+					const float thf = tanf((float)editorCam->fov * 0.5f * 0.01745329252f);
+					fdir = Vector3(ff.x + ndcx * thf * faspect * frr.x + ndcy * thf * fuu.x,
+					               ff.y + ndcx * thf * faspect * frr.y + ndcy * thf * fuu.y,
+					               ff.z + ndcx * thf * faspect * frr.z + ndcy * thf * fuu.z);
+				}
+				const float fl = sqrtf(fdir.x * fdir.x + fdir.y * fdir.y + fdir.z * fdir.z);
+				fapp->editorRayOrigin[0] = (float)fo.x; fapp->editorRayOrigin[1] = (float)fo.y;
+				fapp->editorRayOrigin[2] = (float)fo.z;
+				fapp->editorRayDir[0] = (float)(fdir.x / fl); fapp->editorRayDir[1] = (float)(fdir.y / fl);
+				fapp->editorRayDir[2] = (float)(fdir.z / fl);
+			}
+			fapp->editorMouseWentDown = over && ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+			fapp->editorMouseDown     = over && ImGui::IsMouseDown(ImGuiMouseButton_Left);
+		}
+
 		// Transform gizmo over the selected object (only when a manip tool is active).
 		{
 			AppInstance* gapp = AppInstance::GetSingleton();
@@ -1072,8 +1127,50 @@ void EditorUI::winRender()
 				}
 			}
 
-			// Left-click picks (null = deselect); skipped while any gizmo/handle owns the mouse.
-			if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGuizmo::IsUsing() && !ImGuizmo::IsOver() && !s_canvasGizmoHot && !s_riverGizmoHot && !foliagePainting)
+			// SurfaceMask condition brush, armed from the SurfaceMask inspector. LMB paints the
+			// selected channel continuously (strength/sec); consumes the click like foliage.
+			bool maskPainting = false;
+			if (maskBrush != 0)
+			{
+				Atom* selA = AppInstance::GetSingleton()->selectedInHieararchy;
+				nuke::SurfaceMask* msk = selA ? selA->GetComponent<nuke::SurfaceMask>() : nullptr;
+				if (!msk) maskBrush = 0;   // selection left the mask: disarm
+				else if (ImGui::IsItemHovered() && !ImGuizmo::IsUsing())
+				{
+					maskPainting = true;
+					ImVec2 rmin = ImGui::GetItemRectMin(), szv = ImGui::GetItemRectSize(), mp = io.MousePos;
+					float ndcx = ((mp.x - rmin.x) / szv.x) * 2.0f - 1.0f;
+					float ndcy = 1.0f - ((mp.y - rmin.y) / szv.y) * 2.0f;
+					Vector3 o = t->globalPosition();
+					Vector3 f = t->direction(), rr = t->right(), uu = t->up();
+					float aspect = (szv.y > 0.0f) ? szv.x / szv.y : 1.0f;
+					float thf = tanf((float)editorCam->fov * 0.5f * 0.01745329252f);
+					Vector3 dir(f.x + ndcx * thf * aspect * rr.x + ndcy * thf * uu.x,
+					            f.y + ndcx * thf * aspect * rr.y + ndcy * thf * uu.y,
+					            f.z + ndcx * thf * aspect * rr.z + ndcy * thf * uu.z);
+					double L = std::sqrt(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
+					if (L > 1e-9) { dir.x /= L; dir.y /= L; dir.z /= L; }
+					float dist = 0.0f;
+					Atom* hit = AppInstance::GetSingleton()->currentWorld->PickDist(o, dir, dist);
+					if (hit && dist > 0.0f && dist < 1e29f)
+					{
+						Vector3 hp(o.x + dir.x * dist, o.y + dir.y * dist, o.z + dir.z * dist);
+						const Color bc = maskBrush == 1 ? Color(0.45, 0.75, 1.0, 1.0) : Color(1.0, 0.45, 0.35, 1.0);
+						DebugDraw::WireSphere(hp, maskBrushRadius, bc);
+						if (ImGui::IsMouseDown(ImGuiMouseButton_Left))
+						{
+							const double amt = (maskBrush == 1 ? 1.0 : -1.0) * maskBrushStrength * io.DeltaTime;
+							msk->Paint(hp, maskBrushRadius, maskBrushChannel, amt);
+							worldDirty = true;
+						}
+					}
+				}
+			}
+
+			// Left-click picks (null = deselect); skipped while any gizmo/handle owns the mouse
+			// or a MODULE viewport tool claimed the cursor (terrain brush strokes must not select).
+			if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGuizmo::IsUsing() && !ImGuizmo::IsOver() && !s_canvasGizmoHot && !s_riverGizmoHot && !foliagePainting && !maskPainting
+			    && !AppInstance::GetSingleton()->editorToolActive)
 			{
 				ImVec2 rmin = ImGui::GetItemRectMin();
 				ImVec2 sz   = ImGui::GetItemRectSize();
@@ -1211,12 +1308,21 @@ void EditorUI::winRender()
 				             + t->up()    * (double)( io.MouseDelta.y * panSpeed);
 			}
 			if (io.MouseWheel != 0.0f)
-				t->position += t->direction() * (double)(io.MouseWheel * zoomSpeed);
+			{
+				// Wheel while flying (RMB held) scales the fly speed; otherwise it dollies.
+				if (ImGui::IsMouseDown(ImGuiMouseButton_Right))
+				{
+					s_flyMul = std::max(0.02f, std::min(100.0f, s_flyMul * (1.0f + io.MouseWheel * 0.15f)));
+					s_flyMulShowUntil = ImGui::GetTime() + 1.2;
+				}
+				else
+					t->position += t->direction() * (double)(io.MouseWheel * zoomSpeed);
+			}
 
 			// Free-flight: hold RMB + WASD (Q/E = down/up, Shift = faster).
 			if (ImGui::IsMouseDown(ImGuiMouseButton_Right))
 			{
-				float fly = 5.0f * io.DeltaTime;
+				float fly = 5.0f * s_flyMul * io.DeltaTime;
 				if (io.KeyShift) fly *= 3.0f;
 				if (ImGui::IsKeyDown(ImGuiKey_W)) t->position += t->direction() * (double) fly;
 				if (ImGui::IsKeyDown(ImGuiKey_S)) t->position += t->direction() * (double)-fly;
@@ -1224,6 +1330,17 @@ void EditorUI::winRender()
 				if (ImGui::IsKeyDown(ImGuiKey_A)) t->position += t->right()     * (double)-fly;
 				if (ImGui::IsKeyDown(ImGuiKey_E)) t->position += t->up()        * (double) fly;
 				if (ImGui::IsKeyDown(ImGuiKey_Q)) t->position += t->up()        * (double)-fly;
+			}
+
+			// Fly-speed readout, briefly after a wheel change (top-left of the image).
+			if (ImGui::GetTime() < s_flyMulShowUntil)
+			{
+				char spd[48];
+				snprintf(spd, sizeof(spd), "Fly speed x%.2f", s_flyMul);
+				const ImVec2 rm = ImGui::GetItemRectMin();
+				ImDrawList* dl = ImGui::GetWindowDrawList();
+				dl->AddText(ImVec2(rm.x + 11, rm.y + 9), IM_COL32(0, 0, 0, 200), spd);
+				dl->AddText(ImVec2(rm.x + 10, rm.y + 8), IM_COL32(255, 255, 255, 230), spd);
 			}
 		}
 	}

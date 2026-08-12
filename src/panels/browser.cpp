@@ -1141,6 +1141,7 @@ void EditorUI::winBrowser()
 
 	if (browserView == 2)   // Tree
 	{
+		browserLocate.clear();   // go-to-file: selection is already set; the tree has no row scroll
 		ImGui::BeginChild("##browserfiles");   // only the tree scrolls
 		BrowserTree(root.string());
 		ImGui::EndChild();
@@ -1228,6 +1229,26 @@ void EditorUI::winBrowser()
 		if (a.isDir != b.isDir) return a.isDir > b.isDir;
 		return a.name < b.name;
 	});
+
+	// Go-to-file (inspector's locate button): resolve the requested path against the freshly
+	// built entries by FILESYSTEM equivalence — separator/case differences must not break the
+	// locate — then select it and scroll its row into view this draw.
+	bool locateNow = false;
+	if (!browserLocate.empty())
+	{
+		boost::system::error_code lec;
+		for (const FEntry& e : entries)
+		{
+			if (e.pak) continue;
+			if (e.path == browserLocate || bfs::equivalent(e.path, browserLocate, lec))
+			{
+				BrowserSelect(e.path);
+				locateNow = true;
+				break;
+			}
+		}
+		browserLocate.clear();
+	}
 
 	// The open world gets a "*" when it has unsaved changes.
 	std::string dirtyWorld;
@@ -1339,6 +1360,7 @@ void EditorUI::winBrowser()
 			if (ImGui::IsItemHovered())
 				ImGui::SetTooltip(e.pak ? "%s  (pak/mod — read-only)" : "%s", disp.c_str());
 			ImGui::EndGroup();
+			if (locateNow && e.path == browserSel) ImGui::SetScrollHereY(0.5f);
 			ImGui::PopID();
 			if (++i % per != 0) ImGui::SameLine();
 		}
@@ -1381,6 +1403,7 @@ void EditorUI::winBrowser()
 				}
 			}
 			if (!e.pak) EntryContextMenu(e.path, e.isDir);
+			if (locateNow && e.path == browserSel) ImGui::SetScrollHereY(0.5f);
 			ImGui::PopID();
 		}
 	}

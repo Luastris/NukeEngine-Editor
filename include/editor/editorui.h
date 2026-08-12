@@ -147,6 +147,7 @@ private:
 	std::string contentDir = "project/content";   // project content root (imported assets live here)
 	std::string browserCwd;                        // current folder shown in the browser
 	std::string browserSel;                        // primary selected entry (full path; "" = none)
+	std::string browserLocate;                     // go-to-file: path to resolve+scroll to on the next browser draw
 	std::set<std::string> browserMSel;             // multi-selection (ctrl/shift); superset incl. browserSel
 	std::string browserSelAnchor;                  // shift-range anchor (path of the last plain click)
 	std::vector<std::string> browserBack, browserFwd;   // folder navigation history (M4=back, M5=forward)
@@ -175,6 +176,10 @@ private:
 	int   foliageBrush = 0;             // foliage paint: 0 = off, 1 = paint, 2 = erase
 	float foliageBrushRadius = 2.0f;
 	float foliageBrushDensity = 1.0f;   // density multiplier per stroke step
+	int   maskBrush = 0;                // SurfaceMask paint: 0 = off, 1 = paint, 2 = erase
+	int   maskBrushChannel = 0;         // grid channel 0..3 (state slot)
+	float maskBrushRadius = 1.5f;
+	float maskBrushStrength = 2.0f;     // condition value added per second of stroke
 	bool        mergeOpen = false;                  // merge/resolve window visible
 	std::shared_ptr<void> mergeState;               // opaque diff tree (built in panels/merge.cpp)
 	std::string renamePath;                        // browser: full path being renamed ("" = none)
@@ -461,6 +466,7 @@ public:
 	// Type-locked asset-reference picker (mesh/material/shader/texture) with a browser DnD
 	// target, locate/reset buttons and a filterable list. Returns true when the value changed.
 	bool AssetPicker(const char* label, std::string& guid, const std::string& kind, const std::string& defGuid = "");
+	bool DrawLiveMaterialSections(nuke::Material* m);   // .numat editor: LiveMaterial sections (states/hits/sound/surface)
 	void RegisterInspectorOverrides();
 	void DrawMeshRendererInspector(nuke::MeshRenderer* mr);
 	void DrawPostProcessInspector(nuke::PostProcess* pp);
