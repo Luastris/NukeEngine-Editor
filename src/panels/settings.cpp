@@ -989,6 +989,20 @@ void EditorUI::winWorldSettings()
 		changed |= ImGui::DragFloat(LProp("Fixed Timestep").c_str(), &s.fixedDt, 0.0005f, 0.001f, 0.1f, "%.4f s");
 		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Fixed simulation step (seconds). 1/60 by default;\nsmaller = more precise, more CPU.");
 		}
+		ImGui::SeparatorText("Streaming (World Partition)");
+		{
+		changed |= ImGui::Checkbox(LProp("Enabled").c_str(), &s.streamEnabled);
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Save splits spatial atoms into per-cell files; play streams cells\nby camera distance with baked HLOD proxies for far cells.\nThe editor always loads the whole world. Takes effect on Save.");
+		if (s.streamEnabled)
+		{
+			changed |= ImGui::DragFloat(LProp("Cell Size").c_str(), &s.streamCellSize, 1.0f, 16.0f, 4096.0f, "%.0f");
+			changed |= ImGui::DragFloat(LProp("Load Range").c_str(), &s.streamRange, 1.0f, 32.0f, 16384.0f, "%.0f");
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Cells within this distance of a camera load; unload at x1.3.");
+			changed |= ImGui::DragFloat(LProp("HLOD Range").c_str(), &s.streamHlodRange, 8.0f, 0.0f, 100000.0f, "%.0f");
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Unloaded cells inside this distance draw their baked proxy mesh\n(0 = unlimited). Proxies bake automatically on Save.");
+			ImGui::TextDisabled("Mark managers/global atoms 'Always Loaded' in the inspector.");
+		}
+		}
 
 		if (changed) apply(s);   // live apply + mark dirty
 

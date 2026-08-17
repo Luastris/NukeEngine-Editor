@@ -1712,6 +1712,16 @@ void EditorUI::winInspector()
 			{ sltd->enabled = ena; if (multi) for (Atom* m : msel) if (m) m->enabled = ena; }
 			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Whole-atom switch: unticked disables this atom AND its subtree\n"
 			                                              "(updates, rendering, events, physics bodies).");
+			// World Partition membership — only meaningful in a streamed world.
+			if (AppInstance::GetSingleton()->currentWorld
+			    && AppInstance::GetSingleton()->currentWorld->settings.streamEnabled)
+			{
+				bool al = sltd->alwaysLoaded;
+				if (ImGui::Checkbox("Always Loaded", &al))
+				{ sltd->alwaysLoaded = al; if (multi) for (Atom* m : msel) if (m) m->alwaysLoaded = al; }
+				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Keep this ROOT atom in the main world instead of streaming it\n"
+				                                              "with its grid cell (terrain managers, global logic, sky).");
+			}
 		}
 
 		// Prefab instance bar — sync is manual in both directions.
