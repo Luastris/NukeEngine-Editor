@@ -3,7 +3,9 @@
 #include "nukeui.h"   // DocDetachAll
 #include <nlohmann/json.hpp>
 #include <boost/filesystem/fstream.hpp>
+#include <cfloat>
 #include <cstdlib>
+#include <cstring>
 #include <API/Model/CrashReport.h>   // "last session crashed" viewer
 #include <API/Model/DevConsole.h>    // console command line = the same executor as in-game
 #include <interface/NukeVersion.h>   // NUKE_ENGINE_VERSION — the release name (About)
@@ -85,10 +87,22 @@ void EditorUI::winCrash()
 			if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", crashDir.c_str());
 		}
 		ImGui::Separator();
-		ImGui::BeginChild("crash-text", ImVec2(0, -ImGui::GetFrameHeightWithSpacing()), ImGuiChildFlags_Borders,
-		                  ImGuiWindowFlags_HorizontalScrollbar);
-		ImGui::TextUnformatted(crashText.empty() ? "(no crash.txt in the bundle)" : crashText.c_str());
-		ImGui::EndChild();
+		// Selectable + copyable: read-only multiline over the report buffer (mouse selection
+		// and Ctrl+C work), frameless so it reads as text, not as a form field.
+		{
+			static const char* kEmpty = "(no crash.txt in the bundle)";
+			std::string& t = crashText;
+			ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0, 0, 0, 0));
+			ImGui::InputTextMultiline("##crash-text",
+				t.empty() ? const_cast<char*>(kEmpty) : t.data(),
+				(t.empty() ? std::strlen(kEmpty) : t.size()) + 1,
+				ImVec2(-FLT_MIN, -ImGui::GetFrameHeightWithSpacing()),
+				ImGuiInputTextFlags_ReadOnly);
+			ImGui::PopStyleColor();
+		}
+		if (ImGui::Button(ICON_LC_COPY " Copy"))
+			ImGui::SetClipboardText(crashText.c_str());
+		ImGui::SameLine();
 		if (ImGui::Button("Open Folder"))
 		{
 #if defined(_WIN32)

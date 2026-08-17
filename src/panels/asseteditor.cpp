@@ -6,6 +6,7 @@
 #include <API/Model/Light.h>
 #include <API/Model/Environment.h>
 #include <API/Model/Prefab.h>
+#include <API/Model/Surface.h>   // trigger tool: preview hit reactions (Hit + DrainHits)
 #include <API/Model/Audio.h>
 #include <input/Input.h>
 #include <interface/AssetCreators.h>   // module-supplied asset editors
@@ -70,6 +71,8 @@ EditorUI::PreviewWorld* EditorUI::AcquirePreview()
 		{
 			s->inUse = true;
 			s->yaw = 0.7f; s->pitch = 0.35f; s->dist = 0.0f;
+			s->orbit = false; s->locked = false;          // pool reuse must not leak modes
+			if (s->world) s->world->editorGrid = true;    // ...or a hidden grid
 			return s;
 		}
 	iRender* r = AppInstance::GetSingleton()->render;
@@ -259,7 +262,50 @@ void EditorUI::DrawPreviewImage(PreviewWorld& s, ImVec2 size)
 	}
 
 	ImGuiIO& io = ImGui::GetIO();
-	if (ImGui::IsItemHovered())
+	if (s.locked) { s.visible = true; return; }   // static shot: renders, takes no camera input
+	if (ImGui::IsItemHovered() && s.orbit)
+	{
+		// ORBIT mode (material editor): RMB circles the subject, wheel dollies toward it,
+		// MMB shifts the pivot. yaw/pitch/dist stay authoritative; the camera is re-placed
+		// from them, so it can never drift away from the sample.
+		Transform* t = s.cam->transform;
+		const float rotSpeed = 0.008f;
+		bool moved = false;
+		if (ImGui::IsMouseDragging(ImGuiMouseButton_Right))
+		{
+			s.yaw   += io.MouseDelta.x * rotSpeed;
+			s.pitch += io.MouseDelta.y * rotSpeed;   // drag up = camera rises above the subject
+			const float lim = 1.55f;
+			if (s.pitch >  lim) s.pitch =  lim;
+			if (s.pitch < -lim) s.pitch = -lim;
+			moved = true;
+		}
+		if (io.MouseWheel != 0.0f)
+		{
+			s.dist *= 1.0f - io.MouseWheel * 0.12f;
+			const float mn = s.radius * 0.25f, mx = s.radius * 40.0f;
+			if (s.dist < mn) s.dist = mn;
+			if (s.dist > mx) s.dist = mx;
+			moved = true;
+		}
+		if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle))
+		{
+			const double pan = 0.0025 * std::max(0.2f, s.dist);
+			s.center += t->right() * (-io.MouseDelta.x * pan) + t->up() * (io.MouseDelta.y * pan);
+			moved = true;
+		}
+		if (moved)
+		{
+			const double cp = std::cos(s.pitch), sp = std::sin(s.pitch);
+			const double sy = std::sin(s.yaw),   cy = std::cos(s.yaw);
+			Vector3 dir(cp * sy, sp, cp * cy);   // center -> camera (same frame as auto-frame)
+			t->position = Vector3(s.center.x + dir.x * s.dist, s.center.y + dir.y * s.dist, s.center.z + dir.z * s.dist);
+			const double fp  = std::asin(dir.y);
+			const double fyw = std::atan2(-dir.x, -dir.z);
+			t->SetEulerDeg(Vector3(fp * 57.29577951308232, fyw * 57.29577951308232, 0.0));
+		}
+	}
+	else if (ImGui::IsItemHovered())
 	{
 		// RMB = look, MMB = pan, wheel = dolly (or speed while flying), RMB + WASD/QE = fly.
 		Transform* t = s.cam->transform;
@@ -321,6 +367,224 @@ void EditorUI::DrawPreviewImage(PreviewWorld& s, ImVec2 size)
 	}
 
 	s.visible = true;   // ask the render hook to draw this scene this frame
+}
+
+// One material-parameter picker for EVERYTHING that targets a param (tweens, event
+// set-params): built-ins + live scalars by their inspector labels, every reflected
+// numeric/color prop, per-mask fields. Resolves the CURRENT value first so callers get the
+// target's dimension/color-ness even when the param came from the free-text field.
+struct MatParamPick { int dim = 4; bool color = false; };
+static bool MaterialParamCombo(nuke::Material* m, const char* label, std::string& param, MatParamPick& out)
+{
+	struct TwTarget { const char* key; const char* lbl; int dim; bool color; };
+	static const TwTarget kTw[] = {
+		{ "uv",                "UV Scroll",          2, false },
+		{ "wipe",              "Wipe",               1, false },
+		{ "color",             "Base Color",         4, true  },
+		{ "emissive",          "Emissive",           4, true  },
+		{ "emissiveIntensity", "Emissive Intensity", 1, false },
+		{ "metallic",          "Metallic",           1, false },
+		{ "roughness",         "Roughness",          1, false },
+		{ "specular",          "Specular",           1, false },
+		{ "parallax",          "Parallax",           1, false },
+		{ "dispScale",         "Disp Scale",         1, false },
+		{ "dispMid",           "Disp Mid",           1, false },
+		{ "varAmount",         "Variation",          1, false },
+		{ "varScale",          "Var Cell",           1, false },
+		{ "varHue",            "Var Hue",            1, false },
+		{ "footVolume",        "Step Volume",        1, false },
+		{ "ambientVolume",     "Ambient Volume",     1, false },
+		{ "windVolume",        "Wind Volume",        1, false },
+	};
+	auto ieq = [](const std::string& a, const char* b) {
+		size_t q = 0;
+		for (; q < a.size() && b[q]; ++q)
+			if (tolower((unsigned char)a[q]) != tolower((unsigned char)b[q])) return false;
+		return q == a.size() && !b[q];
+	};
+	auto builtin = [&](const std::string& p) -> const TwTarget* {
+		if (p.empty()) return nullptr;
+		for (const TwTarget& t : kTw) if (ieq(p, t.key) || ieq(p, t.lbl)) return &t;
+		return nullptr;
+	};
+	auto isNum = [](nuke::FT t) {
+		return t == nuke::FT::Float || t == nuke::FT::Double || t == nuke::FT::Vec2
+		    || t == nuke::FT::Vec3 || t == nuke::FT::Vec4 || t == nuke::FT::Color;
+	};
+	auto reflected = [&](const std::string& p) -> const nuke::Field* {
+		if (p.empty()) return nullptr;
+		if (nuke::TypeInfo* ti = m->GetType())
+			for (const nuke::Field& f : ti->fields)
+				if (isNum(f.type) && (ieq(p, f.name.c_str())
+				 || (!f.label.empty() && ieq(p, f.label.c_str())))) return &f;
+		return nullptr;
+	};
+	const TwTarget*    bt = builtin(param);
+	const nuke::Field* pf = bt ? nullptr : reflected(param);
+	out.color = (bt && bt->color) || (pf && pf->type == nuke::FT::Color);
+	out.dim = bt ? bt->dim
+	        : pf ? (pf->type == nuke::FT::Vec2 ? 2 : pf->type == nuke::FT::Vec3 ? 3
+	              : pf->type == nuke::FT::Vec4 ? 4 : 1)
+	        : (param.rfind("mask:", 0) == 0 ? 1 : 4);
+	if (out.color) out.dim = 4;
+	const char* shown = bt ? bt->lbl
+	                  : pf ? (pf->label.empty() ? pf->name.c_str() : pf->label.c_str())
+	                  : param.empty() ? "(pick)" : param.c_str();
+	bool ch = false;
+	if (ImGui::BeginCombo(label, shown))
+	{
+		for (const TwTarget& t : kTw)
+			if (ImGui::Selectable(t.lbl, bt == &t)) { param = t.key; ch = true; }
+		if (nuke::TypeInfo* ti = m->GetType())
+		{
+			ImGui::Separator();
+			for (const nuke::Field& f : ti->fields)
+			{
+				if (!isNum(f.type) || builtin(f.name)
+				 || (!f.label.empty() && builtin(f.label))) continue;
+				const std::string fl = (f.label.empty() ? f.name : f.label) + "##f" + f.name;
+				if (ImGui::Selectable(fl.c_str(), pf == &f)) { param = f.name; ch = true; }
+			}
+		}
+		if (!m->liveMasks.empty())
+		{
+			ImGui::Separator();
+			ImGui::TextDisabled("Mask params");
+			static const char* kMf[] = { "scale", "repeat", "rotation", "fade", "softness", "strength", "cx", "cy", "cz" };
+			for (const nuke::LiveMask& mk : m->liveMasks)
+				for (const char* mf : kMf)
+				{
+					const std::string mkey = "mask:" + mk.name + ":" + mf;
+					const std::string mlbl = "Mask " + mk.name + ": " + mf + "##mk" + mkey;
+					if (ImGui::Selectable(mlbl.c_str(), param == mkey)) { param = mkey; ch = true; }
+				}
+		}
+		ImGui::EndCombo();
+	}
+	return ch;
+}
+
+// Trigger-tool click: unproject the mouse through the preview camera, raycast the preview
+// mesh (LOD0, identity transform, Moller-Trumbore), fire the picked event AT the hit —
+// a UV or world point, depending on the space of the mask the event drives.
+void EditorUI::FireEventAtPreview(AssetEditorWin& w)
+{
+	PreviewWorld& s = *w.pv;
+	nuke::Material* pm = s.mr ? s.mr->mat : nullptr;
+	nuke::Mesh* mesh = s.mr ? s.mr->mesh : nullptr;
+	if (!pm || !mesh || !mesh->vertexArray || !s.cam || !s.cam->transform || w.evtSel < 0
+	 || w.evtSel >= (int)(pm->liveEvents.size() + pm->liveHits.size())) return;
+	const ImVec2 mp = ImGui::GetMousePos();
+	const double rw = std::max(1.0f, s.rectSize.x), rh = std::max(1.0f, s.rectSize.y);
+	const double ndcx = (mp.x - s.rectMin.x) / rw * 2.0 - 1.0;
+	const double ndcy = 1.0 - (mp.y - s.rectMin.y) / rh * 2.0;
+	Transform* ct = s.cam->transform;
+	const Vector3 o = ct->globalPosition();
+	const Vector3 f = ct->direction(), r = ct->right(), u = ct->up();
+	const double thf = std::tan((double)s.cam->fov * 0.5 * 0.017453292519943295);
+	Vector3 d(f.x + ndcx * thf * (rw / rh) * r.x + ndcy * thf * u.x,
+	          f.y + ndcx * thf * (rw / rh) * r.y + ndcy * thf * u.y,
+	          f.z + ndcx * thf * (rw / rh) * r.z + ndcy * thf * u.z);
+	{ const double L = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z); if (L > 1e-12) { d.x /= L; d.y /= L; d.z /= L; } }
+	float bestT = 1e30f, bu = 0, bv = 0; int bTri = -1;
+	const int tris = mesh->TriCount();
+	for (int t = 0; t < tris; ++t)
+	{
+		const uint32_t i0 = mesh->TriIndex(t, 0), i1 = mesh->TriIndex(t, 1), i2 = mesh->TriIndex(t, 2);
+		const float* p0 = mesh->vertexArray + i0 * 3;
+		const float* p1 = mesh->vertexArray + i1 * 3;
+		const float* p2 = mesh->vertexArray + i2 * 3;
+		const double e1[3] = { p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2] };
+		const double e2[3] = { p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2] };
+		const double px = d.y * e2[2] - d.z * e2[1], py = d.z * e2[0] - d.x * e2[2], pz = d.x * e2[1] - d.y * e2[0];
+		const double det = e1[0] * px + e1[1] * py + e1[2] * pz;
+		if (std::fabs(det) < 1e-12) continue;
+		const double inv = 1.0 / det;
+		const double tv[3] = { o.x - p0[0], o.y - p0[1], o.z - p0[2] };
+		const double uu = (tv[0] * px + tv[1] * py + tv[2] * pz) * inv;
+		if (uu < 0.0 || uu > 1.0) continue;
+		const double qx = tv[1] * e1[2] - tv[2] * e1[1], qy = tv[2] * e1[0] - tv[0] * e1[2], qz = tv[0] * e1[1] - tv[1] * e1[0];
+		const double vv = (d.x * qx + d.y * qy + d.z * qz) * inv;
+		if (vv < 0.0 || uu + vv > 1.0) continue;
+		const double tt = (e2[0] * qx + e2[1] * qy + e2[2] * qz) * inv;
+		if (tt > 1e-4 && tt < bestT) { bestT = (float)tt; bu = (float)uu; bv = (float)vv; bTri = t; }
+	}
+	if (bTri < 0) { std::cout << "[trigger]\tclick missed the sample (no triangle hit)" << std::endl; return; }
+	if (w.evtSel >= (int)pm->liveEvents.size())
+	{
+		// HIT REACTION: fire Surface::Hit on the preview atom at the hit point, then drain
+		// the spawn queue into the PREVIEW world at once — the live world must never get it.
+		const int hi = w.evtSel - (int)pm->liveEvents.size();
+		if (hi >= (int)pm->liveHits.size()) return;
+		const Vector3 hp(o.x + d.x * bestT, o.y + d.y * bestT, o.z + d.z * bestT);
+		const uint32_t i0 = mesh->TriIndex(bTri, 0), i1 = mesh->TriIndex(bTri, 1), i2 = mesh->TriIndex(bTri, 2);
+		const float* p0v = mesh->vertexArray + i0 * 3;
+		const float* p1v = mesh->vertexArray + i1 * 3;
+		const float* p2v = mesh->vertexArray + i2 * 3;
+		const double e1[3] = { p1v[0] - p0v[0], p1v[1] - p0v[1], p1v[2] - p0v[2] };
+		const double e2[3] = { p2v[0] - p0v[0], p2v[1] - p0v[1], p2v[2] - p0v[2] };
+		Vector3 N(e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]);
+		const double nl = std::sqrt(N.x * N.x + N.y * N.y + N.z * N.z);
+		if (nl > 1e-12) { N.x /= nl; N.y /= nl; N.z /= nl; }
+		if (N.x * d.x + N.y * d.y + N.z * d.z > 0.0) { N.x = -N.x; N.y = -N.y; N.z = -N.z; }   // face the ray
+		const std::string& ht = pm->liveHits[hi].hitType;
+		std::cout << "[trigger]\thit '" << (ht.empty() ? "(any)" : ht.c_str()) << "' at world ("
+		          << hp.x << ", " << hp.y << ", " << hp.z << ")" << std::endl;
+		nuke::Surface::HitIn(s.world, s.meshAtom, ht, hp, N, 1e9);
+		nuke::Surface::DrainHits(s.world);
+		return;
+	}
+	const nuke::LiveEvent& ev = pm->liveEvents[w.evtSel];
+	// Which mask receives the point? Same routing as the engine: the modulating mask of a
+	// started tween, or the target of a "mask:<name>:*" tween/set-param.
+	auto maskNamed = [&](const std::string& n) -> const nuke::LiveMask* {
+		if (n.empty()) return nullptr;
+		for (const nuke::LiveMask& mk : pm->liveMasks)
+			if (mk.name == n) return &mk;
+		return nullptr;
+	};
+	auto maskOfParam = [](const std::string& p) -> std::string {
+		if (p.rfind("mask:", 0) != 0) return std::string();
+		const size_t c2 = p.find(':', 5);
+		return c2 == std::string::npos ? std::string() : p.substr(5, c2 - 5);
+	};
+	const nuke::LiveMask* bound = nullptr;
+	for (const std::string& tn : ev.startTweens)
+		for (const nuke::LiveTween& tw : pm->liveTweens)
+		{
+			const std::string& nm = tw.name.empty() ? tw.param : tw.name;
+			if (tn != nm) continue;
+			if (!bound) bound = maskNamed(tw.mask);
+			if (!bound) bound = maskNamed(maskOfParam(tw.param));
+			break;
+		}
+	for (size_t sp = 0; !bound && sp < ev.setParams.size(); ++sp)
+		bound = maskNamed(maskOfParam(ev.setParams[sp]));
+	if (!bound)
+		std::cout << "[trigger]\tevent '" << ev.name << "' touches no mask (started tweens have no"
+		             " Mask and no mask: targets) — the click point has nowhere to land" << std::endl;
+	// Both points are known here — TriggerAtHit routes each mask in its AUTHORED space, so
+	// the tool shows exactly the size a gameplay hit will produce.
+	const Vector3 hp(o.x + d.x * bestT, o.y + d.y * bestT, o.z + d.z * bestT);
+	if (mesh->uvArray)
+	{
+		const uint32_t i0 = mesh->TriIndex(bTri, 0), i1 = mesh->TriIndex(bTri, 1), i2 = mesh->TriIndex(bTri, 2);
+		const float* t0 = mesh->uvArray + i0 * 2;
+		const float* t1 = mesh->uvArray + i1 * 2;
+		const float* t2 = mesh->uvArray + i2 * 2;
+		const float hu = t0[0] * (1 - bu - bv) + t1[0] * bu + t2[0] * bv;
+		const float hv = t0[1] * (1 - bu - bv) + t1[1] * bu + t2[1] * bv;
+		std::cout << "[trigger]\t'" << ev.name << "' at uv (" << hu << ", " << hv << ") / world ("
+		          << hp.x << ", " << hp.y << ", " << hp.z << ")"
+		          << (bound ? (std::string(" -> mask '") + bound->name + "'") : std::string()) << std::endl;
+		pm->TriggerAtHit(ev.name, hp, hu, hv);
+	}
+	else
+	{
+		std::cout << "[trigger]\t'" << ev.name << "' at world (" << hp.x << ", " << hp.y << ", "
+		          << hp.z << ") (mesh has no uv)" << std::endl;
+		pm->TriggerAtWorld(ev.name, hp);
+	}
 }
 
 // --- Asset editor windows --------------------------------------------------
@@ -508,6 +772,34 @@ bool EditorUI::DrawLiveMaterialSections(nuke::Material* m)
 				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Scripted hits gate by their impulse; automatic contact hits gate by closing speed (m/s)");
 				ch |= ImGui::DragFloat("Lifetime", &h.lifetime, 0.1f, 0.0f, 120.0f, "%.1f s (0 keep)", ImGuiSliderFlags_AlwaysClamp);
 				ch |= ImGui::DragFloat("Decal Size", &h.decalSize, 0.05f, 0.05f, 8.0f, "%.2f m", ImGuiSliderFlags_AlwaysClamp);
+				static const char* kDMode[] = { "Albedo (on top)", "Light Projector", "Stain (lit)" };
+				if (h.decalMode < 0 || h.decalMode > 2) h.decalMode = 2;
+				if (ImGui::BeginCombo("Decal Mode", kDMode[h.decalMode]))
+				{
+					for (int dm = 0; dm < 3; ++dm)
+						if (ImGui::Selectable(kDMode[dm], dm == h.decalMode)) { h.decalMode = dm; ch = true; }
+					ImGui::EndCombo();
+				}
+				if (ImGui::IsItemHovered())
+					ImGui::SetTooltip("Albedo: texture as-is on top (bright decals stay bright);\nLight Projector: additive glow;\nStain: tints the lit surface — shadows show through (holes, scorch, dirt)");
+				{
+					float dt4[4] = { (float)h.decalTint.r, (float)h.decalTint.g, (float)h.decalTint.b, (float)h.decalTint.a };
+					if (ImGui::ColorEdit4("Decal Tint", dt4))
+					{ h.decalTint = nuke::Color(dt4[0], dt4[1], dt4[2], dt4[3]); ch = true; }
+				}
+				ch |= ImGui::DragFloat("Decal Intensity", &h.decalIntensity, 0.02f, 0.0f, 8.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+				ch |= ImGui::DragFloat("Decal Fade", &h.decalFade, 0.02f, 0.0f, 5.0f, "%.2f s", ImGuiSliderFlags_AlwaysClamp);
+				if (ImGui::IsItemHovered())
+					ImGui::SetTooltip("The decal SPREADS in over this time (dense core first, thin edges last — blood creep).\n0 = instant stamp. Timed decals also dissolve before their Lifetime ends.");
+				// The hit can fire a material event AT the hit point: masked reactions/ripples
+				// run from real gameplay hits; impulse+normal land in g_Hit for shaders.
+				if (ImGui::BeginCombo("Event", h.eventName.empty() ? "(none)" : h.eventName.c_str()))
+				{
+					if (ImGui::Selectable("(none)", h.eventName.empty())) { h.eventName.clear(); ch = true; }
+					for (const nuke::LiveEvent& hev : m->liveEvents)
+						if (ImGui::Selectable(hev.name.c_str(), h.eventName == hev.name)) { h.eventName = hev.name; ch = true; }
+					ImGui::EndCombo();
+				}
 				ImGui::TreePop();
 			}
 			ImGui::PopID();
@@ -549,9 +841,7 @@ bool EditorUI::DrawLiveMaterialSections(nuke::Material* m)
 
 	if (ImGui::CollapsingHeader("Tweens"))
 	{
-		ImGui::TextDisabled("Parameter animations from game time (stateless), bezier-eased.");
-		static const char* kParams[] = { "uv", "wipe", "color", "emissive", "emissiveIntensity",
-		                                 "metallic", "roughness", "specular" };
+		ImGui::TextDisabled("Parameter animations from game time (stateless): value curves / gradient on one 0..1 timeline (x Duration).");
 		int kill = -1;
 		for (int i = 0; i < (int)m->liveTweens.size(); ++i)
 		{
@@ -562,17 +852,16 @@ bool EditorUI::DrawLiveMaterialSections(nuke::Material* m)
 			if (ImGui::SmallButton(ICON_LC_TRASH_2)) kill = i;
 			if (open)
 			{
-				if (ImGui::BeginCombo("Param", tw.param.empty() ? "(pick)" : tw.param.c_str()))
 				{
-					for (const char* p : kParams)
-						if (ImGui::Selectable(p, tw.param == p)) { tw.param = p; ch = true; }
-					ImGui::EndCombo();
+					char nbuf[64]; strncpy(nbuf, tw.name.c_str(), 63); nbuf[63] = 0;
+					if (ImGui::InputTextWithHint("Name", "(events start tweens by name)", nbuf, sizeof(nbuf)))
+					{ tw.name = nbuf; ch = true; }
 				}
+				MatParamPick twPick;
+				ch |= MaterialParamCombo(m, "Param", tw.param, twPick);
 				char pbuf[64]; strncpy(pbuf, tw.param.c_str(), 63); pbuf[63] = 0;
 				if (ImGui::InputTextWithHint("Custom", "or a shader MatCB prop (g_...)", pbuf, sizeof(pbuf)))
 				{ tw.param = pbuf; ch = true; }
-				ch |= ImGui::DragFloat4("From", tw.from, 0.01f);
-				ch |= ImGui::DragFloat4("To", tw.to, 0.01f);
 				ch |= ImGui::DragFloat("Duration", &tw.duration, 0.01f, 0.01f, 600.0f, "%.2f s", ImGuiSliderFlags_AlwaysClamp);
 				static const char* kLoop[] = { "Once", "Loop", "Ping-Pong" };
 				if (tw.loop < 0 || tw.loop > 2) tw.loop = 1;
@@ -582,19 +871,52 @@ bool EditorUI::DrawLiveMaterialSections(nuke::Material* m)
 						if (ImGui::Selectable(kLoop[l], l == tw.loop)) { tw.loop = l; ch = true; }
 					ImGui::EndCombo();
 				}
-				ch |= ImGui::DragFloat("Ease In", &tw.bez1, 0.01f, -1.0f, 2.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
-				ch |= ImGui::DragFloat("Ease Out", &tw.bez2, 0.01f, -1.0f, 2.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
-				if (ImGui::IsItemHovered() || ImGui::IsItemActive())
-					ImGui::SetTooltip("Cubic bezier control Ys (x = 1/3, 2/3).\n0.33/0.67 = linear, 0/1 = ease-in-out, beyond [0,1] = overshoot.");
-				// Curve preview: the easing over one leg.
+				static const char* kRun[] = { "Auto", "On Event" };
+				if (tw.runMode < 0 || tw.runMode > 1) tw.runMode = 0;
+				if (ImGui::BeginCombo("Run", kRun[tw.runMode]))
 				{
-					float pts[33];
-					for (int k = 0; k <= 32; ++k)
+					for (int rr = 0; rr < 2; ++rr)
+						if (ImGui::Selectable(kRun[rr], rr == tw.runMode)) { tw.runMode = rr; ch = true; }
+					ImGui::EndCombo();
+				}
+				if (!m->liveMasks.empty())   // spatial mask modulating this tween's effect
+					if (ImGui::BeginCombo("Mask", tw.mask.empty() ? "(whole surface)" : tw.mask.c_str()))
 					{
-						const float u = k / 32.0f, iu = 1.0f - u;
-						pts[k] = 3 * iu * iu * u * tw.bez1 + 3 * iu * u * u * tw.bez2 + u * u * u;
+						if (ImGui::Selectable("(whole surface)", tw.mask.empty())) { tw.mask.clear(); ch = true; }
+						for (const nuke::LiveMask& mk : m->liveMasks)
+							if (ImGui::Selectable(mk.name.c_str(), tw.mask == mk.name)) { tw.mask = mk.name; ch = true; }
+						ImGui::EndCombo();
 					}
-					ImGui::PlotLines("##ease", pts, 33, 0, nullptr, -0.25f, 1.25f, ImVec2(ImGui::CalcItemWidth(), 48));
+				const bool twCol = twPick.color;
+				int twDim = twPick.dim;
+				// triggers ride the KEYFRAMES: select a key/stop and pick the event it fires
+				std::vector<std::string> evNames;
+				for (const nuke::LiveEvent& ev : m->liveEvents)
+					if (!ev.name.empty()) evNames.push_back(ev.name);
+				if (twCol)
+				{
+					for (auto& cc : tw.chan) if (!cc.empty()) { cc.clear(); ch = true; }
+					if (tw.grad.empty()) { tw.grad = { 0, 0, 0, 0, 1,  1, 1, 1, 1, 1 }; ch = true; }
+					ch |= GradientStopsEditor(tw.grad, true, &tw.trigT, &tw.trigEvent, &evNames);
+				}
+				else
+				{
+					if (!tw.grad.empty()) { tw.grad.clear(); ch = true; }
+					int curCh = 0;
+					if (twDim > 1)
+					{
+						static const char* kChan[4] = { "X", "Y", "Z", "W" };
+						ImGuiStorage* stg = ImGui::GetStateStorage();
+						const ImGuiID chId = ImGui::GetID("##twchan");
+						curCh = stg->GetInt(chId, 0); if (curCh >= twDim) curCh = 0;
+						for (int c = 0; c < twDim; ++c)
+						{
+							if (c) ImGui::SameLine();
+							if (ImGui::RadioButton(kChan[c], curCh == c)) { curCh = c; stg->SetInt(chId, c); }
+						}
+					}
+					if (tw.chan[curCh].empty()) { tw.chan[curCh] = { 0, 0, 1, 1,  1, 1, 1, 1 }; ch = true; }
+					ch |= CurveKeysEditor(tw.chan[curCh], -1e30f, 1e30f, nullptr, &tw.trigT, &tw.trigEvent, &evNames);
 				}
 				ImGui::TreePop();
 			}
@@ -603,6 +925,142 @@ bool EditorUI::DrawLiveMaterialSections(nuke::Material* m)
 		if (kill >= 0) { m->liveTweens.erase(m->liveTweens.begin() + kill); ch = true; }
 		if (ImGui::Button(ICON_LC_PLUS " Add Tween", ImVec2(-1, 0))) { m->liveTweens.push_back({}); ch = true; }
 		ImGui::TextDisabled("\"uv\" scroll + \"wipe\" dissolve draw with the LM render pass (LM-3).");
+	}
+
+	if (ImGui::CollapsingHeader("Masks"))
+	{
+		ImGui::TextDisabled("Spatial shapes that localize tween effects; point events move their centers.");
+		int killM = -1;
+		for (int i = 0; i < (int)m->liveMasks.size(); ++i)
+		{
+			nuke::LiveMask& mk = m->liveMasks[i];
+			ImGui::PushID(5200 + i);
+			bool open = ImGui::TreeNode("##mk", "%s", mk.name.empty() ? "(unnamed)" : mk.name.c_str());
+			ImGui::SameLine(ImGui::GetContentRegionAvail().x - 18);
+			if (ImGui::SmallButton(ICON_LC_TRASH_2)) killM = i;
+			if (open)
+			{
+				char nbuf[64]; strncpy(nbuf, mk.name.c_str(), 63); nbuf[63] = 0;
+				if (ImGui::InputText("Name", nbuf, sizeof(nbuf))) { mk.name = nbuf; ch = true; }
+				static const char* kSpace[] = { "UV", "World" };
+				if (ImGui::BeginCombo("Space", kSpace[mk.space & 1]))
+				{
+					for (int q = 0; q < 2; ++q)
+						if (ImGui::Selectable(kSpace[q], q == mk.space)) { mk.space = q; ch = true; }
+					ImGui::EndCombo();
+				}
+				static const char* kShape[] = { "Circle", "Ring", "Stamp" };
+				if (ImGui::BeginCombo("Shape", kShape[mk.shape % 3]))
+				{
+					for (int q = 0; q < 3; ++q)
+						if (ImGui::Selectable(kShape[q], q == mk.shape)) { mk.shape = q; ch = true; }
+					ImGui::EndCombo();
+				}
+				if (mk.shape == 2) ch |= AssetPicker("Stamp", mk.stampGuid, "texture");
+				float c3[3] = { mk.cx, mk.cy, mk.cz };
+				if (mk.space == 0 ? ImGui::DragFloat2("Center", c3, 0.005f) : ImGui::DragFloat3("Center", c3, 0.01f))
+				{ mk.cx = c3[0]; mk.cy = c3[1]; mk.cz = c3[2]; ch = true; }
+				ch |= ImGui::DragFloat("Scale", &mk.scale, 0.005f, 0.0f, 1e6f, mk.space ? "%.3f m" : "%.3f uv");
+				ch |= ImGui::DragFloat("Repeat", &mk.repeat, 0.05f, 0.0f, 64.0f, "%.1f");
+				ch |= ImGui::DragFloat("Rotation", &mk.rotation, 0.5f, -360.0f, 360.0f, "%.0f deg");
+				ch |= ImGui::DragFloat("Fade", &mk.fade, 0.01f, 0.0f, 1.0f, "%.2f");
+				ch |= ImGui::DragFloat("Softness", &mk.softness, 0.01f, 0.0f, 1.0f, "%.2f");
+				ch |= ImGui::DragFloat("Strength", &mk.strength, 0.01f, 0.0f, 1.0f, "%.2f");
+				ImGui::TreePop();
+			}
+			ImGui::PopID();
+		}
+		if (killM >= 0) { m->liveMasks.erase(m->liveMasks.begin() + killM); ch = true; }
+		if (ImGui::Button(ICON_LC_PLUS " Add Mask", ImVec2(-1, 0)))
+		{
+			nuke::LiveMask mk;
+			mk.name = "mask" + std::to_string((int)m->liveMasks.size());
+			m->liveMasks.push_back(mk); ch = true;
+		}
+	}
+
+	if (ImGui::CollapsingHeader("Events"))
+	{
+		ImGui::TextDisabled("Named reactions the triggers fire (tween marks, gameplay, the Trigger Tool).");
+		int killE = -1;
+		for (int i = 0; i < (int)m->liveEvents.size(); ++i)
+		{
+			nuke::LiveEvent& ev = m->liveEvents[i];
+			ImGui::PushID(5400 + i);
+			bool open = ImGui::TreeNode("##ev", "%s", ev.name.empty() ? "(unnamed)" : ev.name.c_str());
+			ImGui::SameLine(ImGui::GetContentRegionAvail().x - 18);
+			if (ImGui::SmallButton(ICON_LC_TRASH_2)) killE = i;
+			if (open)
+			{
+				char nbuf[64]; strncpy(nbuf, ev.name.c_str(), 63); nbuf[63] = 0;
+				if (ImGui::InputText("Name", nbuf, sizeof(nbuf))) { ev.name = nbuf; ch = true; }
+				ImGui::TextDisabled("Start Tweens");
+				int killS = -1;
+				for (int si = 0; si < (int)ev.startTweens.size(); ++si)
+				{
+					ImGui::PushID(100 + si);
+					ImGui::SetNextItemWidth(std::max(80.0f, ImGui::GetContentRegionAvail().x - 30.0f));
+					if (ImGui::BeginCombo("##st", ev.startTweens[si].empty() ? "(tween)" : ev.startTweens[si].c_str()))
+					{
+						for (const nuke::LiveTween& tt : m->liveTweens)
+						{
+							const std::string& nm = tt.name.empty() ? tt.param : tt.name;
+							if (nm.empty()) continue;
+							if (ImGui::Selectable(nm.c_str(), ev.startTweens[si] == nm)) { ev.startTweens[si] = nm; ch = true; }
+						}
+						ImGui::EndCombo();
+					}
+					ImGui::SameLine();
+					if (ImGui::SmallButton(ICON_LC_TRASH_2)) killS = si;
+					ImGui::PopID();
+				}
+				if (killS >= 0) { ev.startTweens.erase(ev.startTweens.begin() + killS); ch = true; }
+				if (ImGui::SmallButton(ICON_LC_PLUS " Add Tween Start")) { ev.startTweens.push_back(""); ch = true; }
+				ImGui::TextDisabled("Set Params (instant)");
+				int killP = -1;
+				for (int si = 0; si < (int)ev.setParams.size(); ++si)
+				{
+					ImGui::PushID(200 + si);
+					// target picked the same way tweens pick theirs; value widget follows
+					// the target's dimension (one field for scalars, a picker for colors)
+					MatParamPick pk;
+					ImGui::SetNextItemWidth(std::max(140.0f, ImGui::GetContentRegionAvail().x * 0.42f));
+					ch |= MaterialParamCombo(m, "##sp", ev.setParams[si], pk);
+					if ((int)ev.setValues.size() < (si + 1) * 4) ev.setValues.resize((si + 1) * 4, 0.0f);
+					float* spv = &ev.setValues[si * 4];
+					ImGui::SameLine();
+					const float trashW = ImGui::CalcTextSize(ICON_LC_TRASH_2).x
+					                   + ImGui::GetStyle().FramePadding.x * 2.0f + ImGui::GetStyle().ItemSpacing.x;
+					ImGui::SetNextItemWidth(std::max(80.0f, ImGui::GetContentRegionAvail().x - trashW));
+					if      (pk.color)    ch |= ImGui::ColorEdit4("##sv", spv);
+					else if (pk.dim == 1) ch |= ImGui::DragFloat("##sv", spv, 0.01f);
+					else if (pk.dim == 2) ch |= ImGui::DragFloat2("##sv", spv, 0.01f);
+					else if (pk.dim == 3) ch |= ImGui::DragFloat3("##sv", spv, 0.01f);
+					else                  ch |= ImGui::DragFloat4("##sv", spv, 0.01f);
+					ImGui::SameLine();
+					if (ImGui::SmallButton(ICON_LC_TRASH_2)) killP = si;
+					ImGui::PopID();
+				}
+				if (killP >= 0)
+				{
+					ev.setParams.erase(ev.setParams.begin() + killP);
+					if ((int)ev.setValues.size() >= (killP + 1) * 4)
+						ev.setValues.erase(ev.setValues.begin() + killP * 4, ev.setValues.begin() + killP * 4 + 4);
+					ch = true;
+				}
+				if (ImGui::SmallButton(ICON_LC_PLUS " Add Set Param"))
+				{ ev.setParams.push_back(""); ev.setValues.resize(ev.setParams.size() * 4, 0.0f); ch = true; }
+				ImGui::TreePop();
+			}
+			ImGui::PopID();
+		}
+		if (killE >= 0) { m->liveEvents.erase(m->liveEvents.begin() + killE); ch = true; }
+		if (ImGui::Button(ICON_LC_PLUS " Add Event", ImVec2(-1, 0)))
+		{
+			nuke::LiveEvent ev;
+			ev.name = "event" + std::to_string((int)m->liveEvents.size());
+			m->liveEvents.push_back(ev); ch = true;
+		}
 	}
 
 	if (ImGui::CollapsingHeader("Sound"))
@@ -1024,6 +1482,8 @@ void EditorUI::OpenAssetEditor(const std::string& path)
 	{
 		w.mat = nuke::Material::LoadFromFile(path);
 		if (!w.mat) { ReleasePreview(w.pv); return; }
+		w.pv->orbit = true;   // the camera circles the sample, it never flies off it
+		w.pv->world->editorGrid = false;   // clean sky backdrop — no grid through the sample
 		w.pv->mr->meshGuid = kPreviewMeshGuid[0];
 		w.pv->mr->mesh = db->GetMesh(kPreviewMeshGuid[0]);
 		w.pv->mr->matGuid.clear();                 // preview draws our editing copy
@@ -1914,7 +2374,41 @@ void EditorUI::DrawAssetEditorBody(int i)
 				}
 				ImGui::EndChild();
 				ImGui::SameLine();
+				ImGui::BeginGroup();
+				// Toolbar over the preview (same idiom as the prefab gizmo bar): the trigger
+				// tool is a toggled icon button, the event picker sits next to it while armed.
+				// The trigger tool fires EVENTS and HIT REACTIONS alike: one list, one click.
+				std::vector<std::string> fireList;
+				for (const nuke::LiveEvent& fe : w.mat->liveEvents) fireList.push_back(fe.name);
+				for (const nuke::LiveHit& fh : w.mat->liveHits)
+					fireList.push_back("Hit: " + (fh.hitType.empty() ? std::string("(any)") : fh.hitType));
+				if (!fireList.empty())
+				{
+					// width from the GLYPH, not a magic number — the icon must never clip
+					const float tbw = std::max(34.0f, ImGui::CalcTextSize(ICON_LC_CROSSHAIR).x
+					                                + ImGui::GetStyle().FramePadding.x * 2.0f);
+					if (ToolBtn(ICON_LC_CROSSHAIR, "Trigger tool: click the sample to fire the picked event/hit at that spot",
+					            w.evtTool, tbw))
+						w.evtTool = !w.evtTool;
+					if (w.evtTool)
+					{
+						ImGui::SameLine();
+						if (w.evtSel < 0 || w.evtSel >= (int)fireList.size()) w.evtSel = 0;
+						ImGui::SetNextItemWidth(200);
+						if (ImGui::BeginCombo("##evtsel", fireList[w.evtSel].c_str()))
+						{
+							for (int e = 0; e < (int)fireList.size(); ++e)
+								if (ImGui::Selectable((fireList[e] + "##ev" + std::to_string(e)).c_str(), e == w.evtSel))
+									w.evtSel = e;
+							ImGui::EndCombo();
+						}
+					}
+				}
+				else w.evtTool = false;
 				DrawPreviewImage(*w.pv, ImGui::GetContentRegionAvail());
+				if (w.evtTool && ImGui::IsItemHovered() && ImGui::IsMouseClicked(0))
+					FireEventAtPreview(w);
+				ImGui::EndGroup();
 			}
 			else if (w.ext == ".numesh")
 			{

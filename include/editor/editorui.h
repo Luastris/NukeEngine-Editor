@@ -119,7 +119,9 @@ inline std::string LProp(const char* label, float col = 13.0f)
 	ImGui::AlignTextToFramePadding();
 	ImGui::TextUnformatted(label);
 	ImGui::SameLine(ImGui::GetFontSize() * col);
-	ImGui::SetNextItemWidth(ImGui::GetFontSize() * 15.0f);
+	// Clamp to the panel: a fixed 15em used to run past the edge of narrow docks.
+	ImGui::SetNextItemWidth(std::max(ImGui::GetFontSize() * 4.0f,
+		std::min(ImGui::GetFontSize() * 15.0f, ImGui::GetContentRegionAvail().x)));
 	return std::string("##") + label;
 }
 
@@ -466,6 +468,21 @@ public:
 	// Type-locked asset-reference picker (mesh/material/shader/texture) with a browser DnD
 	// target, locate/reset buttons and a filterable list. Returns true when the value changed.
 	bool AssetPicker(const char* label, std::string& guid, const std::string& kind, const std::string& defGuid = "");
+	// THE curve widget: interactive cubic-Hermite editor over flat (t, value, inTan, outTan)
+	// keys — inspector [[prop(widget="curve")]] lists and the tween easing draw this. Legacy
+	// (t, v) pairs upgrade in place. Callers scope it with a unique PushID. True on change.
+	// trig*: OPTIONAL keyframe triggers — times bound to key times (drag follows, delete
+	// kills), assigned on the selected key from `trigOptions` (material event names).
+	static bool CurveKeysEditor(std::vector<float>& keys, float vLo, float vHi, const char* emptyText,
+	                            std::vector<float>* trigT = nullptr,
+	                            std::vector<std::string>* trigEv = nullptr,
+	                            const std::vector<std::string>* trigOptions = nullptr);
+	// THE gradient widget: (t, r, g, b[, a]) stops drawn as a bar with draggable markers —
+	// inspector [[prop(widget="gradient")]] lists (rgb) and color tweens (rgba). True on change.
+	static bool GradientStopsEditor(std::vector<float>& stops, bool alpha,
+	                                std::vector<float>* trigT = nullptr,
+	                                std::vector<std::string>* trigEv = nullptr,
+	                                const std::vector<std::string>* trigOptions = nullptr);
 	bool DrawLiveMaterialSections(nuke::Material* m);   // .numat editor: LiveMaterial sections (states/hits/sound/surface)
 	void RegisterInspectorOverrides();
 	void DrawMeshRendererInspector(nuke::MeshRenderer* mr);
@@ -544,6 +561,11 @@ public:
 		bool    gizmoBusy = false;
 		float   flyMul = 1.0f;              // camera speed multiplier (wheel while RMB-flying)
 		float   flyMulHud = 0.0f;           // seconds left to show the speed HUD after a change
+		// Material editor: RMB ORBITS the framed subject (wheel = dolly, MMB = shift the
+		// pivot) instead of the free-fly camera the mesh/prefab windows keep.
+		bool    orbit = false;
+		// Static shot: no camera input at all (inspector material preview — just a look).
+		bool    locked = false;
 	};
 	std::vector<PreviewWorld*> pvPool;      // every created scene (in use or free)
 	PreviewWorld* AcquirePreview();
@@ -566,6 +588,10 @@ public:
 
 	struct AssetEditorWin
 	{
+		// Trigger tool (material editor): pick an event, click the sample -> raycast fire.
+		bool evtTool = false;
+		int  evtSel  = 0;
+
 		std::string path, ext;              // full path + lowercase extension
 		void* host = nullptr;               // detached mode: the editor-owned OS window (NukeUI host)
 		bool detached = false;              // PER-WINDOW mode (drag-driven); pref = default for new editors
@@ -695,7 +721,10 @@ public:
 	void DrawBlendEditor(AssetEditorWin& w);         // .nublend canvas (blendeditor.cpp)
 	void DrawSkeletonEditor(AssetEditorWin& w);      // .nuskel sockets/groups/IK rig (skeleteditor.cpp)
 	void DrawRagdollEditor(AssetEditorWin& w);       // .nurag capsules/joints (ragdolleditor.cpp)
-	void DrawBoneMapEditor(AssetEditorWin& w);       // .nubonemap name pairs (skeleteditor.cpp)
+	void DrawBoneMapEditor(AssetEditorWin& w);
+	// Trigger-tool click: unproject the mouse, raycast the preview mesh, fire the picked
+	// event AT the hit (UV or world point, by the space of the event's target mask).
+	void FireEventAtPreview(AssetEditorWin& w);       // .nubonemap name pairs (skeleteditor.cpp)
 	// Shared timeline widgets (sequencer.cpp), reused by the stage-10 editors:
 	// sorted-upsert of a key, a diamond-key row, and the per-component curve strip.
 	static void UpsertSharedKey(std::vector<nuke::AnimClip::Key>& keys, double t, const float v[4]);
