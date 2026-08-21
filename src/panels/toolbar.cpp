@@ -314,6 +314,10 @@ void EditorUI::Draw()
 	if (!projectHubMode)
 		PumpBootLoad();   // background project load + the async-world pump (edit mode)
 
+	// Pointer gate: closed until the viewport panel proves the mouse is over the game view
+	// (or the game owns the cursor) later this frame — a hidden viewport keeps it closed.
+	nuke::AppInstance::GetSingleton()->gamePointerActive = false;
+
 	// Dev hooks: env vars fire packaging/build/play actions a few seconds after boot.
 	{
 		static int pkgDelay = -2;

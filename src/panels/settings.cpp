@@ -327,6 +327,9 @@ void EditorUI::winSettings()
 				{
 					if (ec) break;
 					if (bfs::is_directory(it->path())) continue;
+					// Cell files of a split-saved streamed world are internals, not worlds.
+					const std::string rel = bfs::relative(it->path(), root, ec).generic_string();
+					if (rel.find(".cells/") != std::string::npos) continue;
 					if (it->path().extension() == ".nuworld")
 						worlds.push_back(bfs::relative(it->path(), root, ec).string());
 				}

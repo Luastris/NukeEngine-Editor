@@ -139,6 +139,8 @@ private:
 	uint64_t sceneRTId = 0;   // render target the editor camera draws into
 	uint64_t camPreviewRT = 0;          // small RT for the selected camera's preview
 	nuke::Camera* previewCam = nullptr; // camera currently retargeted to the preview RT
+	long previewCamAtomId = 0;          // ...validated by STABLE id: stream parking can delete
+	                                    // the atom between frames (dangling Camera* = crash)
 	bool pieUseEditorCam = false;   // PIE possess: false = game main camera, true = editor camera
 	std::map<std::string, bool> uiOpen; // persisted CollapsingHeader states (Components + per atom/component)
 	long pendingSelectId = 0;           // atom id to reselect after load (from editor_state.json; recursive)

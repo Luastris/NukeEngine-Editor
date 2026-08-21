@@ -7,6 +7,7 @@
 #include <API/Model/Environment.h>
 #include <API/Model/Prefab.h>
 #include <API/Model/Surface.h>   // trigger tool: preview hit reactions (Hit + DrainHits)
+#include <set>
 #include <API/Model/Audio.h>
 #include <input/Input.h>
 #include <interface/AssetCreators.h>   // module-supplied asset editors
@@ -673,6 +674,8 @@ bool EditorUI::DrawLiveMaterialSections(nuke::Material* m)
 	bool ch = false;
 	ImGui::Separator();
 	ImGui::TextDisabled("LiveMaterial — surface behaviour (all sections optional)");
+	// Labels sit to the RIGHT of widgets: reserve room for them or they clip past the window.
+	ImGui::PushItemWidth(-150);
 
 	if (ImGui::CollapsingHeader("Condition States"))
 	{
@@ -703,6 +706,19 @@ bool EditorUI::DrawLiveMaterialSections(nuke::Material* m)
 				ch |= ImGui::DragFloat("Top Only", &s.topOnly, 0.01f, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 				if (ImGui::IsItemHovered()) ImGui::SetTooltip("1 = the state settles on up-facing surfaces only (snow, dust)");
 				ch |= ImGui::DragFloat("Displace", &s.displace, 0.005f, 0.0f, 1.0f, "%.3f m", ImGuiSliderFlags_AlwaysClamp);
+				ImGui::SeparatorText("Spatial (terrain)");
+				ch |= ImGui::DragFloat("Height Min", &s.hMin, 0.5f, -10000.0f, 10000.0f, "%.1f");
+				ch |= ImGui::DragFloat("Height Max", &s.hMax, 0.5f, -10000.0f, 10000.0f, "%.1f");
+				if (ImGui::IsItemHovered()) ImGui::SetTooltip("World-Y band the state lives in (snowline). Max <= Min = everywhere");
+				ch |= ImGui::DragFloat("Height Feather", &s.hFeather, 0.25f, 0.1f, 200.0f, "%.1f", ImGuiSliderFlags_AlwaysClamp);
+				ch |= ImGui::DragFloat("Windward", &s.windward, 0.01f, -2.0f, 2.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Wind-facing bias: >0 = leeward slopes first (snow/dust drifts), <0 = windward, 0 = off");
+				{
+					char cbuf[64]; strncpy(cbuf, s.couple.c_str(), 63); cbuf[63] = 0;
+					if (ImGui::InputTextWithHint("Couple To", "wet (mud grows where wet)", cbuf, sizeof(cbuf)))
+					{ s.couple = cbuf; ch = true; }
+					if (ImGui::IsItemHovered()) ImGui::SetTooltip("This state's weight rides ANOTHER state's local weight (mud couples to wet)");
+				}
 				ImGui::TreePop();
 			}
 			ImGui::PopID();
@@ -1102,7 +1118,12 @@ bool EditorUI::DrawLiveMaterialSections(nuke::Material* m)
 		ch |= ImGui::DragFloat("Var Hue", &m->liveSurface.varHue, 0.01f, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 	}
 
-	if (ch) m->Resolve();   // rebind state/height textures after guid edits
+	ImGui::PopItemWidth();
+	if (ch)
+	{
+		m->Resolve();          // rebind state/height textures after guid edits
+		m->PushRenderProps();  // g_Disp/g_Var/g_UVT track the inspector live in the preview
+	}
 	return ch;
 }
 
@@ -2405,6 +2426,33 @@ void EditorUI::DrawAssetEditorBody(int i)
 					}
 				}
 				else w.evtTool = false;
+				// State simulator: toolbar button (next to the trigger tool) — sliders drive
+				// the GLOBAL Surface conditions live; preview + open world react immediately.
+				if (!w.mat->liveStates.empty())
+				{
+					ImGui::SameLine();
+					const float sbw = std::max(34.0f, ImGui::CalcTextSize(ICON_LC_CLOUD_DRIZZLE).x
+					                                + ImGui::GetStyle().FramePadding.x * 2.0f);
+					if (ImGui::Button(ICON_LC_CLOUD_DRIZZLE, ImVec2(sbw, 0)))
+						ImGui::OpenPopup("##condsim");
+					if (ImGui::IsItemHovered()) ImGui::SetTooltip("State simulator: drive the wet/snow/... conditions live");
+					if (ImGui::BeginPopup("##condsim"))
+					{
+						// PREVIEW channel: overrides reads, never serialized with the world.
+						std::set<std::string> seen;
+						for (const nuke::LiveState& s : w.mat->liveStates)
+						{
+							if (s.state.empty() || !seen.insert(s.state).second) continue;
+							float v = (float)nuke::Surface::Condition(s.state);
+							ImGui::SetNextItemWidth(160);
+							if (ImGui::SliderFloat(s.state.c_str(), &v, 0.0f, 1.0f, "%.2f"))
+								nuke::Surface::SetConditionPreview(s.state, v);
+						}
+						if (ImGui::Button("Clear All", ImVec2(-1, 0)))
+							nuke::Surface::ClearConditionPreviews();
+						ImGui::EndPopup();
+					}
+				}
 				DrawPreviewImage(*w.pv, ImGui::GetContentRegionAvail());
 				if (w.evtTool && ImGui::IsItemHovered() && ImGui::IsMouseClicked(0))
 					FireEventAtPreview(w);

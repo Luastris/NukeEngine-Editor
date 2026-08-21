@@ -390,8 +390,15 @@ void EditorUI::winRender()
 		else
 			ImGui::Text("No scene texture.");
 
-		// Selected-camera preview overlay (bottom-right of the viewport).
-		if (previewCam) { previewCam->renderTarget = 0; previewCam = nullptr; }   // release last frame's
+		// Selected-camera preview overlay (bottom-right of the viewport). Last frame's camera
+		// resolves by STABLE atom id — stream parking may have deleted it since.
+		if (previewCam)
+		{
+			nuke::World* pw = AppInstance::GetSingleton()->currentWorld;
+			nuke::Atom* pa = pw ? pw->GetById(previewCamAtomId) : nullptr;
+			if (nuke::Camera* pc = pa ? pa->GetComponent<nuke::Camera>() : nullptr) pc->renderTarget = 0;
+			previewCam = nullptr; previewCamAtomId = 0;
+		}
 		{
 			Atom* sel = AppInstance::GetSingleton()->selectedInHieararchy;
 			Camera* selCam = sel ? sel->GetComponent<Camera>() : nullptr;
@@ -412,6 +419,7 @@ void EditorUI::winRender()
 					if (camPreviewRT == 0) camPreviewRT = r->createRenderTarget(256, 144);
 					selCam->renderTarget = camPreviewRT;   // World::Render draws it here next pass
 					previewCam = selCam;
+					previewCamAtomId = (long)sel->id.id;
 					ptex = r->getRenderTargetTexture(camPreviewRT);
 				}
 
@@ -666,11 +674,16 @@ void EditorUI::winRender()
 				{ PushUndo(label, u, r, true); };
 			ImVec2 fmin = ImGui::GetItemRectMin(), fsz = ImGui::GetItemRectSize();
 			ImVec2 fmp  = ImGui::GetMousePos();
-			const bool over = !possessed && editorCam && editorCam->transform
-			               && fsz.x > 0.0f && fsz.y > 0.0f
+			const bool inRect = fsz.x > 0.0f && fsz.y > 0.0f
 			               && fmp.x >= fmin.x && fmp.y >= fmin.y
 			               && fmp.x < fmin.x + fsz.x && fmp.y < fmin.y + fsz.y
-			               && ImGui::IsWindowHovered() && !ImGuizmo::IsUsing() && !s_marqueeLive;
+			               && ImGui::IsWindowHovered();
+			// Game pointer gate (reset each frame in the toolbar): clicks feed gameplay input
+			// only over the game view — or whenever the game owns the cursor (hidden/locked),
+			// where the mouse position is meaningless for hover tests.
+			fapp->gamePointerActive = inRect || (fapp->render && fapp->render->getCursorMode() != 0);
+			const bool over = !possessed && editorCam && editorCam->transform
+			               && inRect && !ImGuizmo::IsUsing() && !s_marqueeLive;
 			fapp->editorRayValid = over;
 			if (over)
 			{

@@ -59,6 +59,19 @@ bool EditorUI::ExtVisible(const std::string& ext)
 	if (ext == ".nuprefab") return fPrefab;
 	return true;   // scripts, worlds, unknown — always shown
 }
+// "<world>.cells" folders are split-save internals of streamed worlds (per-cell files +
+// hlod.bin) — part of the world asset, not browsable content.
+static bool IsCellsInternal(const std::string& name)
+{
+	std::string s = name; for (char& c : s) c = (char)tolower((unsigned char)c);
+	return s.size() > 6 && s.compare(s.size() - 6, 6, ".cells") == 0;
+}
+static bool PathInCells(const bfs::path& p)
+{
+	for (const auto& part : p) if (IsCellsInternal(part.string())) return true;
+	return false;
+}
+
 bool EditorUI::SearchMatch(const std::string& name)
 {
 	std::string q = browserSearch; for (char& c : q) c = (char)tolower((unsigned char)c);
@@ -79,6 +92,7 @@ void EditorUI::BrowserTree(const std::string& dir)
 		shown.insert(lowName(name));
 		if (bfs::is_directory(de.path()))
 		{
+			if (IsCellsInternal(name)) continue;
 			if (ImGui::TreeNode((std::string(ICON_LC_FOLDER) + " " + name).c_str()))
 			{
 				BrowserTree(de.path().string());
@@ -107,7 +121,12 @@ void EditorUI::BrowserTree(const std::string& dir)
 			if (r.size() <= pfx.size()) continue;
 			std::string tail = r.substr(pfx.size());
 			size_t sl = tail.find('/');
-			if (sl != std::string::npos) { pakDirs.insert(tail.substr(0, sl)); continue; }
+			if (sl != std::string::npos)
+			{
+				std::string d = tail.substr(0, sl);
+				if (!IsCellsInternal(d)) pakDirs.insert(d);
+				continue;
+			}
 			if (shown.count(lowName(tail))) continue;
 			std::string ext = bfs::path(tail).extension().string();
 			for (char& c : ext) c = (char)tolower((unsigned char)c);
@@ -1160,6 +1179,7 @@ void EditorUI::winBrowser()
 		for (auto& de : bfs::recursive_directory_iterator(cwd, ec))
 		{
 			if (bfs::is_directory(de.path())) continue;
+			if (PathInCells(de.path())) continue;
 			std::string name = de.path().filename().string();
 			std::string ext  = de.path().extension().string();
 			for (char& c : ext) c = (char)tolower((unsigned char)c);
@@ -1173,6 +1193,7 @@ void EditorUI::winBrowser()
 		{
 			bool dir = bfs::is_directory(de.path());
 			std::string name = de.path().filename().string();
+			if (dir && IsCellsInternal(name)) continue;
 			std::string ext  = dir ? "" : de.path().extension().string();
 			for (char& c : ext) c = (char)tolower((unsigned char)c);
 			if (!dir && !ExtVisible(ext)) continue;
@@ -1199,6 +1220,7 @@ void EditorUI::winBrowser()
 			std::string tail = r.substr(pfx.size());
 			if (searching)
 			{
+				if (PathInCells(bfs::path(tail))) continue;
 				std::string name = bfs::path(tail).filename().string();
 				std::string ext  = bfs::path(name).extension().string();
 				for (char& c : ext) c = (char)tolower((unsigned char)c);
@@ -1211,7 +1233,7 @@ void EditorUI::winBrowser()
 			if (sl != std::string::npos)   // a subfolder at this level
 			{
 				std::string name = tail.substr(0, sl);
-				if (have.count(lowName(name))) continue;
+				if (IsCellsInternal(name) || have.count(lowName(name))) continue;
 				have.insert(lowName(name));
 				entries.push_back({ name, "pak://" + pfx + name, "", true, ICON_LC_FOLDER, true });
 			}
