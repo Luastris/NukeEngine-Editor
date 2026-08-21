@@ -232,7 +232,8 @@ void EditorUI::winConsole()
 			const nuke::LogEntry& e = *vis[i];
 			ImGui::PushID((int)(e.id & 0x7fffffff));
 			ImGui::PushStyleColor(ImGuiCol_Text, kLvColor[e.level]);
-			std::string row = std::string(kLvIcon[e.level]) + "  ";
+			char stamp[32]; std::snprintf(stamp, sizeof(stamp), "%8.3f  ", e.time);   // s since process start
+			std::string row = std::string(kLvIcon[e.level]) + "  " + stamp;
 			if (e.count > 1) row += "x" + std::to_string(e.count) + "  ";
 			if (!e.tag.empty()) row += "[" + e.tag + "]  ";
 			row += e.text;

@@ -441,6 +441,7 @@ void InitInput(KeyBoard *keyboard){
 
 int main(int argc, char** argv)
 {
+	nuke::Log::CaptureStd();   // FIRST: every later line carries its process-uptime stamp + lands in the Console panel
 	// Prepare the crash-bundle paths BEFORE the host filters install: they call WriteBundle.
 	nuke::CrashReport::Install("NukeEngine-Editor");
 #ifdef _WIN32
@@ -451,7 +452,6 @@ int main(int argc, char** argv)
 #else
 	NukeInstallCrashSignals();                     // symbolized stack on any crash/abort
 #endif
-	nuke::Log::CaptureStd();   // must precede any boot logging so it lands in the Console panel
 
 	// Absolutize the project/archive argument against the ORIGINAL cwd, before the cwd change below.
 	std::string projectArg, archiveArg;

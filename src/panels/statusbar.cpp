@@ -1,5 +1,6 @@
 // Bottom viewport side-bar: frame stats, backend, world counters, memory and StatusBar fields.
 // Fields carrying a progress value are treated as background jobs.
+#include <algorithm>
 #include <editor/editorui.h>
 #include <API/Model/StatusBar.h>
 #include <API/Model/Jobs.h>
@@ -99,27 +100,47 @@ void EditorUI::StatusBarPanel()
 			ImGui::Text("%.0f MB", memMB);
 		}
 
-		// Plugin fields in first-set order; progress fields are pulled out as jobs.
+		// Fields: the timings metric, the jobs (progress), and ONE message slot for everything
+		// else — the highest-priority text (newest on a tie); a second message after "|" when
+		// there is room for it. Nothing else gets its own piece of the bar.
 		const std::vector<nuke::StatusBar::Entry> fields = nuke::StatusBar::All();
 		std::vector<const nuke::StatusBar::Entry*> jobs;
+		std::vector<const nuke::StatusBar::Entry*> msgs;
 		for (const auto& e : fields)
 		{
 			if (e.IsJob()) { jobs.push_back(&e); continue; }
 			if (e.text.empty()) continue;
-			sep();
-			ImGui::TextUnformatted(e.text.c_str());
-			// The timings field is the entry point to the profiler window — clicking the numbers
-			// is where anyone looks for the breakdown.
 			if (e.key == "profiler")
 			{
+				sep();
+				ImGui::TextUnformatted(e.text.c_str());
+				// The timings field is the entry point to the profiler window — clicking the
+				// numbers is where anyone looks for the breakdown.
 				if (ImGui::IsItemHovered())
 				{
 					ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
 					ImGui::SetTooltip("Click for the profiler breakdown");
 				}
 				if (ImGui::IsItemClicked()) { profilerOpen = true; profilerFocus = true; }
+				continue;
 			}
-			else if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", e.key.c_str());
+			msgs.push_back(&e);
+		}
+		std::sort(msgs.begin(), msgs.end(), [](const nuke::StatusBar::Entry* a, const nuke::StatusBar::Entry* b)
+		{ return a->priority != b->priority ? a->priority > b->priority : a->seq > b->seq; });
+		if (!msgs.empty())
+		{
+			sep();
+			ImGui::TextUnformatted(msgs[0]->text.c_str());
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", msgs[0]->key.c_str());
+			// Room left (jobs area reserved on the right): the runner-up after a divider.
+			const float room = ImGui::GetContentRegionAvail().x - 320.0f;
+			if (msgs.size() > 1 && room > ImGui::CalcTextSize(msgs[1]->text.c_str()).x + 24.0f)
+			{
+				ImGui::SameLine(); ImGui::TextDisabled("|"); ImGui::SameLine();
+				ImGui::TextDisabled("%s", msgs[1]->text.c_str());
+				if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", msgs[1]->key.c_str());
+			}
 		}
 
 		// ImGui animates a progress bar only for a negative, moving fraction.
