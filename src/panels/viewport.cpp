@@ -22,6 +22,7 @@ static ImVec2 s_marqueeStart;
 #include <interface/ComponentIcons.h>
 #include <API/Model/Foliage.h>
 #include <API/Model/Surface.h>
+#include <API/Model/Spline.h>   // engine spline: exact polyline for hit-tests, point-edit API
 #include <reflect/Reflect.h>            // WaterRiver type lives in the water plugin — reached by name
 #include <API/Model/DebugDraw.h>
 #include <functional>
@@ -36,7 +37,8 @@ static ImVec2 s_marqueeStart;
 // Set while the canvas 2D rect gizmo is hovered/dragged — click-pick must not steal those clicks.
 static bool s_canvasGizmoHot = false;
 
-// Same for WaterRiver spline handles: mutes click-pick and the transform gizmo.
+// Same for curve control-point handles (WaterRiver + Spline): mutes click-pick and the
+// transform gizmo.
 static bool s_riverGizmoHot = false;
 
 // Ray-picks the atom under a screen point inside the viewport image; null when nothing is hit.
@@ -436,25 +438,34 @@ void EditorUI::winRender()
 			}
 		}
 
-		// WaterRiver spline handles: LMB-drag moves a point (Shift = world XZ plane), Ctrl+Click
-		// deletes it or appends near the spline. Must run BEFORE the transform gizmo so a hot
-		// handle can mute it; the whole gesture is one undo entry.
+		// Curve control-point handles (WaterRiver + Spline): LMB-drag moves a point (Shift =
+		// world XZ plane), Ctrl+Click deletes it or appends near the curve. Must run BEFORE the
+		// transform gizmo so a hot handle can mute it; the whole gesture is one undo entry.
 		s_riverGizmoHot = false;
 		{
 			AppInstance* wapp = AppInstance::GetSingleton();
 			Atom* wsel = wapp->selectedInHieararchy;
-			// The WaterRiver type lives in the water plugin DLL: find it by type-name CONTENT
-			// (pointer compare fails across DLLs) and reach `points` through reflection.
+			// WaterRiver lives in the water plugin DLL: find it by type-name CONTENT (pointer
+			// compare fails across DLLs) and reach `points` through reflection. The engine
+			// Spline goes through the same reflected seam so the undo path stays uniform.
 			nuke::Component* riv = nullptr;
+			const char* rvType = nullptr;
 			std::vector<float>* rvPts = nullptr;
 			if (wsel && wapp->playState == 0)
 				for (nuke::Component* c : wsel->components)
-					if (c && c->name && !strcmp(c->name, "WaterRiver")) { riv = c; break; }
+				{
+					if (c && c->name && !strcmp(c->name, "WaterRiver")) { riv = c; rvType = "WaterRiver"; break; }
+					if (c && c->name && !strcmp(c->name, "Spline"))     { riv = c; rvType = "Spline"; break; }
+				}
 			if (riv)
-				if (nuke::TypeInfo* rti = nuke::Registry_Find("WaterRiver"))
+				if (nuke::TypeInfo* rti = nuke::Registry_Find(rvType))
 					for (nuke::Field& rf : rti->fields)
 						if (rf.name == "points" && rf.type == nuke::FT::FloatList && rf.addr)
 							{ rvPts = (std::vector<float>*)rf.addr(riv); break; }
+			// Engine spline extras: exact resampled polyline for the near-curve test, structured
+			// add/remove (Bezier keeps its anchor,handle,handle layout), atom scale applies.
+			nuke::Spline* rvSp = riv && !strcmp(rvType, "Spline") ? dynamic_cast<nuke::Spline*>(riv) : nullptr;
+			const bool rvBezier = rvSp && rvSp->type == 1;
 			// The stored component pointer is an identity check: a selection/world change mid-drag
 			// must abort instead of writing into a different river.
 			static bool rvDragging = false; static int rvDragIdx = -1; static void* rvDragRiv = nullptr;
@@ -504,18 +515,31 @@ void EditorUI::winRender()
 					}
 				};
 
-				// Control points atom-local -> world; rivers ignore atom scale (as does their Rebuild).
+				// Control points atom-local -> world. Rivers ignore atom scale (as does their
+				// Rebuild); Spline consumers build in scaled local space, so its handles apply it.
 				Vector3 P = riv->transform->globalPosition();
 				Quaternion Q = riv->transform->globalRotation();
 				Quaternion Qc(-Q.x, -Q.y, -Q.z, Q.w);   // conjugate: world -> atom-local
+				Vector3 S = rvSp ? riv->transform->globalScale() : Vector3(1, 1, 1);
+				auto toWorldPt = [&](const Vector3& lp)
+				{
+					Vector3 rl = Q.Rotate(Vector3(lp.x * S.x, lp.y * S.y, lp.z * S.z));
+					return Vector3(P.x + rl.x, P.y + rl.y, P.z + rl.z);
+				};
+				auto toLocalPt = [&](const Vector3& w)
+				{
+					Vector3 lp = Qc.Rotate(Vector3(w.x - P.x, w.y - P.y, w.z - P.z));
+					return Vector3(std::fabs(S.x) > 1e-9 ? lp.x / S.x : 0.0,
+					               std::fabs(S.y) > 1e-9 ? lp.y / S.y : 0.0,
+					               std::fabs(S.z) > 1e-9 ? lp.z / S.z : 0.0);
+				};
 				const int n = (int)(rvPts->size() / 3);
 				std::vector<ImVec2>  hpos(n);
 				std::vector<Vector3> wpos(n);
 				for (int i = 0; i < n; ++i)
 				{
 					Vector3 lp((*rvPts)[i * 3], (*rvPts)[i * 3 + 1], (*rvPts)[i * 3 + 2]);
-					Vector3 rl = Q.Rotate(lp);
-					wpos[i] = Vector3(P.x + rl.x, P.y + rl.y, P.z + rl.z);
+					wpos[i] = toWorldPt(lp);
 					if (!toScreen(wpos[i], hpos[i])) hpos[i] = ImVec2(-10000, -10000);
 				}
 				int hover = -1;
@@ -529,22 +553,23 @@ void EditorUI::winRender()
 				// One undo entry per gesture, resolved at undo time by atom id + type name +
 				// reflected field: component pointers dangle across undo-recreated atoms.
 				long aid = wsel->id.id;
+				std::string rvTypeName = rvType;
 				auto pushPointsUndo = [&](const std::vector<float>& before, const std::vector<float>& after)
 				{
 					if (before == after) return;
-					auto set = [](long id, const std::vector<float>& v)
+					auto set = [rvTypeName](long id, const std::vector<float>& v)
 					{
 						World* w = AppInstance::GetSingleton()->currentWorld;
 						Atom* a = w ? w->GetById(id) : nullptr;
-						nuke::TypeInfo* ti = a ? nuke::Registry_Find("WaterRiver") : nullptr;
+						nuke::TypeInfo* ti = a ? nuke::Registry_Find(rvTypeName.c_str()) : nullptr;
 						if (!ti) return;
 						for (nuke::Component* c : a->components)
-							if (c && c->name && !strcmp(c->name, "WaterRiver"))
+							if (c && c->name && !strcmp(c->name, rvTypeName.c_str()))
 								for (nuke::Field& f : ti->fields)
 									if (f.name == "points" && f.type == nuke::FT::FloatList && f.addr)
 										{ *(std::vector<float>*)f.addr(c) = v; return; }
 					};
-					PushUndo("Edit river points",
+					PushUndo("Edit curve points",
 						[set, aid, before]{ set(aid, before); },
 						[set, aid, after ]{ set(aid, after ); });
 					// TrackUndo must not ALSO record this gesture: drop its in-progress edit and
@@ -557,33 +582,51 @@ void EditorUI::winRender()
 				if (!rvDragging && ImGui::IsItemHovered() && !ImGuizmo::IsUsing() &&
 				    ImGui::GetIO().KeyCtrl && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
 				{
-					if (hover >= 0 && n > 2)   // keep at least 2 — below that there is no river
+					if (hover >= 0 && n > 2)
 					{
 						std::vector<float> before = *rvPts;
-						rvPts->erase(rvPts->begin() + hover * 3, rvPts->begin() + hover * 3 + 3);
+						if (rvSp)
+							rvSp->RemovePoint(hover);   // structured: Bezier drops anchor+handles, keeps minimums
+						else if (n > 2)                 // river: keep at least 2 — below that there is no river
+							rvPts->erase(rvPts->begin() + hover * 3, rvPts->begin() + hover * 3 + 3);
 						pushPointsUndo(before, *rvPts);
 						hover = -1; rvClickDone = true;
 					}
 					else if (hover < 0 && n >= 2)
 					{
-						// Hit-test against the same Catmull-Rom the module draws (coarse subdivision
-						// is enough for click precision).
 						bool nearSpline = false;
-						auto cpAt = [&](int i) -> const Vector3& { return wpos[std::min(std::max(i, 0), n - 1)]; };
-						for (int seg = 0; seg + 1 < n && !nearSpline; ++seg)
+						if (rvSp)
 						{
-							const Vector3& c0 = cpAt(seg - 1); const Vector3& c1 = cpAt(seg);
-							const Vector3& c2 = cpAt(seg + 1); const Vector3& c3 = cpAt(seg + 2);
-							for (int s2 = 0; s2 <= 8 && !nearSpline; ++s2)
+							// Exact: test against the component's own resampled polyline.
+							const std::vector<nuke::SplineSample>& ss = rvSp->LocalSamples();
+							for (size_t si = 0; si < ss.size() && !nearSpline; ++si)
 							{
-								const double u = s2 / 8.0, u2 = u * u, u3 = u2 * u;
-								Vector3 cp(0.5 * (2.0 * c1.x + (-c0.x + c2.x) * u + (2.0 * c0.x - 5.0 * c1.x + 4.0 * c2.x - c3.x) * u2 + (-c0.x + 3.0 * c1.x - 3.0 * c2.x + c3.x) * u3),
-								           0.5 * (2.0 * c1.y + (-c0.y + c2.y) * u + (2.0 * c0.y - 5.0 * c1.y + 4.0 * c2.y - c3.y) * u2 + (-c0.y + 3.0 * c1.y - 3.0 * c2.y + c3.y) * u3),
-								           0.5 * (2.0 * c1.z + (-c0.z + c2.z) * u + (2.0 * c0.z - 5.0 * c1.z + 4.0 * c2.z - c3.z) * u2 + (-c0.z + 3.0 * c1.z - 3.0 * c2.z + c3.z) * u3));
 								ImVec2 sp;
-								if (!toScreen(cp, sp)) continue;
+								if (!toScreen(toWorldPt(Vector3(ss[si].p[0], ss[si].p[1], ss[si].p[2])), sp)) continue;
 								float dx = mp.x - sp.x, dy = mp.y - sp.y;
 								nearSpline = (dx * dx + dy * dy < 14.0f * 14.0f);
+							}
+						}
+						else
+						{
+							// Hit-test against the same Catmull-Rom the water module draws (coarse
+							// subdivision is enough for click precision).
+							auto cpAt = [&](int i) -> const Vector3& { return wpos[std::min(std::max(i, 0), n - 1)]; };
+							for (int seg = 0; seg + 1 < n && !nearSpline; ++seg)
+							{
+								const Vector3& c0 = cpAt(seg - 1); const Vector3& c1 = cpAt(seg);
+								const Vector3& c2 = cpAt(seg + 1); const Vector3& c3 = cpAt(seg + 2);
+								for (int s2 = 0; s2 <= 8 && !nearSpline; ++s2)
+								{
+									const double u = s2 / 8.0, u2 = u * u, u3 = u2 * u;
+									Vector3 cp(0.5 * (2.0 * c1.x + (-c0.x + c2.x) * u + (2.0 * c0.x - 5.0 * c1.x + 4.0 * c2.x - c3.x) * u2 + (-c0.x + 3.0 * c1.x - 3.0 * c2.x + c3.x) * u3),
+									           0.5 * (2.0 * c1.y + (-c0.y + c2.y) * u + (2.0 * c0.y - 5.0 * c1.y + 4.0 * c2.y - c3.y) * u2 + (-c0.y + 3.0 * c1.y - 3.0 * c2.y + c3.y) * u3),
+									           0.5 * (2.0 * c1.z + (-c0.z + c2.z) * u + (2.0 * c0.z - 5.0 * c1.z + 4.0 * c2.z - c3.z) * u2 + (-c0.z + 3.0 * c1.z - 3.0 * c2.z + c3.z) * u3));
+									ImVec2 sp;
+									if (!toScreen(cp, sp)) continue;
+									float dx = mp.x - sp.x, dy = mp.y - sp.y;
+									nearSpline = (dx * dx + dy * dy < 14.0f * 14.0f);
+								}
 							}
 						}
 						if (nearSpline)
@@ -596,11 +639,16 @@ void EditorUI::winRender()
 								if (tHit > 0.0)
 								{
 									Vector3 hit(ro.x + rd.x * tHit, ro.y + rd.y * tHit, ro.z + rd.z * tHit);
-									Vector3 lp = Qc.Rotate(Vector3(hit.x - P.x, hit.y - P.y, hit.z - P.z));
+									Vector3 lp = toLocalPt(hit);
 									std::vector<float> before = *rvPts;
-									rvPts->push_back((float)lp.x);
-									rvPts->push_back((float)lp.y);
-									rvPts->push_back((float)lp.z);
+									if (rvSp)
+										rvSp->AddPoint(lp);   // Bezier appends handle,handle,anchor
+									else
+									{
+										rvPts->push_back((float)lp.x);
+										rvPts->push_back((float)lp.y);
+										rvPts->push_back((float)lp.z);
+									}
 									pushPointsUndo(before, *rvPts);
 									rvClickDone = true;
 								}
@@ -634,10 +682,25 @@ void EditorUI::winRender()
 						if (tHit > 0.0)
 						{
 							Vector3 hit(ro.x + rd.x * tHit, ro.y + rd.y * tHit, ro.z + rd.z * tHit);
-							Vector3 lp = Qc.Rotate(Vector3(hit.x - P.x, hit.y - P.y, hit.z - P.z));
+							Vector3 lp = toLocalPt(hit);
 							(*rvPts)[rvDragIdx * 3 + 0] = (float)lp.x;
 							(*rvPts)[rvDragIdx * 3 + 1] = (float)lp.y;
 							(*rvPts)[rvDragIdx * 3 + 2] = (float)lp.z;
+							// Bezier anchor carries its handles: shift them by the anchor's delta
+							// from the drag-start snapshot so the span's shape survives the move.
+							if (rvBezier && rvDragIdx % 3 == 0 && rvBefore.size() == rvPts->size())
+							{
+								const float dx = (*rvPts)[rvDragIdx * 3]     - rvBefore[rvDragIdx * 3];
+								const float dy = (*rvPts)[rvDragIdx * 3 + 1] - rvBefore[rvDragIdx * 3 + 1];
+								const float dz = (*rvPts)[rvDragIdx * 3 + 2] - rvBefore[rvDragIdx * 3 + 2];
+								for (int hb = rvDragIdx - 1; hb <= rvDragIdx + 1; hb += 2)
+									if (hb >= 0 && hb < n && hb % 3 != 0)
+									{
+										(*rvPts)[hb * 3]     = rvBefore[hb * 3] + dx;
+										(*rvPts)[hb * 3 + 1] = rvBefore[hb * 3 + 1] + dy;
+										(*rvPts)[hb * 3 + 2] = rvBefore[hb * 3 + 2] + dz;
+									}
+							}
 						}
 					}
 				}
@@ -648,8 +711,10 @@ void EditorUI::winRender()
 				{
 					if (hpos[i].x < -999.0f) continue;
 					const bool hot = (i == hover) || (rvDragging && i == rvDragIdx);
-					const float rad = hot ? 7.0f : 6.0f;
-					dl->AddCircleFilled(hpos[i], rad, hot ? IM_COL32(255, 200, 60, 255) : IM_COL32(80, 180, 255, 230));
+					const bool handle = rvBezier && (i % 3) != 0;   // Bezier tangent handle, not an anchor
+					const float rad = hot ? 7.0f : (handle ? 4.5f : 6.0f);
+					dl->AddCircleFilled(hpos[i], rad, hot ? IM_COL32(255, 200, 60, 255)
+					                    : (handle ? IM_COL32(140, 220, 255, 210) : IM_COL32(80, 180, 255, 230)));
 					dl->AddCircle(hpos[i], rad, IM_COL32(20, 20, 20, 255), 0, 1.5f);
 				}
 			}
