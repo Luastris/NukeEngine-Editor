@@ -54,6 +54,13 @@ void EditorUI::StatusBarPanel()
 		sep();
 		ImGui::Text("%d draws", draws);
 		ImGui::SameLine(); ImGui::TextDisabled("%d tris", tris);
+		int occlTracked = 0, occlCulled = 0;
+		if (r) r->getOcclusionStats(occlTracked, occlCulled);
+		if (occlTracked > 0)
+		{
+			ImGui::SameLine(); ImGui::TextDisabled("occl %d/%d", occlCulled, occlTracked);
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Hi-Z occlusion: draws held back / draws tagged (last camera)");
+		}
 
 		sep();
 		ImGui::Text("%d atoms", app->currentWorld ? CountAtoms(app->currentWorld->GetHierarchy()) : 0);

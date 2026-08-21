@@ -285,9 +285,15 @@ void EditorUI::Toolbar()
 		ImGui::EndDisabled();   // boot-load PIE lock
 
 		// RIGHT — camera projection (Perspective / Orthographic) + viewport draw mode (Solid / Wireframe)
-		float rightW = bw * 3 + st.ItemSpacing.x * 2;
+		float rightW = bw * 4 + st.ItemSpacing.x * 3;
 		ImGui::SameLine();
 		ImGui::SetCursorPosX(winW - rightW - 8.0f);
+		// Freeze culling (debug view): frustum + occlusion verdicts stay put while the camera
+		// moves; draws the occlusion-culled boxes in red.
+		if (ToolBtn(ICON_LC_SNOWFLAKE, app->freezeCulling ? "Freeze Culling: ON (click: resume)" : "Freeze Culling (debug: what the culling removes)",
+		            app->freezeCulling, bw))
+			app->freezeCulling = !app->freezeCulling;
+		ImGui::SameLine();
 		bool ortho = editorCam && editorCam->projection == nuke::Projection::Orthographic;
 		if (ToolBtn(ortho ? ICON_LC_PROPORTIONS : ICON_LC_BOXES,
 		            ortho ? "Orthographic (click: Perspective)" : "Perspective (click: Orthographic)", ortho, bw))

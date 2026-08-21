@@ -961,6 +961,7 @@ void EditorUI::winWorldSettings()
 		auto same = [](const World::Settings& a, const World::Settings& b) {
 			return a.shadowRes == b.shadowRes && a.shadowDistance == b.shadowDistance && a.shadowDepthBias == b.shadowDepthBias
 			    && a.shadowNormalBias == b.shadowNormalBias && a.shadowSoftness == b.shadowSoftness && a.frustumCull == b.frustumCull
+			    && a.occlusionCull == b.occlusionCull
 			    && a.gravity[0] == b.gravity[0] && a.gravity[1] == b.gravity[1] && a.gravity[2] == b.gravity[2]
 			    && a.fixedDt == b.fixedDt;
 		};
@@ -984,6 +985,8 @@ void EditorUI::winWorldSettings()
 		{
 		changed |= ImGui::Checkbox(LProp("Frustum Culling").c_str(), &s.frustumCull);
 		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Skip drawing objects outside the camera frustum (perf).\nTurn off if off-screen geometry must still render (e.g. reflections).");
+		changed |= ImGui::Checkbox(LProp("Occlusion Culling (Hi-Z)").c_str(), &s.occlusionCull);
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("GPU depth-pyramid occlusion over meshes and instanced chunks:\nobjects fully hidden behind others are not drawn. Toolbar: Freeze Culling shows what it removes.");
 		}
 		ImGui::SeparatorText("Physics");
 		{
