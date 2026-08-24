@@ -844,17 +844,28 @@ void EditorUI::winSettings()
 		}
 
 		// PROVENANCE: the LIVE merged map — which file defined each context/action/binding, and
-		// which layer won (asset < user). Conflicts: one control driving several actions in the
-		// same context, or one action fed by several files.
+		// which layer won (asset < user). A CONFLICT is only a FULL collision: two DIFFERENT
+		// actions on the same control in the same context, same phase AND same modifiers (and
+		// even that can be intended — the flag says merge/debounce, not error). One action
+		// across several controls/devices (WASD + a gamepad stick, all "Move") is COMPOSITION,
+		// never a conflict; several files feeding one action is the merge working as designed.
 		ImGui::SeparatorText("Live map provenance");
 		for (const nuke::InputContext& c : nuke::Input::ListContexts())
 		{
 			std::string clabel = c.name + "  [" + (c.source.empty() ? "code" : c.source) + "]";
 			if (!ImGui::TreeNode(clabel.c_str())) continue;
-			// control -> set of actions in THIS context (conflict = same control, several actions)
+			// (control | phase | modifiers) -> actions: >1 DIFFERENT actions = a full collision.
 			std::map<std::string, std::set<std::string>> byControl;
+			auto slotKey = [](const nuke::InputBinding& b, const std::string& ctl)
+			{
+				std::string key = ctl + "|" + std::to_string((int)b.phase) + "|";
+				std::vector<std::string> mods = b.modifiers;
+				std::sort(mods.begin(), mods.end());
+				for (const std::string& m : mods) { key += m; key += ','; }
+				return key;
+			};
 			for (const nuke::InputBinding& b : c.bindings)
-				for (const std::string& ctl : b.controls) byControl[ctl].insert(b.action);
+				for (const std::string& ctl : b.controls) byControl[slotKey(b, ctl)].insert(b.action);
 			std::map<std::string, std::set<std::string>> actionSources;
 			for (const nuke::InputBinding& b : c.bindings)
 				actionSources[b.action].insert(b.source.empty() ? "code" : b.source);
@@ -869,21 +880,23 @@ void EditorUI::winSettings()
 					ImGui::TextUnformatted(b.action.c_str());
 					if (actionSources[b.action].size() > 1 && actionSources[b.action].count("user") == 0)
 					{
+						// Informational, NOT a warning: multi-file composition is the design.
 						ImGui::SameLine();
-						ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), ICON_LC_TRIANGLE_ALERT);
-						if (ImGui::IsItemHovered()) ImGui::SetTooltip("Defined by several files — they all merge");
+						ImGui::TextDisabled(ICON_LC_LAYERS);
+						if (ImGui::IsItemHovered()) ImGui::SetTooltip("Composed from several files — they merge by design");
 					}
 					ImGui::TableNextColumn();
 					std::string ctls;
 					for (const std::string& ctl : b.controls) { if (!ctls.empty()) ctls += " + "; ctls += ctl; }
 					ImGui::TextUnformatted(ctls.c_str());
 					bool conflict = false;
-					for (const std::string& ctl : b.controls) if (byControl[ctl].size() > 1) conflict = true;
+					for (const std::string& ctl : b.controls) if (byControl[slotKey(b, ctl)].size() > 1) conflict = true;
 					if (conflict)
 					{
 						ImGui::SameLine();
 						ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.3f, 1.0f), ICON_LC_TRIANGLE_ALERT);
-						if (ImGui::IsItemHovered()) ImGui::SetTooltip("This control also drives another action in this context");
+						if (ImGui::IsItemHovered()) ImGui::SetTooltip("FULL collision: this control, phase and modifiers also drive a DIFFERENT action\n"
+						                                              "in this context. If intended, fine — otherwise rebind, or split by phase/modifier.");
 					}
 					ImGui::TableNextColumn();
 					const bool user = b.source == "user";
