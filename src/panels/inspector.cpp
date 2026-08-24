@@ -10,7 +10,7 @@
 #include <API/Model/Package.h>  // pickers list pak/mod content too
 #include <interface/Services.h> // csclass picker: scripting providers
 #include <service/iScript.h>
-#include <reflect/ReflectBind.h>   // Q4 multi-edit: per-field mirror across the selection
+#include <reflect/ReflectBind.h>   // multi-edit: per-field mirror across the selection
 #include <set>
 #include <memory>
 #include <cmath>
@@ -1673,7 +1673,7 @@ void EditorUI::winInspector()
 		strncpy(name, sltd->GetName().c_str(), 127); name[127] = 0;
 		if (ImGui::InputText("Name", name, 128)) sltd->SetName(name);
 
-		// Q1: a folder is pure organization — name + enabled only, transform locked to identity.
+		// a folder is pure organization — name + enabled only, transform locked to identity.
 		if (sltd->folder)
 		{
 			bool ena = sltd->enabled;
@@ -1895,7 +1895,7 @@ void EditorUI::winInspector()
 							const char* pl = nuke::PluginForType(cti->name);
 							if (pl && pl[0]) ImGui::Text(ICON_LC_PLUG " %s", pl);
 						}
-						// Q4 multi-edit: snapshot the fields, draw, then mirror ONLY the fields
+						// multi-edit: snapshot the fields, draw, then mirror ONLY the fields
 						// that changed to every selected atom carrying the same component type.
 						nuke::TypeInfo* mti = cmp->GetType();
 						std::vector<nuke::ReflectValue> mbefore;

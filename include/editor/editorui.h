@@ -1,4 +1,4 @@
-﻿#ifndef EDITORUI_H
+#ifndef EDITORUI_H
 #define EDITORUI_H
 // Editor UI panels: menu, hierarchy, inspector, browser, viewport, settings.
 
@@ -206,7 +206,7 @@ private:
 	// Hierarchy: reveal (open the branch + scroll to) a selection made outside the panel.
 	Atom* hierLastSel = nullptr;
 	bool  hierRevealPending = false;
-	// Q4 multi-select: the engine holds primary (`selectedInHieararchy`) + extras
+	// multi-select: the engine holds primary (`selectedInHieararchy`) + extras
 	// (`selectedExtra`); the panel keeps the shift anchor and the visible-row order of the
 	// LAST drawn frame (shift ranges resolve against it, browser-style).
 	long hierAnchorId = 0;
@@ -247,6 +247,7 @@ private:
 	int pakMethod = 3, pakLevel = 9;               // 0 store / 1 zlib / 2 zstd / 3 gdeflate (DirectStorage)
 	int modMethod = 0, modLevel = 0;
 	int pakBlockMB = 8;                            // pak block size: one DirectStorage request (texture mips split to fit)
+	nlohmann::json modSettings;                    // module-declared project settings (.nuproj "moduleSettings" object)
 	std::string gameIcon;                          // .ico (content-relative) stamped onto the shipped exe
 	std::string distPath;                          // build output ("" = default: <project>/dist; abs or project-relative)
 	uint64_t    iconPrevTex = 0;                   // live preview texture of gameIcon (settings window)
@@ -392,12 +393,12 @@ private:
 	int         pluginServiceFilter = 0;           // plugin window: 0=All, 1=Utility, 2+=service index
 	float camYaw = 0.0f, camPitch = 0.0f;   // editor camera look angles (radians)
 	float gizmoMatrix[16] = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };   // persistent during a gizmo drag
-	// Q5 grid snap: toolbar toggle + increments, persisted in the .nuproj. Ctrl INVERTS the
+	// grid snap: toolbar toggle + increments, persisted in the .nuproj. Ctrl INVERTS the
 	// toggle while held (temporary snap / temporary free); V holds surface snap while moving.
 	bool  snapEnabled = false;
 	float snapMove = 0.5f, snapRot = 15.0f, snapScale = 0.1f;
 	bool  gridVisible = true;   // the world grid (Y=0) drawn in the viewport; spacing = snapMove
-	// Q6 input maps: auto (every content .nuinput loads, historical) or an explicit list.
+	// input maps: auto (every content .nuinput loads, historical) or an explicit list.
 	bool inputMapsAuto = true;
 	std::vector<std::string> inputMapsList;   // content-relative paths, '/' separators
 	void ApplyInputMaps();                    // push the list into the engine + reload the live map
@@ -798,7 +799,7 @@ public:
 	// Clickable billboard icons for invisible entities (camera / light / probe / environment),
 	// overlaid on the viewport image in edit mode using the gizmo's view/proj.
 	void DrawEntityIcons(ImVec2 rmin, ImVec2 sz);
-	// ST-viz: the World Partition streaming overlay — XZ cell rectangles colored by state
+	// The World Partition streaming overlay — XZ cell rectangles colored by state
 	// (loaded / parked / cold / loading / HLOD) with per-cell sizes and a summary line.
 	void DrawStreamCells(ImVec2 rmin, ImVec2 sz);
 	bool streamVizVisible = false;   // toolbar toggle (session-only, like a debug view)
@@ -923,7 +924,7 @@ public:
 	void DuplicateSelectedAtom();
 	bool AtomClipboardAvailable();                                // clipboard holds an atom envelope
 
-	// ---- Q1/Q2/Q4 selection ops (selection.cpp) ------------------------------------------------
+	// ---- selection ops (selection.cpp) ------------------------------------------------
 	void HierSelect(Atom* a);                    // plain click: collapse to a single selection
 	void HierToggle(Atom* a);                    // ctrl-click: add/remove; primary follows
 	void HierRange(Atom* a, bool additive);      // shift(+ctrl) click: anchor range over hierRowsPrev
@@ -934,8 +935,8 @@ public:
 	void CutSelection();
 	void PasteAtoms();                           // single or multi envelope
 	void SetSelectionEnabled(bool on);           // context toggle over the whole selection
-	Atom* CreateFolderAtom(Atom* parent);        // Q1: folder node (undoable, selected)
-	void GroupSelection(bool asFolder);          // Q2: Ctrl+G — new parent at the bounds center
+	Atom* CreateFolderAtom(Atom* parent);        // folder node (undoable, selected)
+	void GroupSelection(bool asFolder);          // Ctrl+G — new parent at the bounds center
 	void UngroupSelection();                     // children out (world poses kept), shell removed
 	void RemoveComponent(Atom* a, Component* c);                  // inspector: remove a component (undoable)
 	void MoveComponent(Atom* src, Component* c, Atom* dst);       // DnD: move a component to another atom (undoable)

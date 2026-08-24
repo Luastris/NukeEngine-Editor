@@ -2,7 +2,7 @@
 #include <editor/editorui.h>
 #include <API/Model/PostProcess.h>
 #include <API/Model/Layers.h>        // render-layer slot names persist in the .nuproj
-#include <input/Input.h>             // Q6: explicit input-map list
+#include <input/Input.h>             // explicit input-map list
 #include <iterator>
 #include <iostream>
 #include <cstring>
@@ -27,7 +27,7 @@ std::string EditorUI::EarlyProjectService(const std::string& service)
 }
 
 // Write the .nuproj manifest.
-// Q6: push the enabled-map list into the engine filter. The filter gates the content SCAN,
+// push the enabled-map list into the engine filter. The filter gates the content SCAN,
 // so newly excluded/included files take full effect on the next project load; the live
 // merged map keeps what it already loaded (bindings only ADD at runtime).
 void EditorUI::ApplyInputMaps()
@@ -44,6 +44,7 @@ void EditorUI::SaveProject()
 	j["content"]      = "content";          // relative to the project dir
 	// Pak compression method: 0 store / 1 zlib / 2 zstd.
 	j["pakMethod"] = pakMethod; j["pakLevel"] = pakLevel; j["pakBlockMB"] = pakBlockMB;
+	if (modSettings.is_object() && !modSettings.empty()) j["moduleSettings"] = modSettings;
 	j["modMethod"] = modMethod; j["modLevel"] = modLevel;
 	j["modSplit"]  = modSplitMode;   // 0 one file / 1 by content type / 2 size cap
 	j["modSplitCapMB"] = modSplitCapMB;
@@ -73,10 +74,10 @@ void EditorUI::SaveProject()
 	}
 	j["services"] = serviceChoices;
 	j["layers"] = nuke::Layers::All();   // render-layer slot names
-	// Q5 viewport snap (toggle + increments) — a project convention, not a machine preference.
+	// viewport snap (toggle + increments) — a project convention, not a machine preference.
 	j["snap"] = { {"on", snapEnabled}, {"move", snapMove}, {"rot", snapRot}, {"scale", snapScale},
 	              {"grid", gridVisible} };
-	// Q6 input maps: the key is ABSENT in auto mode (every .nuinput loads); present = explicit.
+	// input maps: the key is ABSENT in auto mode (every .nuinput loads); present = explicit.
 	if (!inputMapsAuto) j["inputMaps"] = inputMapsList;
 	// Serialize before opening the file: ofstream truncates on open, so a dump() throw would
 	// leave a zero-byte .nuproj. `replace` turns stray non-UTF-8 bytes into U+FFFD.
@@ -89,6 +90,7 @@ void EditorUI::SaveProject()
 	}
 	bfs::ofstream f{bfs::path(projectFile)};
 	if (f) f << out;
+	nuke::SetProjectManifest(out);   // shared pool: modules read their settings from it
 }
 // Read the .nuproj manifest into the editor state, applying render settings as it goes.
 void EditorUI::LoadProject()
@@ -98,6 +100,7 @@ void EditorUI::LoadProject()
 	if (!f) { SaveProject(); return; }   // first run: create a default .nuproj
 	nlohmann::json j = nlohmann::json::parse(f, nullptr, false);
 	if (j.is_discarded()) return;
+	nuke::SetProjectManifest(j.dump());   // shared pool: modules read their settings from it
 	startupWorld   = j.value("startupWorld", startupWorld);
 	projectName    = j.value("name", projectName);
 	unlinkOnDelete = j.value("unlinkOnDelete", false);
@@ -105,6 +108,8 @@ void EditorUI::LoadProject()
 	conflictMode    = j.value("conflictMode", 0);
 	pakMethod = j.value("pakMethod", 3); pakLevel = j.value("pakLevel", 9);
 	pakBlockMB = j.value("pakBlockMB", 8); if (pakBlockMB < 1) pakBlockMB = 1;
+	modSettings = j.contains("moduleSettings") && j["moduleSettings"].is_object()
+	            ? j["moduleSettings"] : nlohmann::json::object();
 	modMethod = j.value("modMethod", 0); modLevel = j.value("modLevel", 0);
 	modSplitMode  = j.value("modSplit", 0);
 	modSplitCapMB = j.value("modSplitCapMB", 512);

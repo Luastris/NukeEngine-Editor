@@ -1416,6 +1416,33 @@ void EditorUI::PackageProjectNow()
 				}
 			}
 			std::cout << "[Package]\t" << cooked << " document(s) cooked to binary" << std::endl;
+			// Module cook transforms (e.g. NukeAudio: lossless audio -> Vorbis): a module may
+			// rewrite a shipping file under the same pak name; the manifest carries its settings.
+			{
+				std::string projJson;
+				{
+					bfs::ifstream pf(bfs::path(projFile), std::ios::binary);
+					if (pf) projJson.assign(std::istreambuf_iterator<char>(pf), std::istreambuf_iterator<char>());
+				}
+				int transformed = 0;
+				for (auto& fp : files)
+				{
+					std::string tout, trel;
+					for (auto& m : nuke::GetModules())
+					{
+						if (!m || !m->loaded || nuke::ModuleAbi(m.get()) < 5) continue;
+						if (!m->cookTransform(fp.first.c_str(), fp.second.c_str(), projJson.c_str(), trel, tout)) continue;
+						if (!trel.empty()) fp.first = trel;   // format change ships under its own name
+						const bfs::path o = cookDir / fp.first;
+						boost::system::error_code tec;
+						bfs::create_directories(o.parent_path(), tec);
+						bfs::ofstream of(o, std::ios::binary | std::ios::trunc);
+						if (of) { of.write(tout.data(), (std::streamsize)tout.size()); of.close(); fp.second = o.string(); ++transformed; }
+						break;
+					}
+				}
+				if (transformed) std::cout << "[Package]\t" << transformed << " file(s) cook-transformed by modules" << std::endl;
+			}
 		}
 		bool ok = !files.empty()
 		       && Package::Create(files, (dist / "content" / "game.nupak").string(), method, level,

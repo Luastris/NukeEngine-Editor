@@ -1,4 +1,4 @@
-// Multi-selection ops (Q1/Q2/Q4): hierarchy folders, grouping, and every context op applied
+// Multi-selection ops: hierarchy folders, grouping, and every context op applied
 // to the WHOLE selection as ONE undo step. The engine holds the selection (primary +
 // selectedExtra ids); the shift anchor and row order live on EditorUI (hierarchy.cpp fills them).
 #include <editor/editorui.h>

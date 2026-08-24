@@ -134,7 +134,7 @@ void EditorUI::Toolbar()
 		if (ImGui::BeginPopup("##nuke-create"))
 		{
 			if (ImGui::MenuItem(ICON_LC_SQUARE_DASHED " Empty"))  SpawnEmpty();
-			if (ImGui::MenuItem(ICON_LC_FOLDER " Folder"))        CreateFolderAtom(nullptr);   // Q1
+			if (ImGui::MenuItem(ICON_LC_FOLDER " Folder"))        CreateFolderAtom(nullptr);
 			if (ImGui::MenuItem(ICON_LC_BOX    " Cube"))   SpawnPrimitive("Cube",   "builtin:cube");
 			if (ImGui::MenuItem(ICON_LC_CIRCLE " Sphere")) SpawnPrimitive("Sphere", "builtin:sphere");
 			if (ImGui::MenuItem(ICON_LC_SQUARE " Plane"))  SpawnPrimitive("Plane",  "builtin:plane");
@@ -216,7 +216,7 @@ void EditorUI::Toolbar()
 		            worldMode ? "World space (X)" : "Local space (X)", false, bw))
 			app->manipulationWorld = !app->manipulationWorld;
 
-		// Q5 grid snap: click toggles, right-click opens the increments (persisted per project).
+		// grid snap: click toggles, right-click opens the increments (persisted per project).
 		ImGui::SameLine();
 		if (ToolBtn(ICON_LC_MAGNET, snapEnabled ? "Snap ON (Ctrl = free)\nRight-click: increments"
 		                                        : "Snap OFF (Ctrl = snap)\nRight-click: increments",
@@ -334,7 +334,7 @@ void EditorUI::Draw()
 		static bool pkgSkipBuild = false;   // NUKE_PACKAGE=2: package as-built (probe runs)
 		if (pkgDelay == -2)
 		{
-			// NUKE_STREAM_VIZ=1: boot with the ST-viz streaming overlay on (probe runs).
+			// NUKE_STREAM_VIZ=1: boot with the streaming overlay on (probe runs).
 			if (const char* sv = std::getenv("NUKE_STREAM_VIZ"))
 				streamVizVisible = *sv == '1';
 			const char* e = std::getenv("NUKE_PACKAGE");

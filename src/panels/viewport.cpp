@@ -8,7 +8,7 @@ static bool s_camLookCapture = false;   // capture currently engaged
 static float  s_flyMul = 1.0f;
 static double s_flyMulShowUntil = 0.0;   // brief on-screen readout after a change
 #include <editor/editorui.h>
-// Q3 marquee rect-select: armed by a press on empty space, live once the drag passes threshold.
+// marquee rect-select: armed by a press on empty space, live once the drag passes threshold.
 static bool  s_marqueeArm = false, s_marqueeLive = false;
 static ImVec2 s_marqueeStart;
 #include "nukeui.h"
@@ -23,7 +23,7 @@ static ImVec2 s_marqueeStart;
 #include <API/Model/Foliage.h>
 #include <API/Model/Surface.h>
 #include <API/Model/Spline.h>   // engine spline: exact polyline for hit-tests, point-edit API
-#include <API/Model/WorldStream.h>   // ST-viz: the streaming-cell overlay reads DebugCells
+#include <API/Model/WorldStream.h>   // the streaming-cell overlay reads DebugCells
 #include <API/Model/Decal.h>         // decal volumes: viewport icon + editor picking
 #include <reflect/Reflect.h>            // WaterRiver type lives in the water plugin — reached by name
 #include <API/Model/DebugDraw.h>
@@ -32,7 +32,7 @@ static ImVec2 s_marqueeStart;
 #include <algorithm>
 #include <cctype>
 #include <cstring>   // strcmp: cross-DLL type-name match
-#include <cstdio>    // snprintf: ST-viz overlay labels
+#include <cstdio>    // snprintf: streaming overlay labels
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/gtx/matrix_decompose.hpp>
 #include <glm/gtc/type_ptr.hpp>
@@ -554,7 +554,7 @@ void EditorUI::winRender()
 			// Entity icons must draw before the camera preview and the gizmo (edit mode only).
 			if (!possessed) DrawEntityIcons(imin, avail);
 			else            iconHits.clear();   // no stale clickable rects from the edit view
-			// ST-viz overlay: edit AND play (streaming actually runs in play — that is the
+			// Streaming overlay: edit AND play (streaming actually runs in play — that is the
 			// interesting view); hidden while possessed (the game owns the screen then).
 			if (!possessed && streamVizVisible) DrawStreamCells(imin, avail);
 		}
@@ -957,7 +957,7 @@ void EditorUI::winRender()
 		{
 			AppInstance* gapp = AppInstance::GetSingleton();
 			Atom* gsel = gapp->selectedInHieararchy;
-			// Q1: folders are pure organization — no gizmo, their transform stays identity.
+			// folders are pure organization — no gizmo, their transform stays identity.
 			if (!possessed && gsel && !gsel->folder && editorCam && gapp->manipulationMode != 0)
 			{
 				ImGuizmo::SetOrthographic(false);
@@ -999,20 +999,20 @@ void EditorUI::winRender()
 				                        : (gapp->manipulationMode == 2) ? ImGuizmo::ROTATE
 				                                                        : ImGuizmo::SCALE;
 				ImGuizmo::MODE gmode = (gop != ImGuizmo::SCALE && gapp->manipulationWorld != 0) ? ImGuizmo::WORLD : ImGuizmo::LOCAL;
-				// Q5: project snap settings drive the increments; holding Ctrl INVERTS the toggle
+				// project snap settings drive the increments; holding Ctrl INVERTS the toggle
 				// (temporary snap when off, temporary free when on). Rotate/scale snap RELATIVE
 				// increments (ImGuizmo); translate snaps ABSOLUTE to the world grid below.
 				float gsnapv   = (gop == ImGuizmo::TRANSLATE) ? snapMove : (gop == ImGuizmo::ROTATE) ? snapRot : snapScale;
 				float gsnap[3] = { gsnapv, gsnapv, gsnapv };
 				const bool snapNow = (snapEnabled != ImGui::GetIO().KeyCtrl) && gsnapv > 0.0f;
 				float* gsnapPtr = (snapNow && gop != ImGuizmo::TRANSLATE) ? gsnap : nullptr;
-				const glm::mat4 prevM = glm::make_mat4(gizmoMatrix);   // Q3: per-atom delta base
+				const glm::mat4 prevM = glm::make_mat4(gizmoMatrix);   // per-atom delta base
 				// ImGuizmo::Enable is sticky — restore it right after Manipulate.
 				ImGuizmo::Enable(!s_riverGizmoHot);
 				ImGuizmo::Manipulate(gview, gproj, gop, gmode, gizmoMatrix, nullptr, gsnapPtr);
 				ImGuizmo::Enable(true);
 
-				// Q3 multi-drag undo: one composite step for the WHOLE selection (world poses),
+				// multi-drag undo: one composite step for the WHOLE selection (world poses),
 				// captured at drag start and pushed on release; the single-atom auto-detector
 				// is suppressed while a multi drag is running.
 				struct GizPose { long id; Vector3 p; Quaternion r; Vector3 s; };
@@ -1053,7 +1053,7 @@ void EditorUI::winRender()
 							gizmoMatrix[12] = nT.x; gizmoMatrix[13] = nT.y; gizmoMatrix[14] = nT.z;
 							nm[3][0] = nT.x; nm[3][1] = nT.y; nm[3][2] = nT.z;
 						}
-						// Q5 object-to-object: while V is held during a move, the selection lands on
+						// object-to-object: while V is held during a move, the selection lands on
 						// the surface UNDER THE CURSOR (selection hidden from the ray so it can't
 						// hit itself), with closest-vertex magnetism on the hit mesh (kit-bashing).
 						if (gop == ImGuizmo::TRANSLATE && ImGui::IsKeyDown(ImGuiKey_V))
@@ -1432,7 +1432,7 @@ void EditorUI::winRender()
 					}
 				if (iconPick)
 				{
-					if (io.KeyCtrl) HierToggle(iconPick); else HierSelect(iconPick);   // Q3 ctrl adds
+					if (io.KeyCtrl) HierToggle(iconPick); else HierSelect(iconPick);   // ctrl adds
 				}
 				else
 				{
@@ -1446,7 +1446,7 @@ void EditorUI::winRender()
 					            f.y + ndcx * thf * aspect * rr.y + ndcy * thf * uu.y,
 					            f.z + ndcx * thf * aspect * rr.z + ndcy * thf * uu.z);
 					Atom* hit = AppInstance::GetSingleton()->currentWorld->Pick(o, dir);
-					if (io.KeyCtrl)   // Q3: ctrl-click toggles the hit object in the multi-selection
+					if (io.KeyCtrl)   // ctrl-click toggles the hit object in the multi-selection
 					{
 						if (hit)
 						{
@@ -1472,13 +1472,13 @@ void EditorUI::winRender()
 							else                      HierSelect(root);          // new object: whole first
 						}
 					}
-					// Q3 marquee: a drag that starts on EMPTY space rubber-bands a rect; every
+					// marquee: a drag that starts on EMPTY space rubber-bands a rect; every
 					// pickable root whose world position projects inside gets selected on release.
 					if (!hit && !io.KeyCtrl) { s_marqueeArm = true; s_marqueeStart = mp; }
 				}
 			}
 
-			// Q3 marquee select: armed by an empty-space press, active past the drag threshold.
+			// marquee select: armed by an empty-space press, active past the drag threshold.
 			if (s_marqueeArm && ImGui::IsMouseDown(ImGuiMouseButton_Left)
 			    && ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left) && !ImGuizmo::IsUsing())
 			{

@@ -5,7 +5,7 @@
 #include <API/Model/Wind.h>
 #include <API/Model/Surface.h>
 #include <API/Model/Package.h>   // pak compression levels per method
-#include <input/Input.h>   // Q6: Input Maps section (filter + provenance)
+#include <input/Input.h>   // Input Maps section (filter + provenance)
 #include <map>
 #include <algorithm>
 #include <boost/filesystem.hpp>
@@ -315,7 +315,7 @@ void EditorUI::winSettings()
 
 		const ProjectSettings PSD = defaultPS();   // per-field default source for resetBtn
 
-		static const char* kCats[] = { "World", "Rendering", "Packaging", "Mods", "Disk sync", "Layers", "Input" };
+		static const char* kCats[] = { "World", "Rendering", "Packaging", "Modules", "Mods", "Disk sync", "Layers", "Input" };
 		shellProj.Begin("projset", kCats, IM_ARRAYSIZE(kCats));
 		if (shellProj.Section("World", "World", "default world startup scene"))
 		{
@@ -591,6 +591,57 @@ void EditorUI::winSettings()
 				                  "and script assemblies always stay in the MAIN pak.");
 		}
 
+		// Module-declared project settings (NUKEModule::projectSettings): one section per module,
+		// widgets from the data descriptors, values in the .nuproj "moduleSettings" object.
+		for (auto& mod : nuke::GetModules())
+		{
+			if (!mod || !mod->loaded || nuke::ModuleAbi(mod.get()) < 5) continue;
+			std::vector<NukeModuleSetting> decl;
+			mod->projectSettings(decl);
+			if (decl.empty()) continue;
+			std::string kw;
+			for (const NukeModuleSetting& s : decl) { kw += s.label; kw += ' '; }
+			if (!shellProj.Section("Modules", mod->title, kw.c_str())) continue;
+			for (const NukeModuleSetting& s : decl)
+			{
+				const std::string id = LProp(s.label.c_str());
+				bool changed = false;
+				const bool has = modSettings.contains(s.key);
+				if (s.type == 0)
+				{
+					bool v = has && modSettings[s.key].is_boolean() ? modSettings[s.key].get<bool>() : s.defVal != 0.0;
+					if (ImGui::Checkbox(id.c_str(), &v)) { modSettings[s.key] = v; changed = true; }
+				}
+				else if (s.type == 1)
+				{
+					int v = has && modSettings[s.key].is_number() ? (int)modSettings[s.key].get<double>() : (int)s.defVal;
+					if (ImGui::DragInt(id.c_str(), &v, 0.05f, (int)s.minV, (int)s.maxV))
+					{
+						if (s.minV != s.maxV) v = std::max((int)s.minV, std::min((int)s.maxV, v));
+						modSettings[s.key] = v; changed = true;
+					}
+				}
+				else if (s.type == 2)
+				{
+					float v = has && modSettings[s.key].is_number() ? (float)modSettings[s.key].get<double>() : (float)s.defVal;
+					if (ImGui::DragFloat(id.c_str(), &v, 0.01f, (float)s.minV, (float)s.maxV))
+					{
+						if (s.minV != s.maxV) v = std::max((float)s.minV, std::min((float)s.maxV, v));
+						modSettings[s.key] = v; changed = true;
+					}
+				}
+				else
+				{
+					std::string v = has && modSettings[s.key].is_string() ? modSettings[s.key].get<std::string>() : s.defStr;
+					char buf[256];
+					strncpy(buf, v.c_str(), sizeof(buf) - 1); buf[sizeof(buf) - 1] = 0;
+					if (ImGui::InputText(id.c_str(), buf, sizeof(buf))) { modSettings[s.key] = std::string(buf); changed = true; }
+				}
+				if (!s.tip.empty() && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", s.tip.c_str());
+				if (changed) SaveProject();
+			}
+		}
+
 		// Mods list, backed by config/mods.json: checkbox = enabled, row order = load order.
 		// Mounts happen at boot, so changes apply on session reload.
 		if (basePakPath.size() > 6 && basePakPath.compare(basePakPath.size() - 6, 6, ".nupak") == 0
@@ -805,7 +856,7 @@ void EditorUI::winSettings()
 		}
 		if (shellProj.Section("Input", "Input Maps", "input nuinput bindings maps provenance conflicts"))
 		{
-		// Q6: which .nuinput files feed the merged action table, and who defined what.
+		// which .nuinput files feed the merged action table, and who defined what.
 		bool autoMode = inputMapsAuto;
 		if (ImGui::RadioButton("Auto (load every .nuinput in content)", autoMode))
 		{ inputMapsAuto = true; SaveProject(); ApplyInputMaps(); }
