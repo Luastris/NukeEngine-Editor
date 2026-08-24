@@ -24,6 +24,7 @@ static ImVec2 s_marqueeStart;
 #include <API/Model/Surface.h>
 #include <API/Model/Spline.h>   // engine spline: exact polyline for hit-tests, point-edit API
 #include <API/Model/WorldStream.h>   // ST-viz: the streaming-cell overlay reads DebugCells
+#include <API/Model/Decal.h>         // decal volumes: viewport icon + editor picking
 #include <reflect/Reflect.h>            // WaterRiver type lives in the water plugin — reached by name
 #include <API/Model/DebugDraw.h>
 #include <functional>
@@ -114,13 +115,15 @@ static nuke::Atom* PickAtScreen(nuke::Camera* cam, ImVec2 rmin, ImVec2 sz, ImVec
 		nuke::Vector3 ori(o.x + ndcx * halfW * rr.x + ndcy * halfH * uu.x,
 		                  o.y + ndcx * halfW * rr.y + ndcy * halfH * uu.y,
 		                  o.z + ndcx * halfW * rr.z + ndcy * halfH * uu.z);
-		return nuke::AppInstance::GetSingleton()->currentWorld->Pick(ori, f);
+		float pd;   // editor pick: invisible volumes (decal boxes) are selectable too
+		return nuke::AppInstance::GetSingleton()->currentWorld->PickEditor(ori, f, pd);
 	}
 	float thf = tanf((float)cam->fov * 0.5f * 0.01745329252f);
 	nuke::Vector3 dir(f.x + ndcx * thf * aspect * rr.x + ndcy * thf * uu.x,
 	                  f.y + ndcx * thf * aspect * rr.y + ndcy * thf * uu.y,
 	                  f.z + ndcx * thf * aspect * rr.z + ndcy * thf * uu.z);
-	return nuke::AppInstance::GetSingleton()->currentWorld->Pick(o, dir);
+	float pd;   // editor pick: invisible volumes (decal boxes) are selectable too
+	return nuke::AppInstance::GetSingleton()->currentWorld->PickEditor(o, dir, pd);
 }
 
 // Editor camera projection (glm, LH depth 0..1), blended persp<->ortho like the renderer,
@@ -185,6 +188,7 @@ void EditorUI::DrawEntityIcons(ImVec2 rmin, ImVec2 sz)
 			}
 			else if (atom->GetComponent<ReflectionProbe>()) { glyph = ICON_LC_APERTURE;  col = IM_COL32(200, 140, 255, 235); }
 			else if (atom->GetComponent<Environment>())     { glyph = ICON_LC_CLOUD_SUN; col = IM_COL32(150, 200, 255, 235); }
+			else if (atom->GetComponent<Decal>())           { glyph = ICON_LC_STICKER;   col = IM_COL32(255, 200, 140, 235); }
 			else
 			{
 				// Registered component icons: match by type-name CONTENT — pointer compare fails across DLLs.
