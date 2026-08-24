@@ -1,8 +1,8 @@
-# NukeEngine-Editor — CMake build for NON-Windows platforms (Deuterium).
-# On Windows the editor stays in the hand-maintained NukeEngine-Editor.vcxproj driven by
-# NukeEngine.sln (nukegen prebuild, vcpkg autolink, resource icon). This file builds the
-# same sources against the NukeEngine + NukeImGui CMake targets of the superbuild.
-cmake_minimum_required(VERSION 3.20)
+# NukeEngine-Editor — the ONE build of the editor host, every platform (the historical
+# hand-maintained NukeEngine-Editor.vcxproj is retired). Builds against the NukeEngine +
+# NukeImGui CMake targets of the superbuild; dependencies come from the shared classic
+# vcpkg pool via CMAKE_PREFIX_PATH.
+cmake_minimum_required(VERSION 3.21)   # TARGET_RUNTIME_DLLS (dependency-DLL deploy)
 project(NukeEngineEditor CXX)
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/../NukeEngine/cmake/NukeRunDir.cmake")   # NUKE_RUN_SUBDIR: x64 / macos / linux
@@ -10,12 +10,8 @@ include("${CMAKE_CURRENT_SOURCE_DIR}/../NukeEngine/cmake/NukeRunDir.cmake")   # 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-if(WIN32)
-    message(STATUS "NukeEngine-Editor: built by NukeEngine.sln on Windows — CMake path skipped")
-    return()
-endif()
-
 set(NUKE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/..")
+set(RUN_DIR "${NUKE_ROOT}/NukeEngine/${NUKE_RUN_SUBDIR}/$<CONFIG>")
 
 file(GLOB EDITOR_PANELS   "${CMAKE_CURRENT_SOURCE_DIR}/src/panels/*.cpp")
 file(GLOB EDITOR_TEXTEDIT "${CMAKE_CURRENT_SOURCE_DIR}/src/textedit/*.cpp")
@@ -24,9 +20,17 @@ add_executable(NukeEngine-Editor
     main.cpp
     ${EDITOR_PANELS}
     ${EDITOR_TEXTEDIT}
-    src/platform/platform_win32.cpp   # fully #ifdef _WIN32 — compiles empty here
-    src/platform/platform_other.cpp   # Linux stubs — empty on macOS
+    src/platform/platform_win32.cpp   # fully #ifdef _WIN32 — compiles empty elsewhere
+    src/platform/platform_other.cpp   # Linux stubs — empty on macOS/Windows
 )
+if(WIN32)
+    # The exe icon + version resource, and the defines the retired vcxproj carried.
+    enable_language(RC)
+    target_sources(NukeEngine-Editor PRIVATE Resource.rc)
+    target_compile_definitions(NukeEngine-Editor PRIVATE WIN32 _CONSOLE NOMINMAX)
+    set_property(TARGET NukeEngine-Editor PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+    target_compile_options(NukeEngine-Editor PRIVATE /MP /bigobj)
+endif()
 if(APPLE)
     target_sources(NukeEngine-Editor PRIVATE src/platform/platform_macos.mm)
     target_link_libraries(NukeEngine-Editor PRIVATE
@@ -90,16 +94,42 @@ target_link_libraries(NukeEngine-Editor PRIVATE
     NukeImGui
     assimp::assimp)
 
-target_compile_options(NukeEngine-Editor PRIVATE -Wno-c++11-narrowing -Wno-unknown-attributes)
+if(NOT MSVC)
+    target_compile_options(NukeEngine-Editor PRIVATE -Wno-c++11-narrowing -Wno-unknown-attributes)
+endif()
 
 # Run dir FIRST, bundle second: dev loads the loose fresh dylibs even though the superbuild
 # mirrors copies into the bundle; a standalone .app falls through to @loader_path.
 set_target_properties(NukeEngine-Editor PROPERTIES
     BUILD_RPATH "@loader_path/../../..;@loader_path;$ORIGIN")
 
-# Deploy into the run dir next to the engine + modules (same layout as Windows).
-set(RUN_DIR "${NUKE_ROOT}/NukeEngine/${NUKE_RUN_SUBDIR}/$<CONFIG>")
-if(APPLE)
+# Deploy into the run dir next to the engine + modules (one layout on every platform).
+if(WIN32)
+    # The exe builds straight into the run dir; dependency DLLs follow it. dist/ (stock
+    # config/imgui.ini/fonts) and the engine's built-in shaders mirror with xcopy /d —
+    # ONLY-IF-NEWER, so a user-tuned imgui.ini/main.json in the run dir is left alone.
+    set_target_properties(NukeEngine-Editor PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${RUN_DIR}")
+    file(TO_NATIVE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/dist" _ed_dist_win)
+    file(TO_NATIVE_PATH "${NUKE_ROOT}/NukeEngine/shaders" _ed_shaders_win)
+    file(TO_NATIVE_PATH "${NUKE_ROOT}/NukeEngine/${NUKE_RUN_SUBDIR}" _ed_run_win)
+    add_custom_command(TARGET NukeEngine-Editor POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_RUNTIME_DLLS:NukeEngine-Editor> "${RUN_DIR}"
+        COMMAND xcopy "${_ed_dist_win}" "${_ed_run_win}\\$<CONFIG>\\" /s /e /i /y /d /q
+        COMMAND xcopy "${_ed_shaders_win}" "${_ed_run_win}\\$<CONFIG>\\shaders\\" /s /e /i /y /d /q
+        COMMAND_EXPAND_LISTS
+        COMMENT "Deploying editor runtime DLLs + stock run-dir files + engine shaders")
+    # The shared glfw3.dll (renderer/gamepad window layer): no CMake target owns it — the
+    # msbuild-era editor postbuild copied it from the pool, and so does this.
+    if(NOT DEFINED NUKE_VCPKG_ROOT AND DEFINED ENV{VCPKG_ROOT})
+        set(NUKE_VCPKG_ROOT "$ENV{VCPKG_ROOT}")
+    endif()
+    if(DEFINED NUKE_VCPKG_ROOT AND EXISTS "${NUKE_VCPKG_ROOT}/installed/x64-windows/bin/glfw3.dll")
+        add_custom_command(TARGET NukeEngine-Editor POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${NUKE_VCPKG_ROOT}/installed/x64-windows$<$<CONFIG:Debug>:/debug>/bin/glfw3.dll" "${RUN_DIR}"
+            COMMENT "Deploying shared glfw3.dll")
+    endif()
+elseif(APPLE)
     add_custom_command(TARGET NukeEngine-Editor POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory "${RUN_DIR}"
         COMMAND ${CMAKE_COMMAND} -E copy_directory

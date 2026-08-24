@@ -11,6 +11,7 @@
 #include <API/Model/Jobs.h>
 #include <interface/AtomCreators.h>   // registered atom templates for the "+" menu
 #include <reflect/Reflect.h>          // Registry_All: creator components by type name
+#include <config.h>                   // packaging dev hooks mirror the Game Build dialog
 #include <iostream>
 #include <algorithm>
 #include <cstring>
@@ -333,6 +334,19 @@ void EditorUI::Draw()
 			const char* e = std::getenv("NUKE_PACKAGE");
 			pkgDelay = (e && (*e == '1' || *e == '2')) ? 150 : -1;
 			pkgSkipBuild = e && *e == '2';
+			if (pkgDelay > 0)
+			{
+				// Headless equivalents of the Game Build dialog's knobs (probe runs).
+				const char* dbg = std::getenv("NUKE_PACKAGE_DEBUG");
+				if (dbg && *dbg == '1') gbBuildCfg = 1;
+				const char* con = std::getenv("NUKE_PACKAGE_CONSOLE");
+				if (con && *con == '1')
+				{
+					gbWin = nuke::Config::getSingleton()->window;   // the dialog prefills the same way
+					gbWinSet = true;
+					gbConsole = true;
+				}
+			}
 		}
 		if (pkgDelay > 0 && --pkgDelay == 0) { if (pkgSkipBuild) PackageProjectNow(); else PackageProject(); }
 		static int modDelay = -2;

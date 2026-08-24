@@ -233,6 +233,201 @@ static std::vector<std::string> ModulesForFiles(const std::vector<std::pair<std:
 	return std::vector<std::string>(out.begin(), out.end());
 }
 
+// Game-thread snapshot of every discovered module for the packaging workers: canonical name,
+// binary path, service role, plugin-list state and its ship extras. Keyed by lowercase name.
+std::map<std::string, EditorUI::PkgMod> EditorUI::SnapshotPkgMods()
+{
+	auto low = [](std::string s) { for (char& c : s) c = (char)tolower((unsigned char)c); return s; };
+	boost::system::error_code ec;
+	const std::string projLow = projectDir.empty() ? std::string()
+	                          : low(bfs::weakly_canonical(bfs::path(projectDir), ec).generic_string());
+	std::map<std::string, PkgMod> out;
+	for (auto& m : nuke::GetModules())
+	{
+		if (!m) continue;
+		PkgMod pm;
+		pm.name       = nuke::ModuleName(m->moduleFile);
+		pm.file       = m->modulePath;
+		pm.provides   = m->provides() ? m->provides() : "";
+		pm.shared     = m->sharedService();
+		pm.editorTool = nuke::ModuleIsEditorTool(m.get());
+		{
+			boost::system::error_code pec;
+			std::string mp = low(bfs::weakly_canonical(bfs::path(m->modulePath), pec).generic_string());
+			pm.project = !projLow.empty() && mp.rfind(projLow, 0) == 0;
+		}
+		// Boot providers ride serviceChoices, not the plugin list — count them as wanted.
+		pm.enabled = !pluginListLoaded || m->phase() == nuke::PHASE_BOOT;
+		for (size_t i = 0; !pm.enabled && i < enabledPlugins.size(); ++i)
+			pm.enabled = nuke::ModuleFileMatches(enabledPlugins[i], m->moduleFile);
+		if (m->loaded)
+		{
+			m->shipExtras(projectDir.c_str(), pm.extraPak, pm.extraDist);
+			if (m->sharedService() && std::string(m->provides()) == "scripting")
+				pm.script = m->queryService();
+		}
+		out[low(pm.name)] = pm;
+	}
+	for (auto& kv : serviceChoices)
+	{
+		if (kv.second.empty()) continue;
+		auto it = out.find(low(nuke::ModuleName(kv.second)));
+		if (it != out.end()) it->second.service = kv.first;
+	}
+	return out;
+}
+
+// The manifest's authored force-ship list ("shipModules": [...]) — the escape hatch for a
+// module the detection below cannot see (loaded purely by hand-written runtime logic).
+static std::vector<std::string> ReadManifestShipModules(const std::string& projFile)
+{
+	std::vector<std::string> out;
+	bfs::ifstream f{ bfs::path(projFile) };
+	if (!f) return out;
+	nlohmann::json j = nlohmann::json::parse(f, nullptr, false);
+	if (!j.is_discarded() && j.is_object() && j.contains("shipModules") && j["shipModules"].is_array())
+		for (auto& m : j["shipModules"]) if (m.is_string()) out.push_back(m.get<std::string>());
+	return out;
+}
+
+// Which modules THIS dist needs — not the whole plugin list. Ships:
+//   * every chosen service provider except "gui" (the runtime cannot exist without them);
+//   * the "gui" provider when the dev console is on or the content/scripts use it;
+//   * the project's own game modules (they ARE the game — usage is not a question);
+//   * plugin-list modules the shipped content actually uses: reflected component types in the
+//     packed JSON (ModulesForFiles), files their cookContent claimed (`cookClaimants`), script
+//     files a scripting backend owns, and modules with project pak extras of their own;
+//   * modules registering NO reflected types (input providers) — invisible to any walk, so
+//     being enabled is their only honest signal;
+//   * the manifest's "shipModules", verbatim;
+// then closes over hard binary imports (a shipped DLL importing another module needs the file
+// present or the OS loader refuses it). Enabled-but-unused modules are dropped with a log.
+static bool IsEditorOnlyModule(const bfs::path& dll);   // defined with the icon helpers below
+
+static std::set<std::string> ComputeShipModules(
+	const std::vector<std::pair<std::string, std::string>>& files,
+	const std::map<std::string, EditorUI::PkgMod>& mods,
+	const std::set<std::string>& cookClaimants,
+	bool consoleOn, const std::vector<std::string>& manifestShip, bool quiet)
+{
+	auto low = [](std::string s) { for (char& c : s) c = (char)tolower((unsigned char)c); return s; };
+	auto say = [&](const std::string& m) { if (!quiet) std::cout << "[Package]\t" << m << std::endl; };
+
+	// Everything the packed content references.
+	std::set<std::string> detected = cookClaimants;
+	for (const std::string& d : ModulesForFiles(files)) detected.insert(low(d));
+	// A scripting backend is used when a file its language owns ships (a .lua run by path
+	// leaves no component trace) — the backend itself claims the file.
+	for (auto& kv : mods)
+		if (kv.second.script && !detected.count(kv.first))
+			for (const auto& fp : files)
+				if (((nuke::iScript*)kv.second.script)->PlatformOf(fp.second.c_str(), nullptr, 0) > 0)
+					{ detected.insert(kv.first); break; }
+	// Modules that registered no reflected types leave no trace any walk could find.
+	std::set<std::string> hasTypes;
+	for (const auto& tp : nuke::PluginOwnedTypes()) hasTypes.insert(low(tp.second));
+
+	std::set<std::string> ship;   // canonical names
+	std::vector<std::string> dropped;
+	auto add = [&](const std::string& lowName, const std::string& why) -> bool
+	{
+		auto it = mods.find(lowName);
+		if (it == mods.end() || it->second.editorTool) return false;
+		if (ship.count(it->second.name)) return true;
+		// The UI-bearing editor companions (importing the editor's ImGui dll) never ship —
+		// refusing them HERE keeps them out of the build target list too.
+		if (!it->second.file.empty() && IsEditorOnlyModule(bfs::path(it->second.file)))
+			{ say("module '" + it->second.name + "' is editor-only (imports the editor UI) — not shipped"); return false; }
+		ship.insert(it->second.name);
+		say("module '" + it->second.name + "': " + why);
+		return true;
+	};
+	// Services with an explicit project choice; one with NO recorded choice (legacy manifests
+	// wrote only some) falls back to its enabled provider below.
+	std::set<std::string> chosenSvc;
+	for (auto& kv : mods) if (!kv.second.service.empty()) chosenSvc.insert(kv.second.service);
+	// The console needs A gui backend, whatever the plugin list says: the chosen provider,
+	// else an enabled one, else any installed one.
+	if (consoleOn)
+	{
+		std::string gui;
+		for (auto& kv : mods) if (kv.second.service == "gui") gui = kv.first;
+		if (gui.empty())
+			for (auto& kv : mods)
+				if (kv.second.provides == "gui" && kv.second.enabled && !kv.second.editorTool) gui = kv.first;
+		if (gui.empty())
+			for (auto& kv : mods)
+				if (kv.second.provides == "gui" && !kv.second.editorTool) gui = kv.first;
+		if (!gui.empty()) add(gui, "the dev console needs the GUI backend");
+		else say("WARNING: the dev console is ON but no GUI backend module is installed — the console cannot draw");
+	}
+	for (auto& kv : mods)
+	{
+		const EditorUI::PkgMod& pm = kv.second;
+		if (pm.editorTool) continue;
+		// Exclusive non-gui services are the runtime's core (render/physics/audio): the chosen
+		// provider ships; with no recorded choice the enabled one does. The "gui" service and
+		// shared services (scripting backends) stay content-driven below.
+		if (!pm.provides.empty() && pm.provides != "gui" && !pm.shared)
+		{
+			if (!pm.service.empty())
+				add(kv.first, "the project's '" + pm.service + "' provider");
+			else if (pm.enabled && !chosenSvc.count(pm.provides))
+				add(kv.first, "the enabled '" + pm.provides + "' provider");
+			continue;
+		}
+		if (!pm.service.empty() && pm.shared)
+			{ add(kv.first, "the project's '" + pm.service + "' provider"); continue; }
+		if (!pm.enabled)
+		{
+			if (detected.count(kv.first))
+				say("WARNING: shipped content uses module '" + pm.name
+				    + "' but the plugin is DISABLED — its components will load as placeholders");
+			continue;
+		}
+		if (pm.project)                   { add(kv.first, "the project's own game module"); continue; }
+		if (detected.count(kv.first))     { add(kv.first, "used by the shipped content"); continue; }
+		if (!pm.extraPak.empty())         { add(kv.first, "ships project files of its own"); continue; }
+		// A PLAIN plugin with no reflected types (an input provider) leaves no trace any walk
+		// could see — enabled is its only signal. Service providers never take this path: the
+		// gui service ships with the console or by an explicit shipModules entry.
+		if (!hasTypes.count(kv.first) && pm.provides.empty())
+			{ add(kv.first, "registers no reflected types (usage is undetectable) — shipped as enabled"); continue; }
+		if (pm.provides == "gui" && !consoleOn)
+			{ say("module '" + pm.name + "': the 'gui' provider ships only with the dev console (or via the manifest's shipModules when the game draws runtime GUI) — not shipped"); continue; }
+		dropped.push_back(pm.name);
+	}
+	for (const std::string& m : manifestShip)
+		add(low(nuke::ModuleName(m)), "forced by the manifest's shipModules");
+	// Hard binary dependencies close the set.
+	{
+		std::vector<std::string> work(ship.begin(), ship.end());
+		while (!work.empty())
+		{
+			auto it = mods.find(low(work.back()));
+			work.pop_back();
+			if (it == mods.end() || it->second.file.empty()) continue;
+			for (const std::string& imp : nuke::ModuleImportsOf(it->second.file))
+			{
+				auto mi = mods.find(low(imp));
+				if (mi == mods.end() || mi->second.editorTool) continue;
+				if (ship.insert(mi->second.name).second)
+				{
+					say("module '" + mi->second.name + "': imported by '" + it->second.name + "'");
+					work.push_back(mi->second.name);
+				}
+			}
+		}
+	}
+	if (!dropped.empty())
+	{
+		std::string list;
+		for (auto& d : dropped) list += (list.empty() ? "" : ", ") + d;
+		say("unused by the shipped content, NOT shipped: " + list);
+	}
+	return ship;
+}
+
 // Does this file set bind its package to one platform? Whoever owns a file answers for it: every
 // scripting backend is offered each file, and one that claims it says "any" or names the platform
 // its code is bound to. Only what nobody claims falls back to the crude rule — a binary that is
@@ -283,6 +478,8 @@ struct CookCtx
 	std::map<std::string, std::vector<std::string>> guidFiles;   // asset guid -> file(s)
 	std::set<std::string> visited;                               // lowercase disk keys (walked)
 	std::set<std::string> shipped;                               // walked AND claimed
+	std::set<std::string> claimants;                             // lowercase module names whose cookContent claimed a shipped file
+	std::vector<std::string> reached;                            // walked but UNSHIPPED files (script sources): detection input
 	std::vector<std::string> queue;
 	int missed = 0;
 };
@@ -389,18 +586,32 @@ static void CookProcess(CookCtx& c, const std::string& file)
 		{
 			claimed = true;
 			c.shipped.insert(DiskKey(bfs::path(file)));
+			// A claimed file is the claimant's content: shipping it proves the module is used.
+			{
+				std::string cn = nuke::ModuleName(m->moduleFile);
+				for (char& ch : cn) ch = (char)tolower((unsigned char)ch);
+				c.claimants.insert(cn);
+			}
 			for (const std::string& u : uses) CookHandleString(c, u);
 			break;
 		}
 	}
 	if (!claimed)
+	{
+		// Referenced by shipped content, ships nothing itself — still DETECTION input: a .cs
+		// source is where module usage is visible (the compiled assembly bakes the SDK in).
+		c.reached.push_back(file);
 		std::cout << "[Package]\tunclaimed file type, not shipped: " << rel << std::endl;
+	}
 }
 
-// The closure. Returns lowercase disk keys of every file that SHIPS.
+// The closure. Returns lowercase disk keys of every file that SHIPS. `outClaimants` (optional)
+// receives the lowercase names of modules whose cookContent claimed shipped files.
 static std::set<std::string> CookUsedFiles(const std::string& projDir, const std::string& contentDir,
                                            const std::string& manifestFile,
-                                           const std::map<std::string, std::vector<std::string>>& guidFiles)
+                                           const std::map<std::string, std::vector<std::string>>& guidFiles,
+                                           std::set<std::string>* outClaimants = nullptr,
+                                           std::vector<std::string>* outReached = nullptr)
 {
 	CookCtx c;
 	c.projDir = projDir; c.contentDir = contentDir; c.guidFiles = guidFiles;
@@ -413,6 +624,8 @@ static std::set<std::string> CookUsedFiles(const std::string& projDir, const std
 		c.queue.pop_back();
 		CookProcess(c, f);
 	}
+	if (outClaimants) *outClaimants = c.claimants;
+	if (outReached) *outReached = c.reached;
 	return c.shipped;
 }
 
@@ -598,6 +811,12 @@ bool EditorUI::DecodeIcoRGBA(const std::string& path, std::vector<unsigned char>
 // ---- editor-driven builds ----
 void EditorUI::RunEngineBuild(const std::string& config, std::function<void(bool)> onDone)
 {
+	RunEngineBuild(config, std::vector<std::string>(), std::move(onDone));
+}
+
+void EditorUI::RunEngineBuild(const std::string& config, const std::vector<std::string>& targets,
+                              std::function<void(bool)> onDone)
+{
 #ifdef _DEBUG
 	const char* running = "Debug";
 #else
@@ -622,7 +841,13 @@ void EditorUI::RunEngineBuild(const std::string& config, std::function<void(bool
 		return;
 	}
 	StatusBar::Set("build", "Build " + config + ": starting...", StatusBar::kIndeterminate);
-	nuke::Jobs::Schedule([this, root, config, onDone]()
+	if (!targets.empty())
+	{
+		std::string list;
+		for (const std::string& t : targets) list += (list.empty() ? "" : " ") + t;
+		std::cout << "[build]\t\ttargets (what the dist needs): " << list << std::endl;
+	}
+	nuke::Jobs::Schedule([this, root, config, targets, onDone]()
 	{
 		auto runPiped = [&](const std::string& cmdLine, int& outProjects) -> bool
 		{
@@ -726,13 +951,17 @@ void EditorUI::RunEngineBuild(const std::string& config, std::function<void(bool
 			              + "\" -DCMAKE_BUILD_TYPE=" + config, projects);
 #endif
 		}
+		// An explicit target list (packaging) builds the player + the shipped modules and their
+		// engine dependency only — the editor and unused modules stay untouched.
+		std::string tsel;
+		for (const std::string& t : targets) tsel += " --target " + t;
 #ifdef _WIN32
 		if (ok)
-			ok = runPiped("cmake --build \"" + bldDir.string() + "\" --config " + config
+			ok = runPiped("cmake --build \"" + bldDir.string() + "\" --config " + config + tsel
 			              + " -- /m /v:m /nologo", projects);
 #else
 		if (ok)
-			ok = runPiped("cmake --build \"" + bldDir.string() + "\" --parallel", projects);
+			ok = runPiped("cmake --build \"" + bldDir.string() + "\" --parallel" + tsel, projects);
 #endif
 		const bool result = ok;
 		nuke::Jobs::RunOnMain([this, result, config, onDone]()
@@ -806,11 +1035,64 @@ SplitPakFiles(std::vector<std::pair<std::string, std::string>>& files, int split
 
 void EditorUI::PackageProject()
 {
-	// Rebuild the CHOSEN config first so stale binaries never ship (the superbuild is
-	// incremental). The same config flows through everything: engine + player + engine
-	// modules from its run dir, the project's game modules from modules/<Config>/.
+	// Analyze BEFORE building: the same content cook the packer runs decides which modules the
+	// dist ships, and only those (plus the player) get built — an unused module and the editor
+	// have no business in a game build. Then the chosen config rebuilds so stale binaries never
+	// ship, and the project's game modules follow from modules/<Config>/.
 	const std::string cfg = gbBuildCfg == 1 ? "Debug" : "Release";
-	RunEngineBuild(cfg, [this, cfg](bool ok)
+	{
+		const std::string projDir = projectDir, projFile = projectFile, content = contentDir;
+		const std::string distStr = distPath.empty() ? (bfs::path(projDir) / "dist").string()
+		                          : (bfs::path(distPath).is_absolute() ? distPath
+		                                                               : (bfs::path(projDir) / distPath).string());
+		std::map<std::string, std::vector<std::string>> guidFiles;
+		{
+			ResDB* db = ResDB::getSingleton();
+			for (auto& kv : db->pathByGuid) guidFiles[kv.first].push_back(kv.second);
+		}
+		auto pkgMods = SnapshotPkgMods();
+		const bool consoleOn = gbWinSet && gbConsole;
+		StatusBar::Set("package", "Package: analyzing used modules...", StatusBar::kIndeterminate);
+		nuke::Jobs::Schedule([this, cfg, projDir, projFile, content, distStr, guidFiles, pkgMods, consoleOn]() mutable
+		{
+			std::set<std::string> claimants;
+			std::vector<std::string> reached;
+			auto all = CollectProject(projDir, false, DistPrefix(projDir, distStr));
+			std::set<std::string> used = CookUsedFiles(projDir, content, projFile, guidFiles, &claimants, &reached);
+			std::vector<std::pair<std::string, std::string>> files;
+			for (auto& fp : all)
+				if (used.count(DiskKey(bfs::path(fp.second)))) files.push_back(fp);
+			files.push_back({ "game.nuproj", projFile });
+			for (const std::string& r : reached) files.push_back({ r, r });   // script sources: detection-only input
+			boost::system::error_code ec;
+			for (auto& kv : pkgMods)
+				for (const std::string& rel : kv.second.extraPak)
+				{
+					bfs::path src = bfs::path(projDir) / rel;
+					if (bfs::exists(src, ec) && !bfs::is_directory(src, ec)) files.push_back({ rel, src.string() });
+				}
+			std::set<std::string> ship = ComputeShipModules(files, pkgMods, claimants, consoleOn,
+			                                                ReadManifestShipModules(projFile), false);
+			// The build set: the player + whichever shipped modules are superbuild targets (the
+			// project's own game modules build separately, per config).
+			std::vector<std::string> targets{ "NukePlayer" };
+			const bfs::path root = nuke::RunRoot().parent_path().parent_path().parent_path();
+			for (const std::string& s : ship)
+				if (bfs::exists(root / s / "CMakeLists.txt", ec)) targets.push_back(s);
+			nuke::Jobs::RunOnMain([this, cfg, targets]()
+			{
+				StatusBar::Remove("package");   // the build and pack stages set their own
+				pkgAnalyzed = true;             // the pack worker skips the duplicate decision log
+				PackageProjectBuild(cfg, targets);
+			});
+		});
+	}
+}
+
+// The build half of Package Project: engine targets, then game modules, then the pack itself.
+void EditorUI::PackageProjectBuild(const std::string& cfg, const std::vector<std::string>& targets)
+{
+	RunEngineBuild(cfg, targets, [this, cfg](bool ok)
 	{
 		if (!ok)
 		{
@@ -856,6 +1138,7 @@ void EditorUI::PackageProjectNow()
 	// Game defaults are OFF: without the dialog these ship off, never the editor's own values.
 	const bool gbLogS = gbSet && gbLog;
 	const bool gbDbgS = gbSet && gbDebug;
+	const bool gbConsS = gbSet && gbConsole;   // the in-game dev console (~) in the dist
 	const std::string gameName = projectName.empty() ? std::string("NukeGame") : projectName;
 	const std::string icon = gameIcon.empty() ? std::string()
 	                        : AppInstance::GetSingleton()->ResolveContent(gameIcon);
@@ -880,47 +1163,20 @@ void EditorUI::PackageProjectNow()
 	                                                         : (bfs::path(projDir) / distPath).string());
 	const int method = pakMethod, level = pakLevel, blockMB = pakBlockMB;
 	const int splitMode = modSplitMode, splitCapMB = modSplitCapMB;   // one split setting for every pak
-	// Used modules only: chosen service providers + the project's plugin list; no persisted
-	// list -> all runtime modules (mirrors the Player's load rule).
-	std::set<std::string> modules;
-	for (auto& kv : serviceChoices) if (!kv.second.empty()) modules.insert(kv.second);
-	if (pluginListLoaded) for (auto& p : enabledPlugins) modules.insert(p);
-	else
-	{
-		boost::system::error_code ec;
-		for (bfs::directory_iterator it(bfs::path("modules"), ec), end; it != end; it.increment(ec))
-		{
-			if (ec) break;
-			const std::string ext = it->path().extension().string();
-			if (ext == ".dll" || ext == ".dylib" || ext == ".so")
-				modules.insert(it->path().filename().string());
-		}
-	}
-	// Editor tooling (editorTool() == true) never ships, whatever list dragged it in — the
-	// NukeImGui-import scan below only catches the UI-bearing ones. Vtable query needs the
-	// game thread, so snapshot the stems here.
-	std::set<std::string> editorToolStems;
-	for (auto& m : nuke::GetModules())
-		if (m && nuke::ModuleIsEditorTool(m.get()))
-		{
-			std::string s = nuke::ModuleName(m->moduleFile);
-			for (char& c : s) c = (char)tolower((unsigned char)c);
-			editorToolStems.insert(s);
-		}
-	// Module ship extras (game-thread snapshot): what each module needs beyond its DLL —
-	// into the pak (extraPak) or the dist tree (extraDist).
-	std::vector<std::string> extraPak;
-	std::vector<std::pair<std::string, std::string>> extraDist;
-	for (auto& m : nuke::GetModules())
-		if (m && m->loaded) m->shipExtras(projDir.c_str(), extraPak, extraDist);
+	// Module snapshot (game thread): the candidates, their service roles and ship extras.
+	// WHICH of them ship is decided on the worker from the cooked content — the plugin list is
+	// the candidate pool, not the answer (see ComputeShipModules).
+	auto pkgMods = SnapshotPkgMods();
+	const bool quiet = pkgAnalyzed;   // PackageProject's pre-pass already logged the decisions
+	pkgAnalyzed = false;
 
 	// The dist's build configuration: which sibling run dir the binaries come from and which
 	// modules/<Config>/ the project modules ship from.
 	const std::string distCfg = gbBuildCfg == 1 ? "Debug" : "Release";
 	StatusBar::Set("package", "Packaging project (" + distCfg + ")...", StatusBar::kIndeterminate);
 	nuke::Jobs::Schedule([this, projDir, projFile, content, gameName, icon, method, level, blockMB, splitMode, splitCapMB,
-	                      modules, editorToolStems, distStr, guidFiles, distCfg,
-	                      extraPak, extraDist, gbSet, gbCfg, gbLogS, gbDbgS]()
+	                      pkgMods, distStr, guidFiles, distCfg, quiet,
+	                      gbSet, gbCfg, gbLogS, gbDbgS, gbConsS]()
 	{
 		Package::CreateOptions pakOpts; pakOpts.blockBytes = (uint32_t)blockMB << 20;
 		boost::system::error_code ec;
@@ -969,8 +1225,10 @@ void EditorUI::PackageProjectNow()
 
 		// 1) The project -> dist/content/game.nupak, cooked: only the manifest's dependency
 		// closure ships. "packInclude" force-adds extras the cooker can't see.
+		std::set<std::string> cookClaimants;
+		std::vector<std::string> cookReached;
 		auto all = CollectProject(projDir, false, DistPrefix(projDir, distRoot.string()));
-		std::set<std::string> used = CookUsedFiles(projDir, content, projFile, guidFiles);
+		std::set<std::string> used = CookUsedFiles(projDir, content, projFile, guidFiles, &cookClaimants, &cookReached);
 		std::vector<std::pair<std::string, std::string>> files;
 		files.reserve(all.size());
 		int forcedShaders = 0;
@@ -998,18 +1256,23 @@ void EditorUI::PackageProjectNow()
 		files.push_back({ "game.nuproj", projFile });
 		// Pak identity: DLCs record this name as their "base", so a DLC mounts only onto its own game.
 		bfs::path pakManTmp = bfs::path(projDir) / ".pak.json.tmp";
-		// Module pak extras: project files the cooker can't reach by reference.
-		for (const std::string& rel : extraPak)
-		{
-			bfs::path src = bfs::path(projDir) / rel;
-			if (bfs::exists(src, ec) && !bfs::is_directory(src, ec))
+		// Module pak extras: project files the cooker can't reach by reference. They join the
+		// module-detection INPUT (a managed assembly is scanned for the modules its code uses);
+		// extras of modules that end up not shipping are pulled back out below.
+		std::vector<std::pair<std::string, std::string>> extraOwner;   // pak rel -> module (lowercase)
+		for (auto& mkv : pkgMods)
+			for (const std::string& rel : mkv.second.extraPak)
 			{
-				files.push_back({ rel, src.string() });
-				std::cout << "[Package]\tmodule pak extra: " << rel << std::endl;
+				bfs::path src = bfs::path(projDir) / rel;
+				if (bfs::exists(src, ec) && !bfs::is_directory(src, ec))
+				{
+					files.push_back({ rel, src.string() });
+					extraOwner.push_back({ rel, mkv.first });
+					std::cout << "[Package]\tmodule pak extra: " << rel << std::endl;
+				}
+				else
+					std::cout << "[Package]\tmodule pak extra MISSING, skipped: " << rel << std::endl;
 			}
-			else
-				std::cout << "[Package]\tmodule pak extra MISSING, skipped: " << rel << std::endl;
-		}
 		// The runtime source dir (Release preferred) must resolve BEFORE the pak builds:
 		// engine built-ins (shaders/, fonts/) ride INSIDE game.nupak so mods can override them.
 		// Anchored on RunRoot(), not the CWD — an installed .app runs with CWD elsewhere.
@@ -1039,6 +1302,76 @@ void EditorUI::PackageProjectNow()
 				std::string rel = bfs::relative(it->path(), rt, rec).generic_string();
 				if (!rec) files.push_back({ rel, it->path().string() });
 			}
+		// Which modules ship: decided by the CONTENT (component types, cook claims, script use,
+		// binary imports) — not by the plugin list alone. Detection sees MORE than the pak:
+		// script SOURCES the cook reached never ship (the compiled assembly does), but the .cs
+		// text is where module usage is visible. See ComputeShipModules.
+		std::vector<std::pair<std::string, std::string>> detectFiles = files;
+		for (const std::string& r : cookReached) detectFiles.push_back({ r, r });
+		std::set<std::string> shipMods = ComputeShipModules(detectFiles, pkgMods, cookClaimants, gbConsS,
+		                                                    ReadManifestShipModules(projFile), quiet);
+		{
+			std::string list;
+			for (const std::string& s : shipMods) list += (list.empty() ? "" : ", ") + s;
+			std::cout << "[Package]\t" << shipMods.size() << " module(s) ship: " << list << std::endl;
+		}
+		auto shipsMod = [&](const std::string& lowName)
+		{
+			auto sit = pkgMods.find(lowName);
+			return sit != pkgMods.end() && shipMods.count(sit->second.name) != 0;
+		};
+		// Pull the pak extras of non-shipping modules back out.
+		files.erase(std::remove_if(files.begin(), files.end(), [&](const std::pair<std::string, std::string>& fp)
+		{
+			for (const auto& eo : extraOwner)
+				if (eo.first == fp.first && !shipsMod(eo.second))
+				{
+					std::cout << "[Package]\tmodule pak extra dropped with its module: " << fp.first << std::endl;
+					return true;
+				}
+			return false;
+		}), files.end());
+		// Dist-tree extras of the shipped modules only.
+		std::vector<std::pair<std::string, std::string>> extraDist;
+		for (const auto& mkv : pkgMods)
+			if (shipMods.count(mkv.second.name))
+				for (const auto& ed : mkv.second.extraDist) extraDist.push_back(ed);
+		// The player only loads LISTED plugins: with the console on, the GUI backend must be on
+		// the shipped manifest even when the project itself never uses it.
+		bfs::path projTweakTmp;
+		if (gbConsS)
+		{
+			std::string guiName;
+			for (const auto& mkv : pkgMods)
+				if (mkv.second.provides == "gui" && shipMods.count(mkv.second.name)) guiName = mkv.second.name;
+			if (!guiName.empty())
+			{
+				bfs::ifstream pf{ bfs::path(projFile) };
+				nlohmann::json pj = pf ? nlohmann::json::parse(pf, nullptr, false) : nlohmann::json();
+				if (!pj.is_discarded() && pj.is_object())
+				{
+					if (!pj.contains("plugins") || !pj["plugins"].is_array()) pj["plugins"] = nlohmann::json::array();
+					bool listed = false;
+					for (auto& p : pj["plugins"])
+						if (p.is_string() && nuke::ModuleFileMatches(p.get<std::string>(), guiName)) listed = true;
+					if (!listed)
+					{
+						pj["plugins"].push_back(guiName);
+						projTweakTmp = bfs::path(projDir) / ".game.nuproj.tmp";
+						bfs::ofstream po(projTweakTmp, std::ios::binary | std::ios::trunc);
+						if (po)
+						{
+							po << pj.dump(2);
+							po.close();
+							for (auto& fp : files)
+								if (fp.first == "game.nuproj") fp.second = projTweakTmp.string();
+							std::cout << "[Package]\tdev console: '" << guiName
+							          << "' added to the shipped manifest's plugins" << std::endl;
+						}
+					}
+				}
+			}
+		}
 		// Split the game's own content into side parts, then write the identity manifest with
 		// the part list so the runtime mounts them alongside game.nupak.
 		auto partsOut = SplitPakFiles(files, splitMode, splitCapMB);
@@ -1259,6 +1592,7 @@ void EditorUI::PackageProjectNow()
 				// Log/debug ship as the dialog set them; the editor's own values never leak in.
 				cj["logToConsole"]  = gbLogS;
 				cj["gpuValidation"] = gbDbgS;
+				cj["devConsole"]    = gbConsS;   // the in-game ~ console (packaged default is OFF)
 				boost::system::error_code cec;
 				bfs::create_directories(dist / "config", cec);   // first package: config/ doesn't exist yet
 				// Fast loading: ship the WARM shader bytecode caches (backend IL — GPU-agnostic) and
@@ -1296,17 +1630,8 @@ void EditorUI::PackageProjectNow()
 			}
 #endif
 			StatusBar::Set("package", "Packaging: modules...", 0.9f);
-			for (const std::string& m : modules)
+			for (const std::string& m : shipMods)
 			{
-				{
-					std::string stem = nuke::ModuleName(m);
-					for (char& c : stem) c = (char)tolower((unsigned char)c);
-					if (editorToolStems.count(stem))
-					{
-						std::cout << "[Package]\tmodule '" << m << "' is editor tooling (editorTool) — not shipped" << std::endl;
-						continue;
-					}
-				}
 				// The list holds platform-neutral NAMES; the file on disk is this platform's
 				// spelling ("NukeVFX" -> NukeVFX.dll / libNukeVFX.so). Legacy entries that
 				// still carry a foreign extension resolve through the same helper.
@@ -1389,6 +1714,7 @@ void EditorUI::PackageProjectNow()
 			}
 		}
 #endif
+		if (!projTweakTmp.empty()) bfs::remove(projTweakTmp, ec);   // served its one pack
 		nuke::Jobs::RunOnMain([this, ok, distRoot]()
 		{
 			{
@@ -2179,7 +2505,7 @@ void EditorUI::PackageProjectCmd()
 	// Dialog model: the editor's live config overlaid with the previous dist config.
 	// Log/debug are GAME defaults (off), not the editor's values.
 	nuke::NukeWindow w = nuke::Config::getSingleton()->window;
-	gbLog = false; gbDebug = false;
+	gbLog = false; gbDebug = false; gbConsole = false;
 	{
 		bfs::path dist = distPath.empty() ? (bfs::path(projectDir) / "dist")
 		               : (bfs::path(distPath).is_absolute() ? bfs::path(distPath)
@@ -2193,8 +2519,9 @@ void EditorUI::PackageProjectCmd()
 				nlohmann::json p = nlohmann::json::parse(ss.str(), nullptr, false, true);
 				if (p.is_object())
 				{
-					gbLog   = p.value("logToConsole",  false);
-					gbDebug = p.value("gpuValidation", false);
+					gbLog     = p.value("logToConsole",  false);
+					gbDebug   = p.value("gpuValidation", false);
+					gbConsole = p.value("devConsole",    false);
 				}
 				if (p.is_object() && p.contains("window") && p["window"].is_object())
 				{
@@ -2293,6 +2620,11 @@ void EditorUI::DrawPackageProjectPopup()
 	ImGui::SameLine(); ImGui::TextDisabled("(?)");
 	if (ImGui::IsItemHovered()) ImGui::SetTooltip("gpuValidation: the GPU debug/validation layer (Debug builds only;\n"
 	                                              "can more than halve FPS). Only for diagnosing renderer crashes.");
+	ImGui::Checkbox("Developer Console", &gbConsole);
+	ImGui::SameLine(); ImGui::TextDisabled("(?)");
+	if (ImGui::IsItemHovered()) ImGui::SetTooltip("The in-game console on ` (grave): reflected commands, plus Lua when a\n"
+	                                              "scripting backend ships. Ships the GUI backend with the game even when\n"
+	                                              "the game itself has no UI. Off for a shipped game.");
 	ImGui::Checkbox("Transparent Window", &gbWin.transparent);
 	ImGui::SameLine(); ImGui::TextDisabled("(?)");
 	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Per-pixel window alpha (needs D3D12; creation-time property).");

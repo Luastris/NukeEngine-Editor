@@ -35,11 +35,12 @@ Preferred: the superbuild at the ecosystem root
 ([NukeEngine-Eco](https://github.com/Luastris/NukeEngine-Eco)) — one command builds the
 engine, this editor and every present module.
 
-Standalone: the editor builds from `NukeEngine/NukeEngine.sln` (VS2022, v143, x64, C++20)
-next to the [NukeEngine](https://github.com/Luastris/NukeEngine) checkout; it links
-`NukeImGui.lib`, so build [NukeImGui](https://github.com/Luastris/NukeImGui) first.
-`VCPKG_ROOT` must be set. Run dir = `NukeEngine/x64/<Config>` (the post-build deploys
-`dist/` config/fonts and the vcpkg runtime DLLs there).
+Standalone: the editor builds from its own `CMakeLists.txt` (C++20; MSVC v143 on Windows)
+next to the [NukeEngine](https://github.com/Luastris/NukeEngine) checkout; it links the
+`NukeEngine` and `NukeImGui` CMake targets, so those must be in the same configure (the
+superbuild arranges this). Dependencies come from the shared classic vcpkg pool via
+`CMAKE_PREFIX_PATH`; `VCPKG_ROOT` must be set. Run dir = `NukeEngine/x64/<Config>` (the
+post-build deploys `dist/` config/fonts and the vcpkg runtime DLLs there).
 
 ## Diagnostics
 

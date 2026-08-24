@@ -300,7 +300,32 @@ private:
 	nuke::NukeWindow gbWin{};                      // dialog model (game window settings for the dist)
 	bool gbLog   = false;                          // dist logToConsole
 	bool gbDebug = false;                          // dist gpuValidation (debug layer)
+	bool gbConsole = false;                        // dist devConsole (the in-game ~ console; ships the GUI backend)
 	int  gbBuildCfg = 0;                           // dist binaries: 0 = Release (ship), 1 = Debug (dev)
+	bool pkgAnalyzed = false;                      // PackageProject's pre-pass already logged the module decisions
+
+public:
+	// Packaging: one discovered module, snapshotted on the game thread for the pack workers.
+	// Public: the selection logic (ComputeShipModules) lives in file-static packaging helpers.
+	struct PkgMod
+	{
+		std::string name;         // canonical platform-neutral module name
+		std::string file;         // absolute binary path (the editor's discovered copy)
+		std::string service;      // service key when CHOSEN as the provider ("render"/"gui"/...), else ""
+		std::string provides;     // the module's own provides() ("" for plain plugins)
+		bool shared     = false;  // sharedService(): several providers live at once (scripting)
+		bool enabled    = false;  // on the project's plugin list (no list = all; PHASE_BOOT = yes)
+		bool editorTool = false;  // editor tooling: never ships
+		bool project    = false;  // project-local game module: the game's own code, always ships
+		std::vector<std::string> extraPak;                            // its shipExtras (pak files)
+		std::vector<std::pair<std::string, std::string>> extraDist;   // its shipExtras (dist copies)
+		void* script = nullptr;   // its iScript instance when it is a scripting backend, else null
+	};
+	std::map<std::string, PkgMod> SnapshotPkgMods();   // keyed by lowercase name (game thread only)
+	// Package Project's build half: the engine targets the dist needs, then the project's game
+	// modules, then PackageProjectNow.
+	void PackageProjectBuild(const std::string& cfg, const std::vector<std::string>& targets);
+private:
 	void PackageProjectCmd();                      // pre-fill (editor config + prev dist) -> open the modal
 	void DrawPackageProjectPopup();
 	// One row of the Mods panel; enable/disable + order writes config/mods.json.
@@ -411,6 +436,10 @@ public:
 	// into the Console. Skipped when `config` is the one this editor is running (locked
 	// binaries). onDone fires on the game thread.
 	void RunEngineBuild(const std::string& config, std::function<void(bool)> onDone);
+	// Same, restricted to the named superbuild targets (packaging: the player + the modules the
+	// dist ships — the editor and unused modules stay untouched). Empty list = everything.
+	void RunEngineBuild(const std::string& config, const std::vector<std::string>& targets,
+	                    std::function<void(bool)> onDone);
 
 	// C++ game modules: native NUKEModule DLLs in <project>/source, built to <project>/modules.
 	// Scaffold generates one; Discover pulls DLLs into the plugin pool (auto-enabled on first
