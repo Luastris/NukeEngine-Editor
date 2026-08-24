@@ -1542,13 +1542,18 @@ void EditorUI::DrawDynamicProps(nuke::Component* cmp)
 }
 
 // Vector3 editor with colored X/Y/Z axis labels (Unity-style). True if edited.
+// The row LABEL leads (fixed column), the fields fill the rest — a row reads name -> values
+// (user 2026-08-24: trailing labels made the transform section read backwards).
 bool EditorUI::EditV3(const char* rowLabel, double v[3])
 {
 	static const char* ax[3] = { "X", "Y", "Z" };
 	static const ImVec4 col[3] = { ImVec4(0.86f,0.34f,0.34f,1.0f), ImVec4(0.42f,0.74f,0.36f,1.0f), ImVec4(0.36f,0.55f,0.92f,1.0f) };
 	bool ch = false;
 	ImGui::PushID(rowLabel);
-	float w = (ImGui::GetContentRegionAvail().x - 150.0f) / 3.0f;
+	ImGui::AlignTextToFramePadding();
+	ImGui::TextUnformatted(rowLabel);
+	ImGui::SameLine(84.0f);
+	float w = (ImGui::GetContentRegionAvail().x - 66.0f) / 3.0f;   // 3 axis letters + spacing
 	if (w < 36.0f) w = 36.0f;
 	for (int i = 0; i < 3; ++i)
 	{
@@ -1557,10 +1562,9 @@ bool EditorUI::EditV3(const char* rowLabel, double v[3])
 		ImGui::SameLine();
 		ImGui::SetNextItemWidth(w);
 		ch |= ImGui::InputDouble("##v", &v[i], 0.0, 0.0, "%.3f");
-		ImGui::SameLine();
+		if (i < 2) ImGui::SameLine();
 		ImGui::PopID();
 	}
-	ImGui::TextUnformatted(rowLabel);
 	ImGui::PopID();
 	return ch;
 }

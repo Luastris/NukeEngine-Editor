@@ -23,6 +23,7 @@ static ImVec2 s_marqueeStart;
 #include <API/Model/Foliage.h>
 #include <API/Model/Surface.h>
 #include <API/Model/Spline.h>   // engine spline: exact polyline for hit-tests, point-edit API
+#include <API/Model/WorldStream.h>   // ST-viz: the streaming-cell overlay reads DebugCells
 #include <reflect/Reflect.h>            // WaterRiver type lives in the water plugin — reached by name
 #include <API/Model/DebugDraw.h>
 #include <functional>
@@ -30,6 +31,7 @@ static ImVec2 s_marqueeStart;
 #include <algorithm>
 #include <cctype>
 #include <cstring>   // strcmp: cross-DLL type-name match
+#include <cstdio>    // snprintf: ST-viz overlay labels
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/gtx/matrix_decompose.hpp>
 #include <glm/gtc/type_ptr.hpp>
@@ -248,6 +250,169 @@ void EditorUI::DrawEntityIcons(ImVec2 rmin, ImVec2 sz)
 		}
 }
 
+// ST-viz: the World Partition overlay. Ground rectangles of the XZ cells, colored by state
+// (loading > parked > loaded > cold-on-disk > known), an HLOD inset marker, per-cell size
+// labels where the cell is large enough on screen, and a summary line. Pure ImGui overlay
+// over the rendered image — same projection as the entity icons, works in edit AND play.
+void EditorUI::DrawStreamCells(ImVec2 rmin, ImVec2 sz)
+{
+	AppInstance* app = AppInstance::GetSingleton();
+	nuke::World* w = app->currentWorld;
+	if (!w || !w->stream || !editorCam || !editorCam->transform) return;
+	if (sz.x <= 1.0f || sz.y <= 1.0f) return;
+
+	glm::mat4 vp;
+	{
+		Transform* c = editorCam->transform;
+		Vector3 e = c->globalPosition();
+		Vector3 f = c->direction(), u = c->up();
+		glm::mat4 v = glm::lookAtLH(
+			glm::vec3((float)e.x, (float)e.y, (float)e.z),
+			glm::vec3((float)(e.x + f.x), (float)(e.y + f.y), (float)(e.z + f.z)),
+			glm::vec3((float)u.x, (float)u.y, (float)u.z));
+		vp = EditorCamProj(editorCam, sz.x / sz.y) * v;
+	}
+	auto toScreen = [&](double wx, double wz, ImVec2& out) -> bool
+	{
+		glm::vec4 clip = vp * glm::vec4((float)wx, 0.0f, (float)wz, 1.0f);
+		if (clip.w < 0.05f) return false;
+		out = ImVec2(rmin.x + (clip.x / clip.w * 0.5f + 0.5f) * sz.x,
+		             rmin.y + (0.5f - clip.y / clip.w * 0.5f) * sz.y);
+		return true;
+	};
+	auto fmtBytes = [](uint64_t b, char* buf, size_t n)
+	{
+		if (b >= (10ull << 20)) std::snprintf(buf, n, "%.0f MB", b / 1048576.0);
+		else if (b >= (1ull << 20)) std::snprintf(buf, n, "%.1f MB", b / 1048576.0);
+		else std::snprintf(buf, n, "%.0f KB", b / 1024.0);
+	};
+
+	const double cs = std::max(8.0f, (float)w->settings.streamCellSize);
+	struct Row { nuke::WorldStream::CellInfo ci; int atoms = 0; };
+	std::vector<Row> rows;
+	{
+		std::vector<nuke::WorldStream::CellInfo> cells;
+		w->stream->DebugCells(cells);
+		rows.reserve(cells.size());
+		for (const auto& ci : cells) rows.push_back({ ci, 0 });
+	}
+	// The editor FOLDS cells into the live world, so in edit mode the runtime map is empty (or
+	// partial). Synthesize the PROSPECTIVE partition from the spatial roots — the cells a save
+	// would split — and count atoms per cell; runtime cells just gain their atom count.
+	{
+		std::map<std::pair<int, int>, int> counts;
+		for (Atom* a : app->currentWorld->GetHierarchy())
+			if (a && nuke::WorldStream::Spatial(a))
+			{
+				Vector3 p = a->GetTransform().globalPosition();
+				const nuke::WorldStream::CellKey k = nuke::WorldStream::CellOf(p.x, p.z, (float)cs);
+				++counts[{ k.x, k.z }];
+			}
+		for (Row& r : rows)
+		{
+			auto it = counts.find({ r.ci.key.x, r.ci.key.z });
+			if (it != counts.end()) { r.atoms = it->second; counts.erase(it); }
+		}
+		for (const auto& kv : counts)
+		{
+			Row r;
+			r.ci.key.x = kv.first.first; r.ci.key.z = kv.first.second;
+			r.ci.loaded = true;   // resident in the live world
+			r.atoms = kv.second;
+			rows.push_back(r);
+		}
+	}
+	if (rows.empty()) return;
+
+	ImDrawList* dl = ImGui::GetWindowDrawList();
+	ImFont* font = ImGui::GetFont();
+	int nLoaded = 0, nParked = 0, nCold = 0, nLoading = 0, nHlod = 0;
+	uint64_t parkedB = 0, diskB = 0;
+	for (const Row& row : rows)
+	{
+		const nuke::WorldStream::CellInfo& ci = row.ci;
+		if (ci.loaded) ++nLoaded;
+		if (ci.parked) { ++nParked; parkedB += ci.parkedBytes; }
+		if (ci.fromFile && !ci.coldLoaded) ++nCold;
+		if (ci.loading) ++nLoading;
+		if (ci.hlodDraw) ++nHlod;
+		diskB += ci.fileBytes;
+
+		const double x0 = ci.key.x * cs, z0 = ci.key.z * cs, x1 = x0 + cs, z1 = z0 + cs;
+		ImVec2 p[4];
+		bool vis[4];
+		vis[0] = toScreen(x0, z0, p[0]); vis[1] = toScreen(x1, z0, p[1]);
+		vis[2] = toScreen(x1, z1, p[2]); vis[3] = toScreen(x0, z1, p[3]);
+
+		// State color (the fill stays translucent so the world reads through).
+		ImU32 col;
+		const char* state;
+		if (ci.loading)                          { col = IM_COL32(255, 160,  40, 255); state = "loading"; }
+		else if (ci.parked)                      { col = IM_COL32(235, 210,  60, 255); state = "parked"; }
+		else if (ci.loaded)                      { col = IM_COL32( 90, 220, 110, 255); state = "loaded"; }
+		else if (ci.fromFile && !ci.coldLoaded)  { col = IM_COL32( 90, 150, 255, 255); state = "cold"; }
+		else                                     { col = IM_COL32(160, 160, 160, 255); state = ""; }
+		const ImU32 fill = (col & 0x00FFFFFF) | (0x20u << 24);
+
+		if (vis[0] && vis[1] && vis[2] && vis[3])
+		{
+			dl->AddQuadFilled(p[0], p[1], p[2], p[3], fill);
+			dl->AddQuad(p[0], p[1], p[2], p[3], col, 2.0f);
+			if (ci.hlodDraw)   // inset magenta ring: the proxy stands in for this cell right now
+			{
+				ImVec2 c4((p[0].x + p[2].x) * 0.5f, (p[0].y + p[2].y) * 0.5f);
+				ImVec2 q[4];
+				for (int i = 0; i < 4; ++i) q[i] = ImVec2(p[i].x + (c4.x - p[i].x) * 0.12f, p[i].y + (c4.y - p[i].y) * 0.12f);
+				dl->AddQuad(q[0], q[1], q[2], q[3], IM_COL32(230, 90, 230, 220), 1.5f);
+			}
+			// Label when the cell has real screen estate.
+			const float dx = p[2].x - p[0].x, dy = p[2].y - p[0].y;
+			if (dx * dx + dy * dy > 70.0f * 70.0f)
+			{
+				char size[32] = "";
+				uint64_t bytes = ci.parked ? ci.parkedBytes : ci.fileBytes;
+				if (bytes) fmtBytes(bytes, size, sizeof(size));
+				char atoms[24] = "";
+				if (row.atoms) std::snprintf(atoms, sizeof(atoms), "  %d atom%s", row.atoms, row.atoms == 1 ? "" : "s");
+				char label[120];
+				std::snprintf(label, sizeof(label), "%d_%d%s%s%s%s%s%s", ci.key.x, ci.key.z,
+				              *state ? "  " : "", state, ci.hlodDraw ? " +hlod" : "",
+				              *size ? "  " : "", size, atoms);
+				ImVec2 c4((p[0].x + p[2].x) * 0.5f, (p[0].y + p[2].y) * 0.5f);
+				ImVec2 ts = font->CalcTextSizeA(ImGui::GetFontSize(), FLT_MAX, 0.0f, label);
+				ImVec2 tp(c4.x - ts.x * 0.5f, c4.y - ts.y * 0.5f);
+				dl->AddText(font, ImGui::GetFontSize(), ImVec2(tp.x + 1, tp.y + 1), IM_COL32(0, 0, 0, 200), label);
+				dl->AddText(font, ImGui::GetFontSize(), tp, col, label);
+			}
+		}
+		else
+		{
+			// The camera stands inside/over this cell: draw whichever edges are still projectable
+			// so the current cell never just vanishes from the overlay.
+			static const int e[4][2] = { {0, 1}, {1, 2}, {2, 3}, {3, 0} };
+			for (int i = 0; i < 4; ++i)
+				if (vis[e[i][0]] && vis[e[i][1]])
+					dl->AddLine(p[e[i][0]], p[e[i][1]], col, 2.0f);
+		}
+	}
+
+	// Summary (top-left of the viewport image).
+	{
+		char pb[32], db[32];
+		fmtBytes(parkedB, pb, sizeof(pb));
+		fmtBytes(diskB, db, sizeof(db));
+		char sum[256];
+		std::snprintf(sum, sizeof(sum),
+		              "Streaming: %d cells | %d loaded | %d parked (%s) | %d cold | %d loading | %d HLOD | disk %s | cell %.0f m%s",
+		              (int)rows.size(), nLoaded, nParked, pb, nCold, nLoading, nHlod, db, cs,
+		              nuke::WorldStream::Active(w) ? "" : "  [edit mode: prospective partition]");
+		ImVec2 ts = font->CalcTextSizeA(ImGui::GetFontSize(), FLT_MAX, 0.0f, sum);
+		ImVec2 tp(rmin.x + 8.0f, rmin.y + 8.0f);
+		dl->AddRectFilled(ImVec2(tp.x - 4, tp.y - 2), ImVec2(tp.x + ts.x + 4, tp.y + ts.y + 2), IM_COL32(0, 0, 0, 140), 3.0f);
+		dl->AddText(font, ImGui::GetFontSize(), tp, IM_COL32(235, 235, 235, 255), sum);
+	}
+}
+
 void EditorUI::winRender()
 {
 	if (!win->render) return;
@@ -388,6 +553,9 @@ void EditorUI::winRender()
 			// Entity icons must draw before the camera preview and the gizmo (edit mode only).
 			if (!possessed) DrawEntityIcons(imin, avail);
 			else            iconHits.clear();   // no stale clickable rects from the edit view
+			// ST-viz overlay: edit AND play (streaming actually runs in play — that is the
+			// interesting view); hidden while possessed (the game owns the screen then).
+			if (!possessed && streamVizVisible) DrawStreamCells(imin, avail);
 		}
 		else
 			ImGui::Text("No scene texture.");

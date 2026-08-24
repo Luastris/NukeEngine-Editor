@@ -230,6 +230,9 @@ void EditorUI::Toolbar()
 			ImGui::SetNextItemWidth(120); ImGui::DragFloat("Rotate", &snapRot,   0.5f,  0.5f,  90.0f,  "%.1f deg");
 			ImGui::SetNextItemWidth(120); ImGui::DragFloat("Scale",  &snapScale, 0.01f, 0.01f, 10.0f,  "%.2f");
 			ImGui::Checkbox("Show world grid", &gridVisible);
+			ImGui::Checkbox("Show streaming cells", &streamVizVisible);
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("World Partition overlay: XZ cells colored by state\n"
+			                                              "(loaded / parked / cold on disk / loading / HLOD) + sizes.");
 			ImGui::TextDisabled("Hold V while moving: surface snap");
 			ImGui::EndPopup();
 		}
@@ -331,6 +334,9 @@ void EditorUI::Draw()
 		static bool pkgSkipBuild = false;   // NUKE_PACKAGE=2: package as-built (probe runs)
 		if (pkgDelay == -2)
 		{
+			// NUKE_STREAM_VIZ=1: boot with the ST-viz streaming overlay on (probe runs).
+			if (const char* sv = std::getenv("NUKE_STREAM_VIZ"))
+				streamVizVisible = *sv == '1';
 			const char* e = std::getenv("NUKE_PACKAGE");
 			pkgDelay = (e && (*e == '1' || *e == '2')) ? 150 : -1;
 			pkgSkipBuild = e && *e == '2';

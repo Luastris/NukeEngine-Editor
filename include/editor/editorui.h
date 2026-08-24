@@ -788,6 +788,10 @@ public:
 	// Clickable billboard icons for invisible entities (camera / light / probe / environment),
 	// overlaid on the viewport image in edit mode using the gizmo's view/proj.
 	void DrawEntityIcons(ImVec2 rmin, ImVec2 sz);
+	// ST-viz: the World Partition streaming overlay — XZ cell rectangles colored by state
+	// (loaded / parked / cold / loading / HLOD) with per-cell sizes and a summary line.
+	void DrawStreamCells(ImVec2 rmin, ImVec2 sz);
+	bool streamVizVisible = false;   // toolbar toggle (session-only, like a debug view)
 	// This frame's icon hit-rects (min.xy, max.zw -> atom), back-to-front; the viewport
 	// click handler tests these BEFORE the scene ray-pick (topmost icon wins).
 	std::vector<std::pair<ImVec4, Atom*>> iconHits;
