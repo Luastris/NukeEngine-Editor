@@ -4,6 +4,8 @@
 #include <API/Model/Layers.h>        // render-layer slot names persist in the .nuproj
 #include <input/Input.h>             // Q6: explicit input-map list
 #include <iterator>
+#include <iostream>
+#include <cstring>
 
 // Point the editor at a .nuproj manifest, deriving the project directory from it.
 void EditorUI::SetProjectFile(const std::string& path)
@@ -67,7 +69,7 @@ void EditorUI::SaveProject()
 		if (!m || !m->loaded || !*m->provides()) continue;
 		if (m->sharedService()) continue;   // shared services load via the plugin list, no single choice
 		if (m->phase() == nuke::PHASE_BOOT && serviceChoices.count(m->provides())) continue;
-		serviceChoices[m->provides()] = m->moduleFile;
+		serviceChoices[m->provides()] = nuke::ModuleName(m->moduleFile);   // platform-neutral name
 	}
 	j["services"] = serviceChoices;
 	j["layers"] = nuke::Layers::All();   // render-layer slot names
@@ -144,19 +146,58 @@ void EditorUI::LoadProject()
 	serviceChoices.clear();
 	if (j.contains("services") && j["services"].is_object())
 		for (auto& kv : j["services"].items())
-			if (kv.value().is_string()) serviceChoices[kv.key()] = kv.value().get<std::string>();
+			if (kv.value().is_string())
+			{
+				const std::string v = kv.value().get<std::string>();
+				const std::string canon = nuke::ModuleName(v);   // platform-neutral
+				if (canon != v) projectHealed = true;
+				serviceChoices[kv.key()] = canon;
+			}
 	enabledPlugins.clear();
 	knownPlugins.clear();
+	// HEAL: a session that read module names out of dying DLL descriptors once persisted raw
+	// binary garbage into these lists. Only printable module FILE names pass; everything else
+	// is dropped loudly (the next save writes the clean lists, discovery re-adds real modules).
+	// The list stores platform-neutral module NAMES ("NukeVFX") — legacy entries with an
+	// extension ("NukeVFX.dll", "libNukeVFX.so") canonicalize on load, so a project moves
+	// between Windows / macOS / Linux without its plugin list going stale.
+	auto validModuleName = [](const std::string& n) -> bool
+	{
+		if (n.size() < 2 || n.size() > 128) return false;
+		for (unsigned char c : n)
+			if (c < 0x20 || c >= 0x7F || c == '/' || c == '\\') return false;
+		return true;
+	};
 	if (j.contains("plugins") && j["plugins"].is_array())
 	{
 		pluginListLoaded = true;
-		for (auto& p : j["plugins"]) enabledPlugins.push_back(p.get<std::string>());
+		for (auto& p : j["plugins"])
+		{
+			const std::string n = p.get<std::string>();
+			if (validModuleName(n))
+			{
+				const std::string canon = nuke::ModuleName(n);
+				if (canon != n) projectHealed = true;   // legacy platform file name: migrate on save
+				enabledPlugins.push_back(canon);
+			}
+			else { projectHealed = true; std::cout << "[editor]	game.nuproj: dropped a corrupted plugins entry (" << n.size() << " bytes)" << std::endl; }
+		}
 		// Older projects have no ledger: everything listed counts as seen, and anything else is
 		// treated as new (offered once) rather than as a deliberate "off".
 		for (const std::string& p : enabledPlugins) knownPlugins.insert(p);
 	}
 	if (j.contains("pluginsSeen") && j["pluginsSeen"].is_array())
-		for (auto& p : j["pluginsSeen"]) knownPlugins.insert(p.get<std::string>());
+		for (auto& p : j["pluginsSeen"])
+		{
+			const std::string n = p.get<std::string>();
+			if (validModuleName(n))
+			{
+				const std::string canon = nuke::ModuleName(n);
+				if (canon != n) projectHealed = true;
+				knownPlugins.insert(canon);
+			}
+			else { projectHealed = true; std::cout << "[editor]	game.nuproj: dropped a corrupted pluginsSeen entry (" << n.size() << " bytes)" << std::endl; }
+		}
 	// Render-layer slot names -> the engine's Layers registry.
 	if (j.contains("layers") && j["layers"].is_array())
 	{
@@ -338,7 +379,7 @@ void EditorUI::ApplyProjectPlugins()
 	{
 		enabledPlugins.clear();
 		for (auto& m : mods)
-			if (m->phase() != nuke::PHASE_BOOT) enabledPlugins.push_back(m->moduleFile);
+			if (m->phase() != nuke::PHASE_BOOT) enabledPlugins.push_back(nuke::ModuleName(m->moduleFile));
 		pluginListLoaded = true;
 		SaveProject();
 	}
@@ -360,10 +401,10 @@ void EditorUI::ApplyProjectPlugins()
 		// engine's shielded wrappers — a stale plugin must not kill the editor at startup.
 		const bool isTool = nuke::ModuleIsEditorTool(m.get());
 		bool want = listed(m->moduleFile);
-		if (!want && isTool && !knownPlugins.count(m->moduleFile))
+		if (!want && isTool && !knownPlugins.count(nuke::ModuleName(m->moduleFile)))
 		{
 			want = true;
-			enabledPlugins.push_back(m->moduleFile);
+			enabledPlugins.push_back(nuke::ModuleName(m->moduleFile));
 			pluginListDirty = true;
 		}
 		// A companion has nothing to edit while its runtime module is off — and its panels would
@@ -375,7 +416,7 @@ void EditorUI::ApplyProjectPlugins()
 			          << companion << "' is disabled" << std::endl;
 			want = false;
 		}
-		knownPlugins.insert(m->moduleFile);
+		knownPlugins.insert(nuke::ModuleName(m->moduleFile));
 		if (want) nuke::EnablePlugin(m.get());
 	}
 	if (pluginListDirty) { pluginListDirty = false; SaveProject(); }
@@ -388,8 +429,8 @@ void EditorUI::SyncEnabledPlugins()
 	for (auto& m : nuke::GetModules())
 	{
 		if (!m || m->phase() == nuke::PHASE_BOOT) continue;
-		knownPlugins.insert(m->moduleFile);          // seen, whether it ends up on or off
-		if (m->loaded) enabledPlugins.push_back(m->moduleFile);
+		knownPlugins.insert(nuke::ModuleName(m->moduleFile));   // seen, whether it ends up on or off
+		if (m->loaded) enabledPlugins.push_back(nuke::ModuleName(m->moduleFile));
 	}
 	SaveProject();
 }

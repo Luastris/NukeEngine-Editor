@@ -1,5 +1,6 @@
 // C++ game modules: scaffold, discovery and the build-and-reload cycle for the
 // NUKEModule DLLs in <project>/source -> <project>/modules.
+#include <cstring>   // strcmp (config comparison)
 #include <editor/editorui.h>
 #include <interface/Modular.h>
 #include <API/Model/Jobs.h>
@@ -179,12 +180,13 @@ void EditorUI::CreateGameModuleScaffold(const std::string& name)
 "\n"
 "target_link_libraries(" << name << " PRIVATE NukeEngine)\n"
 "\n"
-"# The module lands in <project>/modules/ — the editor scans it into the plugin pool.\n"
+"# The module lands in <project>/modules/$<CONFIG>/ — Debug and Release keep their own\n"
+"# builds side by side; the editor and the player each load the one matching themselves.\n"
 "add_custom_command(TARGET " << name << " POST_BUILD\n"
-"    COMMAND ${CMAKE_COMMAND} -E make_directory \"${CMAKE_CURRENT_SOURCE_DIR}/../../modules\"\n"
+"    COMMAND ${CMAKE_COMMAND} -E make_directory \"${CMAKE_CURRENT_SOURCE_DIR}/../../modules/$<CONFIG>\"\n"
 "    COMMAND ${CMAKE_COMMAND} -E copy_if_different\n"
-"            \"$<TARGET_FILE:" << name << ">\" \"${CMAKE_CURRENT_SOURCE_DIR}/../../modules/\"\n"
-"    COMMENT \"Deploying " << name << " to the project's modules/\")\n";
+"            \"$<TARGET_FILE:" << name << ">\" \"${CMAKE_CURRENT_SOURCE_DIR}/../../modules/$<CONFIG>/\"\n"
+"    COMMENT \"Deploying " << name << " to the project's modules/$<CONFIG>/\")\n";
 	}
 
 	// The engine's PUBLIC dependencies — what its headers expose to anyone compiling against
@@ -459,10 +461,31 @@ void EditorUI::CreateGameModuleScaffold(const std::string& name)
 
 // ---- discovery -----------------------------------------------------------------------------
 
+// The running host's build config — project modules are split per config under
+// <project>/modules/<Config>/ (the flat modules/ root stays as the legacy fallback).
+static const char* RunningConfig()
+{
+#ifdef _DEBUG
+	return "Debug";
+#else
+	return "Release";
+#endif
+}
+
+// The directory THIS process loads project modules from: modules/<Config>/ when it exists,
+// else the legacy flat modules/.
+static bfs::path ProjectModulesDirFor(const std::string& projectDir, const char* config)
+{
+	boost::system::error_code ec;
+	const bfs::path split = bfs::path(projectDir) / "modules" / config;
+	if (bfs::exists(split, ec)) return split;
+	return bfs::path(projectDir) / "modules";
+}
+
 void EditorUI::DiscoverProjectModules()
 {
 	boost::system::error_code ec;
-	const bfs::path dir = bfs::path(projectDir) / "modules";
+	const bfs::path dir = ProjectModulesDirFor(projectDir, RunningConfig());
 	// A module the project HAS sources for but no built DLL for is invisible everywhere its
 	// components should appear (Add Component, prop pickers, worlds that reference it) — and
 	// silently so. Build it once per session instead, exactly like the script backends build
@@ -512,10 +535,12 @@ void EditorUI::DiscoverProjectModules()
 		boost::system::error_code ec2;
 		const std::string mp = bfs::absolute(bfs::path(m->modulePath), ec2).generic_string();
 		if (mp.rfind(prefix, 0) != 0) continue;   // not a project-local module
-		const bool listed = std::find(enabledPlugins.begin(), enabledPlugins.end(), m->moduleFile) != enabledPlugins.end();
+		bool listed = false;
+		for (const std::string& e : enabledPlugins)
+			if (nuke::ModuleFileMatches(e, m->moduleFile)) { listed = true; break; }
 		if (!listed && pluginListLoaded)
 		{
-			enabledPlugins.push_back(m->moduleFile);   // first sight: wanted by definition
+			enabledPlugins.push_back(nuke::ModuleName(m->moduleFile));   // first sight: wanted by definition
 			SaveProject();
 		}
 		if (!m->loaded && (listed || pluginListLoaded))
@@ -586,10 +611,46 @@ void EditorUI::BuildGameModules(const char* config, std::function<void(bool)> on
 		     "  \"dependencies\": [ \"boost\", \"nlohmann-json\", \"glm\" ]\n}\n";
 	}
 
+	// Legacy scaffolds deployed to the FLAT modules/ regardless of config — a Release build
+	// then clobbered the Debug DLLs the running editor had loaded. Rewrite the generated
+	// deploy block in place to the per-config form (only the exact generated strings; a
+	// customized CMakeLists is left alone and the build-tree sync below covers it).
+	for (bfs::directory_iterator it(srcDir, ec), end; it != end && !ec; it.increment(ec))
+	{
+		if (!bfs::is_directory(it->path())) continue;
+		const bfs::path cml = it->path() / "CMakeLists.txt";
+		if (!bfs::exists(cml, ec)) continue;
+		std::string text;
+		{
+			bfs::ifstream f(cml, std::ios::binary);
+			if (!f) continue;
+			text.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+		}
+		const std::string oldMk  = "-E make_directory \"${CMAKE_CURRENT_SOURCE_DIR}/../../modules\"";
+		const std::string newMk  = "-E make_directory \"${CMAKE_CURRENT_SOURCE_DIR}/../../modules/$<CONFIG>\"";
+		const std::string oldCp  = "\"${CMAKE_CURRENT_SOURCE_DIR}/../../modules/\"";
+		const std::string newCp  = "\"${CMAKE_CURRENT_SOURCE_DIR}/../../modules/$<CONFIG>/\"";
+		size_t a = text.find(oldMk), b = text.find(oldCp);
+		if (a == std::string::npos || b == std::string::npos) continue;
+		text.replace(a, oldMk.size(), newMk);
+		b = text.find(oldCp);
+		text.replace(b, oldCp.size(), newCp);
+		bfs::ofstream f(cml, std::ios::binary | std::ios::trunc);
+		if (f)
+		{
+			f << text;
+			std::cout << "[gamemodule]\t" << it->path().filename().string()
+			          << "/CMakeLists.txt: deploy updated to modules/$<CONFIG>/ (Debug and Release now coexist)" << std::endl;
+		}
+	}
+
 	// The project DLLs must leave the pool before the build can overwrite them — including the
-	// plugin window's selection, whose held shared_ptr keeps the file locked.
+	// plugin window's selection, whose held shared_ptr keeps the file locked. Building the
+	// OTHER config touches only its own modules/<Config>/ dir: nothing to unload.
+	const bool sameCfg = !config || strcmp(config, RunningConfig()) == 0;
 	selectedPlugin = nullptr; selectedPluginIndex = -1;
 	std::set<std::string> unloaded;
+	if (sameCfg)
 	{
 		const std::string prefix = bfs::absolute(proj / "modules", ec).generic_string();
 		std::vector<std::string> files;
@@ -604,15 +665,13 @@ void EditorUI::BuildGameModules(const char* config, std::function<void(bool)> on
 			if (nuke::UnloadModuleDll(f)) unloaded.insert(f);
 	}
 
-#ifdef _DEBUG
-	const char* cfg = "Debug";     // the module must match the RUNNING host's CRT/engine lib
-#else
-	const char* cfg = "Release";
-#endif
-	if (config) cfg = config;      // packaging builds Release regardless of the editor's config
-	StatusBar::Set("gmbuild", std::string("Game modules: building ") + cfg + "...", StatusBar::kIndeterminate);
+	// A VALUE copy: `config` may point into a caller-owned string that dies before the build
+	// job runs (it did: msbuild got 0xDD garbage as the configuration name).
+	const std::string cfg = config ? config : RunningConfig();
+	StatusBar::Set("gmbuild", "Game modules: building " + cfg + "...", StatusBar::kIndeterminate);
 	const std::string srcStr = srcDir.string();
-	nuke::Jobs::Schedule([this, srcStr, cfg, onDone]()
+	const std::string projStr = proj.string();
+	nuke::Jobs::Schedule([this, srcStr, projStr, cfg, sameCfg, onDone]()
 	{
 		auto run = [&](const std::string& cmdLine) -> bool
 		{
@@ -696,12 +755,41 @@ void EditorUI::BuildGameModules(const char* config, std::function<void(bool)> on
 		bool ok = run("cmake -S \"" + srcStr + "\" -B \"" + bld + "\"" + rootArg);
 		if (ok) ok = run("cmake --build \"" + bld + "\" --config " + cfg + " --parallel");
 
-		nuke::Jobs::RunOnMain([this, ok, onDone]()
+		// Belt and braces for scaffolds whose deploy could not be patched: sync every module
+		// DLL the build tree produced for THIS config into modules/<Config>/.
+		if (ok)
+		{
+			boost::system::error_code sec;
+			const bfs::path dst = bfs::path(projStr) / "modules" / cfg;
+			bfs::create_directories(dst, sec);
+			for (bfs::directory_iterator it(bfs::path(srcStr), sec), end; it != end && !sec; it.increment(sec))
+			{
+				if (!bfs::is_directory(it->path()) || !bfs::exists(it->path() / "CMakeLists.txt")) continue;
+				const std::string name = it->path().filename().string();
+#ifdef _WIN32
+				const bfs::path built = bfs::path(bld) / name / cfg / (name + ".dll");
+#elif defined(__APPLE__)
+				const bfs::path built = bfs::path(bld) / name / ("lib" + name + ".dylib");
+#else
+				const bfs::path built = bfs::path(bld) / name / ("lib" + name + ".so");
+#endif
+				boost::system::error_code cec;
+				if (bfs::exists(built, cec))
+				{
+					bfs::copy_file(built, dst / built.filename(), bfs::copy_options::overwrite_existing, cec);
+					const bfs::path pdb = built.parent_path() / (name + ".pdb");
+					if (bfs::exists(pdb, cec)) bfs::copy_file(pdb, dst / pdb.filename(), bfs::copy_options::overwrite_existing, cec);
+				}
+			}
+		}
+
+		nuke::Jobs::RunOnMain([this, ok, sameCfg, onDone]()
 		{
 			StatusBar::Remove("gmbuild");
 			std::cout << "[gamemodule]\tbuild " << (ok ? "OK" : "FAILED") << std::endl;
-			// Re-discover either way: a failed build leaves the old DLLs to reload.
-			DiscoverProjectModules();
+			// Re-discover either way (a failed build leaves the old DLLs to reload) — but only
+			// for the RUNNING config; another config's build never touched this pool.
+			if (sameCfg) DiscoverProjectModules();
 			if (onDone) onDone(ok);
 		});
 	});

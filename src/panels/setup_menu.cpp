@@ -185,6 +185,13 @@ void EditorUI::SetUp()
 	// Legacy .nuproj bindings first, the machine Preferences last — the prefs win.
 	nuke::Hotkeys::Get()->ApplyBindings(pendingHotkeyBinds);
 	nuke::Hotkeys::Get()->ApplyBindings(prefsHotkeyBinds);
+	if (projectHealed)
+	{
+		// The load dropped corrupted entries: write the clean lists back NOW, not whenever the
+		// next unrelated change happens to save.
+		projectHealed = false;
+		SaveProject();
+	}
 
 	boost::system::error_code ec;
 	bfs::create_directories(contentDir, ec);

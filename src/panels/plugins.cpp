@@ -73,7 +73,7 @@ void EditorUI::PluginMGRWindow()
 			// A boot provider shows the project choice (what runs next start), not what is live now.
 			bool on = mod->loaded;
 			if (isBoot && *service && serviceChoices.count(service))
-				on = (serviceChoices[service] == mod->moduleFile);
+				on = nuke::ModuleFileMatches(serviceChoices[service], mod->moduleFile);
 			if (ImGui::Checkbox("##en", &on))   // deferred: applied after the frame, never mid-iteration
 				pendingPluginToggle.push_back({ mod.get(), on });
 
@@ -127,7 +127,7 @@ void EditorUI::PluginMGRWindow()
 			const char* service = selectedPlugin->provides();
 			const bool  isBoot  = selectedPlugin->phase() == nuke::PHASE_BOOT;
 			if (isBoot && *service && serviceChoices.count(service))
-				on = (serviceChoices[service] == selectedPlugin->moduleFile);
+				on = nuke::ModuleFileMatches(serviceChoices[service], selectedPlugin->moduleFile);
 			if (ImGui::Checkbox("Loaded for this project", &on))
 				pendingPluginToggle.push_back({ selectedPlugin.get(), on });
 			if (isBoot)

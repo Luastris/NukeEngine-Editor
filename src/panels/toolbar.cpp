@@ -327,8 +327,14 @@ void EditorUI::Draw()
 	// Dev hooks: env vars fire packaging/build/play actions a few seconds after boot.
 	{
 		static int pkgDelay = -2;
-		if (pkgDelay == -2) { const char* e = std::getenv("NUKE_PACKAGE"); pkgDelay = (e && *e == '1') ? 150 : -1; }
-		if (pkgDelay > 0 && --pkgDelay == 0) PackageProject();
+		static bool pkgSkipBuild = false;   // NUKE_PACKAGE=2: package as-built (probe runs)
+		if (pkgDelay == -2)
+		{
+			const char* e = std::getenv("NUKE_PACKAGE");
+			pkgDelay = (e && (*e == '1' || *e == '2')) ? 150 : -1;
+			pkgSkipBuild = e && *e == '2';
+		}
+		if (pkgDelay > 0 && --pkgDelay == 0) { if (pkgSkipBuild) PackageProjectNow(); else PackageProject(); }
 		static int modDelay = -2;
 		static std::string modHookName;   // NUKE_PACKAGE_MOD=<name>; "1" = fallbacks
 		if (modDelay == -2)
@@ -464,7 +470,7 @@ void EditorUI::Draw()
 			{
 				if (pt.second && *pt.first->provides())
 				{
-					serviceChoices[pt.first->provides()] = pt.first->moduleFile;
+					serviceChoices[pt.first->provides()] = nuke::ModuleName(pt.first->moduleFile);
 					SaveProject();
 				}
 				continue;

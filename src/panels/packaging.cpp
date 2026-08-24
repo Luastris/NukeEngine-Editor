@@ -806,36 +806,34 @@ SplitPakFiles(std::vector<std::pair<std::string, std::string>>& files, int split
 
 void EditorUI::PackageProject()
 {
-	// Rebuild Release FIRST so stale binaries never ship (the superbuild is incremental).
-	RunEngineBuild("Release", [this](bool ok)
+	// Rebuild the CHOSEN config first so stale binaries never ship (the superbuild is
+	// incremental). The same config flows through everything: engine + player + engine
+	// modules from its run dir, the project's game modules from modules/<Config>/.
+	const std::string cfg = gbBuildCfg == 1 ? "Debug" : "Release";
+	RunEngineBuild(cfg, [this, cfg](bool ok)
 	{
 		if (!ok)
 		{
-			std::cout << "[Package]\taborted: the Release build failed — fix it and package again" << std::endl;
+			std::cout << "[Package]\taborted: the " << cfg << " build failed — fix it and package again" << std::endl;
 			return;
 		}
-		// The project's own game modules ship from <project>/modules — they must be RELEASE
-		// binaries like the rest of the dist (a Debug Game.dll imports the debug CRT and does
-		// not load outside a dev machine). Build them Release, package, then restore the
-		// editor's own config so Build & Reload development continues unchanged.
+		// The project's own game modules must match the dist's config (a Debug Game.dll in a
+		// Release dist imports the debug CRT and dies on any machine without VS). Per-config
+		// module dirs mean this build never touches the editor's own loaded DLLs.
 		boost::system::error_code ec;
 		if (bfs::exists(bfs::path(projectDir) / "source", ec))
 		{
-			BuildGameModules("Release", [this](bool mok)
+			BuildGameModules(cfg.c_str(), [this, cfg](bool mok)
 			{
 				if (!mok)
 				{
-					std::cout << "[Package]\taborted: the game-module Release build failed — fix it and package again" << std::endl;
-					restoreGameModulesAfterPackage = false;
-					BuildGameModules(nullptr, nullptr);   // put the dev-config DLLs back
+					std::cout << "[Package]\taborted: the game-module " << cfg << " build failed — fix it and package again" << std::endl;
 					return;
 				}
-				restoreGameModulesAfterPackage = true;
 				PackageProjectNow();
 			});
 			return;
 		}
-		restoreGameModulesAfterPackage = false;
 		PackageProjectNow();
 	});
 }
@@ -905,7 +903,7 @@ void EditorUI::PackageProjectNow()
 	for (auto& m : nuke::GetModules())
 		if (m && nuke::ModuleIsEditorTool(m.get()))
 		{
-			std::string s = bfs::path(m->moduleFile).stem().string();
+			std::string s = nuke::ModuleName(m->moduleFile);
 			for (char& c : s) c = (char)tolower((unsigned char)c);
 			editorToolStems.insert(s);
 		}
@@ -916,9 +914,12 @@ void EditorUI::PackageProjectNow()
 	for (auto& m : nuke::GetModules())
 		if (m && m->loaded) m->shipExtras(projDir.c_str(), extraPak, extraDist);
 
-	StatusBar::Set("package", "Packaging project...", StatusBar::kIndeterminate);
+	// The dist's build configuration: which sibling run dir the binaries come from and which
+	// modules/<Config>/ the project modules ship from.
+	const std::string distCfg = gbBuildCfg == 1 ? "Debug" : "Release";
+	StatusBar::Set("package", "Packaging project (" + distCfg + ")...", StatusBar::kIndeterminate);
 	nuke::Jobs::Schedule([this, projDir, projFile, content, gameName, icon, method, level, blockMB, splitMode, splitCapMB,
-	                      modules, editorToolStems, distStr, guidFiles,
+	                      modules, editorToolStems, distStr, guidFiles, distCfg,
 	                      extraPak, extraDist, gbSet, gbCfg, gbLogS, gbDbgS]()
 	{
 		Package::CreateOptions pakOpts; pakOpts.blockBytes = (uint32_t)blockMB << 20;
@@ -1024,11 +1025,11 @@ void EditorUI::PackageProjectNow()
 			const char* playerBin = "NukePlayer";
 			const char* engineBin = "libNukeEngine.so";
 #endif
-			bfs::path rel = rt.parent_path() / "Release";   // sibling config dir (dev tree only)
+			bfs::path rel = rt.parent_path() / distCfg;   // sibling config dir (dev tree only)
 			if (rel != rt && bfs::exists(rel / playerBin, ec) && bfs::exists(rel / engineBin, ec))
 				rt = rel;
 			else if (rel != rt)
-				std::cout << "[Package]\tRelease build not found — bundling the CURRENT config's binaries" << std::endl;
+				std::cout << "[Package]\t" << distCfg << " build not found — bundling the CURRENT config's binaries" << std::endl;
 		}
 		for (const char* dirName : { "shaders", "fonts" })
 			for (bfs::recursive_directory_iterator it(rt / dirName, ec), end; it != end && !ec; it.increment(ec))
@@ -1298,7 +1299,7 @@ void EditorUI::PackageProjectNow()
 			for (const std::string& m : modules)
 			{
 				{
-					std::string stem = bfs::path(m).stem().string();
+					std::string stem = nuke::ModuleName(m);
 					for (char& c : stem) c = (char)tolower((unsigned char)c);
 					if (editorToolStems.count(stem))
 					{
@@ -1306,26 +1307,23 @@ void EditorUI::PackageProjectNow()
 						continue;
 					}
 				}
-				bfs::path src = rt / "modules" / m;
-				std::string shipName = m;   // the file name that lands in dist/modules
-				// Project-local game modules (<project>/modules) ship too; editor modules win on name clash.
+				// The list holds platform-neutral NAMES; the file on disk is this platform's
+				// spelling ("NukeVFX" -> NukeVFX.dll / libNukeVFX.so). Legacy entries that
+				// still carry a foreign extension resolve through the same helper.
+				const std::string native = nuke::ModuleFileName(nuke::ModuleName(m));
+				std::string shipName = native;   // the file name that lands in dist/modules
 				boost::system::error_code mec;
-				if (!bfs::exists(src, mec)) src = bfs::path(projDir) / "modules" / m;
-				// Cross-platform manifests carry the AUTHORING platform's file name (or a bare
-				// stem) — resolve to this platform's module extension before giving up.
-				if (!bfs::exists(src, mec))
+				bfs::path src = rt / "modules" / native;
+				// Project-local game modules ship too; editor modules win on name clash.
+				if (!bfs::exists(src, mec)) src = bfs::path(projDir) / "modules" / distCfg / native;
+				if (!bfs::exists(src, mec)) src = bfs::path(projDir) / "modules" / native;
+				// Last resort: the entry verbatim (a hand-written file name).
+				if (!bfs::exists(src, mec) && m != native)
 				{
-#ifdef _WIN32
-					const char* nativeExt = ".dll";
-#elif defined(__APPLE__)
-					const char* nativeExt = ".dylib";
-#else
-					const char* nativeExt = ".so";
-#endif
-					const std::string native = bfs::path(m).stem().string() + nativeExt;
-					src = rt / "modules" / native;
-					if (!bfs::exists(src, mec)) src = bfs::path(projDir) / "modules" / native;
-					if (bfs::exists(src, mec)) shipName = native;
+					src = rt / "modules" / m;
+					if (!bfs::exists(src, mec)) src = bfs::path(projDir) / "modules" / distCfg / m;
+					if (!bfs::exists(src, mec)) src = bfs::path(projDir) / "modules" / m;
+					if (bfs::exists(src, mec)) shipName = m;
 				}
 				if (IsEditorOnlyModule(src))
 				{
@@ -1338,7 +1336,7 @@ void EditorUI::PackageProjectNow()
 					std::string bytes;
 					bfs::ifstream mf(src, std::ios::binary);
 					if (mf) bytes.assign(std::istreambuf_iterator<char>(mf), std::istreambuf_iterator<char>());
-					if (bytes.find("ucrtbased.dll") != std::string::npos)
+					if (distCfg != "Debug" && bytes.find("ucrtbased.dll") != std::string::npos)
 						std::cout << "[Package]\tWARNING: module '" << shipName << "' is a DEBUG build (imports ucrtbased.dll)"
 						          << " — it will NOT load on machines without Visual Studio. Rebuild it Release." << std::endl;
 				}
@@ -1408,12 +1406,6 @@ void EditorUI::PackageProjectNow()
 				          << (bytes / (1024 * 1024)) << " MB)" << std::endl;
 			}
 			else std::cout << "[Package]\tPACKAGING FAILED — see messages above." << std::endl;
-			if (restoreGameModulesAfterPackage)
-			{
-				// The dist took the Release game modules; give the editor its own config back.
-				restoreGameModulesAfterPackage = false;
-				BuildGameModules(nullptr, nullptr);
-			}
 		});
 	});
 }
@@ -2247,6 +2239,13 @@ void EditorUI::DrawPackageProjectPopup()
 	if (!ImGui::BeginPopupModal("Game Build", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
 
 	{
+		// Full-Debug dists exist for developers: everything (engine, player, modules, the
+		// project's own game modules) is bundled from the chosen configuration.
+		const char* cfgModes[] = { "Release (ship)", "Debug (dev — needs the debug CRT / VS on the target)" };
+		ImGui::Combo("Build", &gbBuildCfg, cfgModes, IM_ARRAYSIZE(cfgModes));
+		ImGui::SameLine(); ImGui::TextDisabled("(?)");
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Which build of the game ships: Release for players,\n"
+		                                              "Debug for asserts + debugging on machines with Visual Studio.");
 #ifdef _WIN32
 		const char* beModes[] = { "Direct3D 11", "Direct3D 12 (DirectStorage)", "Vulkan" };
 		ImGui::Combo("Render Backend", &gbWin.backend, beModes, IM_ARRAYSIZE(beModes));

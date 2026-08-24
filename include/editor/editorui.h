@@ -237,6 +237,7 @@ private:
 	bool        openSaveAsPopup = false;           // request to open the "Save World As" modal
 	char        saveAsBuf[256] = "";               // edited world FILE name
 	std::string saveAsDir;                         // chosen target folder (full path) in the save dialog
+	bool projectHealed = false;                    // load dropped corrupted entries: persist the clean lists once
 	std::map<std::string, int> pendingHotkeyBinds; // LEGACY hotkey bindings from an old .nuproj (prefs override them)
 	std::map<std::string, int> prefsHotkeyBinds;   // hotkey bindings from Preferences, applied after plugins load
 	std::string projectDir  = "project";           // project root
@@ -299,6 +300,7 @@ private:
 	nuke::NukeWindow gbWin{};                      // dialog model (game window settings for the dist)
 	bool gbLog   = false;                          // dist logToConsole
 	bool gbDebug = false;                          // dist gpuValidation (debug layer)
+	int  gbBuildCfg = 0;                           // dist binaries: 0 = Release (ship), 1 = Debug (dev)
 	void PackageProjectCmd();                      // pre-fill (editor config + prev dist) -> open the modal
 	void DrawPackageProjectPopup();
 	// One row of the Mods panel; enable/disable + order writes config/mods.json.
@@ -405,7 +407,6 @@ public:
 	// packed as content/game.nupak).
 	void PackageProject();           // Release build first, then dist
 	void PackageProjectNow();        // the packaging body itself (no build step)
-	bool restoreGameModulesAfterPackage = false;   // packaging built Release game modules: rebuild the dev config after
 	// Run `cmake --build <repo>/build --config <config>` on a Jobs worker, streaming output
 	// into the Console. Skipped when `config` is the one this editor is running (locked
 	// binaries). onDone fires on the game thread.
