@@ -237,13 +237,15 @@ private:
 	bool        openSaveAsPopup = false;           // request to open the "Save World As" modal
 	char        saveAsBuf[256] = "";               // edited world FILE name
 	std::string saveAsDir;                         // chosen target folder (full path) in the save dialog
-	std::map<std::string, int> pendingHotkeyBinds; // hotkey bindings from the .nuproj, applied after plugins load
+	std::map<std::string, int> pendingHotkeyBinds; // LEGACY hotkey bindings from an old .nuproj (prefs override them)
+	std::map<std::string, int> prefsHotkeyBinds;   // hotkey bindings from Preferences, applied after plugins load
 	std::string projectDir  = "project";           // project root
 	std::string projectFile = "project/game.nuproj";
 	std::string projectName = "NukeGame";          // .nuproj "name" (dist/pak naming)
 	// Pak compression for the project (release) and for mods, persisted in the .nuproj.
-	int pakMethod = 2, pakLevel = 22;              // 0 store / 1 zlib / 2 zstd
+	int pakMethod = 3, pakLevel = 9;               // 0 store / 1 zlib / 2 zstd / 3 gdeflate (DirectStorage)
 	int modMethod = 0, modLevel = 0;
+	int pakBlockMB = 8;                            // pak block size: one DirectStorage request (texture mips split to fit)
 	std::string gameIcon;                          // .ico (content-relative) stamped onto the shipped exe
 	std::string distPath;                          // build output ("" = default: <project>/dist; abs or project-relative)
 	uint64_t    iconPrevTex = 0;                   // live preview texture of gameIcon (settings window)
@@ -403,6 +405,7 @@ public:
 	// packed as content/game.nupak).
 	void PackageProject();           // Release build first, then dist
 	void PackageProjectNow();        // the packaging body itself (no build step)
+	bool restoreGameModulesAfterPackage = false;   // packaging built Release game modules: rebuild the dev config after
 	// Run `cmake --build <repo>/build --config <config>` on a Jobs worker, streaming output
 	// into the Console. Skipped when `config` is the one this editor is running (locked
 	// binaries). onDone fires on the game thread.
@@ -414,6 +417,8 @@ public:
 	void CreateGameModuleScaffold(const std::string& name);
 	void DiscoverProjectModules();
 	void BuildGameModules();
+	// Explicit config (nullptr = the running editor's) + completion on the game thread.
+	void BuildGameModules(const char* config, std::function<void(bool)> onDone);
 	bool gmNamePopup = false;            // "New C++ Game Module" modal trigger (main menu)
 	char gmNameBuf[64] = "";
 	void PackageMod(const std::string& name = "");   // "" -> last used / project name (dev hook)

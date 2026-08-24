@@ -412,6 +412,12 @@ void EditorUI::LoadPreferences()
 			editorBackend      = j.value("editorBackend", 2);   // editor default = Vulkan
 			editorRayTracing   = j.value("editorRayTracing", true);
 			startupProjectMode = j.value("startupProject", 0);  // 0 = open last, 1 = always ask (hub)
+			// Hotkey bindings are a MACHINE preference (how the user works), not a project one;
+			// applied after plugins load so plugin-registered ids exist.
+			prefsHotkeyBinds.clear();
+			if (j.contains("hotkeys") && j["hotkeys"].is_object())
+				for (auto& kv : j["hotkeys"].items())
+					if (kv.value().is_number_integer()) prefsHotkeyBinds[kv.key()] = kv.value().get<int>();
 			recentProjects.clear();
 			if (j.contains("recentProjects") && j["recentProjects"].is_array())
 				for (auto& r : j["recentProjects"])
@@ -443,6 +449,11 @@ void EditorUI::SavePreferences()
 	j["editorBackend"]      = editorBackend;
 	j["editorRayTracing"]   = editorRayTracing;
 	j["startupProject"]     = startupProjectMode;   // 0 = open last project, 1 = always ask (hub)
+	{
+		nlohmann::json hk = nlohmann::json::object();   // hotkey bindings: id -> chord
+		for (auto& kv : nuke::Hotkeys::Get()->ExportBindings()) hk[kv.first] = kv.second;
+		j["hotkeys"] = hk;
+	}
 	j["recentProjects"]     = recentProjects;       // newest-first absolute .nuproj paths
 	bfs::ofstream f(PreferencesPath(), std::ios::trunc);
 	if (f) f << j.dump(2);
@@ -454,13 +465,13 @@ void EditorUI::winPreferences()
 	if (prefsFocus) { NukeUI::DocFocus("panel:preferences"); prefsFocus = false; }
 	NukeUI::DocPanel("panel:preferences", "Preferences", &prefsOpen, window_flags, 640, 480, [this]()
 	{
-		static const char* kCats[] = { "Editor", "Interface", "Windows", "External editor", "System" };
+		static const char* kCats[] = { "Editor", "Interface", "Hotkeys", "Windows", "External editor", "System" };
 		shellPrefs.Begin("prefs", kCats, IM_ARRAYSIZE(kCats));
 		if (shellPrefs.Section("Editor", "Editor", "render backend ray tracing startup project vulkan d3d12"))
 		{
 			// Editor-only backend; the runtime (Player) backend is a project setting.
 #ifdef _WIN32
-			const char* ebModes[] = { "Direct3D 11", "Direct3D 12 (ray tracing)", "Vulkan (default)" };
+			const char* ebModes[] = { "Direct3D 11", "Direct3D 12", "Vulkan (default)" };
 			int eb = editorBackend;
 			if (ImGui::Combo(LProp("Editor Render Backend").c_str(), &eb, ebModes, IM_ARRAYSIZE(ebModes)) && eb != editorBackend)
 			{
@@ -540,6 +551,35 @@ void EditorUI::winPreferences()
 					"  a single game window needs none of the above.)\n"
 					"Applied on the next editor restart. NUKE_DISPLAY_BACKEND overrides this.");
 #endif
+		}
+		if (shellPrefs.Section("Hotkeys", "Hotkeys", "rebind key binding shortcut chord"))
+		{
+		ImGui::Text("Rebind, then press a key combo. Conflicting hotkeys stay unbound — assign manually.");
+		nuke::Hotkeys* hk = nuke::Hotkeys::Get();
+		if (ImGui::BeginTable("hk", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingStretchProp))
+		{
+			ImGui::TableSetupColumn("Action");
+			ImGui::TableSetupColumn("Binding");
+			ImGui::TableSetupColumn("");
+			ImGui::TableHeadersRow();
+			for (const nuke::Hotkey& h : hk->All())
+			{
+				ImGui::TableNextRow();
+				ImGui::TableNextColumn(); ImGui::TextUnformatted(h.name.c_str());
+				ImGui::TableNextColumn();
+				if (rebindId == h.id) ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1), "press keys...");
+				else if (h.bound)     ImGui::TextUnformatted(ImGui::GetKeyChordName((ImGuiKeyChord)h.chord));
+				else                  ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1), "(unbound - conflict)");
+				ImGui::TableNextColumn();
+				ImGui::PushID(h.id.c_str());
+				if (rebindId == h.id) { if (ImGui::SmallButton("cancel")) rebindId.clear(); }
+				else                  { if (ImGui::SmallButton("rebind")) rebindId = h.id; }
+				if (h.bound) { ImGui::SameLine(); if (ImGui::SmallButton("clear")) { hk->Unbind(h.id); SavePreferences(); } }
+				ImGui::PopID();
+			}
+			ImGui::EndTable();
+		}
+
 		}
 		if (shellPrefs.Section("Windows", "Windows", "detach asset editors separate os windows dock"))
 		{
@@ -628,6 +668,25 @@ void EditorUI::winPreferences()
 			ImGui::TextDisabled("(current user; open .nuproj files in this editor)");
 		}
 		shellPrefs.End();
+		// Capture a chord for the hotkey being rebound: first non-modifier key + current mods.
+		// Runs OUTSIDE the sections — the capture must not stop when Hotkeys scrolls away.
+		if (!rebindId.empty())
+		{
+			ImGuiIO& io = ImGui::GetIO();
+			int mods = (io.KeyCtrl ? ImGuiMod_Ctrl : 0) | (io.KeyShift ? ImGuiMod_Shift : 0) | (io.KeyAlt ? ImGuiMod_Alt : 0);
+			for (ImGuiKey k = ImGuiKey_NamedKey_BEGIN; k < ImGuiKey_NamedKey_END; k = (ImGuiKey)(k + 1))
+			{
+				if (k >= ImGuiKey_LeftCtrl && k <= ImGuiKey_RightSuper) continue;   // skip pure modifier keys
+				if (ImGui::IsKeyPressed(k, false))
+				{
+					nuke::Hotkeys::Get()->Rebind(rebindId, mods | k);   // on conflict the hotkey keeps its state
+					SavePreferences();
+					rebindId.clear();
+					break;
+				}
+			}
+		}
+
 	});
 }
 

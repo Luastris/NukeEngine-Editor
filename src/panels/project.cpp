@@ -41,7 +41,7 @@ void EditorUI::SaveProject()
 	j["engine"]       = "NukeEngine";
 	j["content"]      = "content";          // relative to the project dir
 	// Pak compression method: 0 store / 1 zlib / 2 zstd.
-	j["pakMethod"] = pakMethod; j["pakLevel"] = pakLevel;
+	j["pakMethod"] = pakMethod; j["pakLevel"] = pakLevel; j["pakBlockMB"] = pakBlockMB;
 	j["modMethod"] = modMethod; j["modLevel"] = modLevel;
 	j["modSplit"]  = modSplitMode;   // 0 one file / 1 by content type / 2 size cap
 	j["modSplitCapMB"] = modSplitCapMB;
@@ -70,9 +70,6 @@ void EditorUI::SaveProject()
 		serviceChoices[m->provides()] = m->moduleFile;
 	}
 	j["services"] = serviceChoices;
-	nlohmann::json hk = nlohmann::json::object();   // hotkey bindings: id -> chord
-	for (auto& kv : nuke::Hotkeys::Get()->ExportBindings()) hk[kv.first] = kv.second;
-	j["hotkeys"] = hk;
 	j["layers"] = nuke::Layers::All();   // render-layer slot names
 	// Q5 viewport snap (toggle + increments) — a project convention, not a machine preference.
 	j["snap"] = { {"on", snapEnabled}, {"move", snapMove}, {"rot", snapRot}, {"scale", snapScale},
@@ -104,7 +101,8 @@ void EditorUI::LoadProject()
 	unlinkOnDelete = j.value("unlinkOnDelete", false);
 	reloadCleanMode = j.value("reloadCleanMode", 0);
 	conflictMode    = j.value("conflictMode", 0);
-	pakMethod = j.value("pakMethod", 2); pakLevel = j.value("pakLevel", 22);
+	pakMethod = j.value("pakMethod", 3); pakLevel = j.value("pakLevel", 9);
+	pakBlockMB = j.value("pakBlockMB", 8); if (pakBlockMB < 1) pakBlockMB = 1;
 	modMethod = j.value("modMethod", 0); modLevel = j.value("modLevel", 0);
 	modSplitMode  = j.value("modSplit", 0);
 	modSplitCapMB = j.value("modSplitCapMB", 512);
@@ -166,7 +164,9 @@ void EditorUI::LoadProject()
 		for (auto& n : j["layers"]) names.push_back(n.is_string() ? n.get<std::string>() : std::string());
 		nuke::Layers::SetAll(names);
 	}
-	// Hotkeys are stashed here and applied after plugins load, so plugin-registered ids exist.
+	// LEGACY: hotkeys used to live in the .nuproj; they are machine preferences now
+	// (config/editor_prefs). An old project's bindings still load, the prefs override them,
+	// and the key is simply not written back.
 	pendingHotkeyBinds.clear();
 	if (j.contains("hotkeys") && j["hotkeys"].is_object())
 		for (auto& kv : j["hotkeys"].items())

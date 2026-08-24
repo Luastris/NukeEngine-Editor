@@ -2,6 +2,9 @@
 // Package Mod (.numod overlay) and Package DLC.
 #include <editor/editorui.h>
 #include <API/Model/Package.h>
+#include <API/Model/JsonDoc.h>   // CookDocFile: worlds/prefabs ship as binary documents
+#include <API/Model/Texture.h>   // pre-v11 textures ship healed (v11)
+#include <config.h>              // writableDir: the editor's warm shader/pipeline caches ship with the game
 #include <API/Model/Jobs.h>
 #include <API/Model/StatusBar.h>
 #include <API/Model/World.h>    // MergeWorldLayers for the mod basis
@@ -811,6 +814,28 @@ void EditorUI::PackageProject()
 			std::cout << "[Package]\taborted: the Release build failed — fix it and package again" << std::endl;
 			return;
 		}
+		// The project's own game modules ship from <project>/modules — they must be RELEASE
+		// binaries like the rest of the dist (a Debug Game.dll imports the debug CRT and does
+		// not load outside a dev machine). Build them Release, package, then restore the
+		// editor's own config so Build & Reload development continues unchanged.
+		boost::system::error_code ec;
+		if (bfs::exists(bfs::path(projectDir) / "source", ec))
+		{
+			BuildGameModules("Release", [this](bool mok)
+			{
+				if (!mok)
+				{
+					std::cout << "[Package]\taborted: the game-module Release build failed — fix it and package again" << std::endl;
+					restoreGameModulesAfterPackage = false;
+					BuildGameModules(nullptr, nullptr);   // put the dev-config DLLs back
+					return;
+				}
+				restoreGameModulesAfterPackage = true;
+				PackageProjectNow();
+			});
+			return;
+		}
+		restoreGameModulesAfterPackage = false;
 		PackageProjectNow();
 	});
 }
@@ -855,7 +880,7 @@ void EditorUI::PackageProjectNow()
 	std::string distStr = distPath.empty() ? (bfs::path(projDir) / "dist").string()
 	                    : (bfs::path(distPath).is_absolute() ? distPath
 	                                                         : (bfs::path(projDir) / distPath).string());
-	const int method = pakMethod, level = pakLevel;
+	const int method = pakMethod, level = pakLevel, blockMB = pakBlockMB;
 	const int splitMode = modSplitMode, splitCapMB = modSplitCapMB;   // one split setting for every pak
 	// Used modules only: chosen service providers + the project's plugin list; no persisted
 	// list -> all runtime modules (mirrors the Player's load rule).
@@ -892,10 +917,11 @@ void EditorUI::PackageProjectNow()
 		if (m && m->loaded) m->shipExtras(projDir.c_str(), extraPak, extraDist);
 
 	StatusBar::Set("package", "Packaging project...", StatusBar::kIndeterminate);
-	nuke::Jobs::Schedule([projDir, projFile, content, gameName, icon, method, level, splitMode, splitCapMB,
+	nuke::Jobs::Schedule([this, projDir, projFile, content, gameName, icon, method, level, blockMB, splitMode, splitCapMB,
 	                      modules, editorToolStems, distStr, guidFiles,
 	                      extraPak, extraDist, gbSet, gbCfg, gbLogS, gbDbgS]()
 	{
+		Package::CreateOptions pakOpts; pakOpts.blockBytes = (uint32_t)blockMB << 20;
 		boost::system::error_code ec;
 		// distRoot = the user-visible build folder. On macOS the shipped layout lives INSIDE
 		// <GameName>.app/Contents/MacOS (self-contained bundle: run root = exe dir), so every
@@ -1027,13 +1053,50 @@ void EditorUI::PackageProjectNow()
 			if (pf) pf << pj.dump(2);
 		}
 		files.push_back({ "pak.json", pakManTmp.string() });
+		// Fast loading: document containers (worlds, cells, prefabs) ship COOKED — "NCBR" + CBOR,
+		// a fraction of the text size and several times faster to parse; every loader sniffs the
+		// magic, the project files stay text. Cooked copies live in a temp dir for the pack only.
+		boost::system::error_code cookEc;
+		const bfs::path cookDir = bfs::temp_directory_path(cookEc) / "nuke-cook";   // never inside the project tree
+		{
+			boost::system::error_code cec;
+			bfs::remove_all(cookDir, cec);
+			int cooked = 0;
+			for (auto& fp : files)
+			{
+				std::string low = fp.first;
+				for (char& c : low) c = (char)tolower((unsigned char)c);
+				const bool doc = (low.size() > 8 && low.compare(low.size() - 8, 8, ".nuworld") == 0)
+				              || (low.size() > 9 && low.compare(low.size() - 9, 9, ".nuprefab") == 0);
+				const bool tex = low.size() > 6 && low.compare(low.size() - 6, 6, ".nutex") == 0;
+				if (!doc && !tex) continue;
+				const bfs::path out = cookDir / fp.first;
+				if (doc)
+				{
+					if (nuke::CookDocFile(fp.second, out.string())) { fp.second = out.string(); ++cooked; }
+					continue;
+				}
+				// Pre-v11 textures heal (re-encode) on every load: ship them healed, as v11.
+				if (Texture* t = Texture::LoadFromFile(fp.second))
+				{
+					if (t->healedOnLoad)
+					{
+						boost::system::error_code tec;
+						bfs::create_directories(out.parent_path(), tec);
+						if (t->SaveToFile(out.string())) { fp.second = out.string(); ++cooked; }
+					}
+					delete t;
+				}
+			}
+			std::cout << "[Package]\t" << cooked << " document(s) cooked to binary" << std::endl;
+		}
 		bool ok = !files.empty()
 		       && Package::Create(files, (dist / "content" / "game.nupak").string(), method, level,
 		              [](int done, int total)
 		              {
 		                  StatusBar::Set("package", "Packaging project... " + std::to_string(done) + "/" + std::to_string(total),
 		                                 total ? 0.7f * done / total : 0.0f);
-		              });
+		              }, &pakOpts);
 		for (size_t pi = 0; ok && pi < partsOut.size(); ++pi)
 		{
 			nlohmann::json ppj;
@@ -1049,7 +1112,7 @@ void EditorUI::PackageProjectNow()
 			         {
 			             StatusBar::Set("package", "Packaging part... " + std::to_string(done) + "/" + std::to_string(total),
 			                            total ? 0.7f * done / total : 0.0f);
-			         }) && ok;
+			         }, &pakOpts) && ok;
 			bfs::remove(ptmp, ec);
 			if (ok) std::cout << "[Package]\tgame part: " << partFiles[pi] << " ("
 			                  << partsOut[pi].second.size() << " files)" << std::endl;
@@ -1197,6 +1260,20 @@ void EditorUI::PackageProjectNow()
 				cj["gpuValidation"] = gbDbgS;
 				boost::system::error_code cec;
 				bfs::create_directories(dist / "config", cec);   // first package: config/ doesn't exist yet
+				// Fast loading: ship the WARM shader bytecode caches (backend IL — GPU-agnostic) and
+				// the pipeline caches, so a first launch skips the DXC/FXC front end. Every backend
+				// present is copied: the shipped game may run another one than the editor.
+				{
+					const bfs::path cfg = bfs::path(nuke::Config::writableDir()) / "config";
+					int shipped = 0;
+					for (bfs::directory_iterator it(cfg, cec), end; !cec && it != end; it.increment(cec))
+					{
+						const std::string nm = it->path().filename().string();
+						if (nm.rfind("shadercache_", 0) == 0 && bfs::is_directory(it->path())) { CopyTree(it->path(), dist / "config" / nm); ++shipped; }
+						else if (nm.rfind("psocache_", 0) == 0) { CopyOne(it->path(), dist / "config" / nm); ++shipped; }
+					}
+					std::cout << "[Package]\t" << shipped << " shader/pipeline cache(s) shipped" << std::endl;
+				}
 				bfs::ofstream outc(dist / "config" / "main.json");
 				if (outc) outc << cj.dump(2);
 			}
@@ -1255,6 +1332,16 @@ void EditorUI::PackageProjectNow()
 					std::cout << "[Package]\tmodule '" << m << "' is editor-only (imports NukeImGui.dll) — not shipped" << std::endl;
 					continue;
 				}
+				// A Debug binary imports the debug CRT, which no player machine has — a dist
+				// with one is dead on arrival. Shout; packaging normally rebuilt these Release.
+				{
+					std::string bytes;
+					bfs::ifstream mf(src, std::ios::binary);
+					if (mf) bytes.assign(std::istreambuf_iterator<char>(mf), std::istreambuf_iterator<char>());
+					if (bytes.find("ucrtbased.dll") != std::string::npos)
+						std::cout << "[Package]\tWARNING: module '" << shipName << "' is a DEBUG build (imports ucrtbased.dll)"
+						          << " — it will NOT load on machines without Visual Studio. Rebuild it Release." << std::endl;
+				}
 				if (!CopyOne(src, dist / "modules" / shipName))
 					std::cout << "[Package]\tmodule missing, skipped: " << m << std::endl;
 			}
@@ -1304,8 +1391,12 @@ void EditorUI::PackageProjectNow()
 			}
 		}
 #endif
-		nuke::Jobs::RunOnMain([ok, distRoot]()
+		nuke::Jobs::RunOnMain([this, ok, distRoot]()
 		{
+			{
+				boost::system::error_code cec;   // the cooked document copies served their one pack
+				bfs::remove_all(bfs::temp_directory_path(cec) / "nuke-cook", cec);
+			}
 			StatusBar::Remove("package");
 			if (ok)
 			{
@@ -1317,6 +1408,12 @@ void EditorUI::PackageProjectNow()
 				          << (bytes / (1024 * 1024)) << " MB)" << std::endl;
 			}
 			else std::cout << "[Package]\tPACKAGING FAILED — see messages above." << std::endl;
+			if (restoreGameModulesAfterPackage)
+			{
+				// The dist took the Release game modules; give the editor its own config back.
+				restoreGameModulesAfterPackage = false;
+				BuildGameModules(nullptr, nullptr);
+			}
 		});
 	});
 }
@@ -1331,7 +1428,7 @@ void EditorUI::PackageMod(const std::string& modNameIn)
 	                 : !modName.empty()   ? modName
 	                 : (projectName.empty() ? std::string("mod") : projectName);
 	for (char& c : name) if (strchr("\\/:*?\"<>|", c)) c = '_';   // filename-safe
-	const int method = modMethod, level = modLevel;
+	const int method = modMethod, level = modLevel, blockMB = pakBlockMB;
 	std::string distStr = distPath.empty() ? (bfs::path(projectDir) / "dist").string()
 	                    : (bfs::path(distPath).is_absolute() ? distPath
 	                                                         : (bfs::path(projectDir) / distPath).string());
@@ -1345,8 +1442,9 @@ void EditorUI::PackageMod(const std::string& modNameIn)
 	const int splitCapMB = modSplitCapMB;
 
 	StatusBar::Set("packmod", "Packaging mod...", StatusBar::kIndeterminate);
-	nuke::Jobs::Schedule([projDir, base, name, method, level, distStr, requires_, dlcDeps, splitMode, splitCapMB]()
+	nuke::Jobs::Schedule([projDir, base, name, method, level, blockMB, distStr, requires_, dlcDeps, splitMode, splitCapMB]()
 	{
+		Package::CreateOptions pakOpts; pakOpts.blockBytes = (uint32_t)blockMB << 20;
 		boost::system::error_code ec;
 		auto all = CollectProject(projDir, true, DistPrefix(projDir, distStr));
 
@@ -1520,7 +1618,7 @@ void EditorUI::PackageMod(const std::string& modNameIn)
 				{
 					StatusBar::Set("packmod", "Packaging mod... " + std::to_string(done) + "/" + std::to_string(total),
 					               total ? (float)done / total : 0.0f);
-				});
+				}, &pakOpts);
 			// Parts land beside the main pak with a {"part_of": ...} manifest, so neither the
 			// loader nor the UI treats one as a mod of its own.
 			for (size_t pi = 0; ok && pi < partsOut.size(); ++pi)
@@ -1538,7 +1636,7 @@ void EditorUI::PackageMod(const std::string& modNameIn)
 					{
 						StatusBar::Set("packmod", "Packaging mod part... " + std::to_string(done) + "/" + std::to_string(total),
 						               total ? (float)done / total : 0.0f);
-					}) && ok;
+					}, &pakOpts) && ok;
 				bfs::remove(pmanTmp, ec);
 				if (ok) std::cout << "[Package]\tmod part: " << ppath << " ("
 				                  << partsOut[pi].second.size() << " files)" << std::endl;
@@ -1944,7 +2042,7 @@ void EditorUI::PackageDlc(const std::string& dlcNameIn, const std::string& baseP
 	// Game-thread snapshots: the cooker runs on a worker.
 	const std::string projDir = projectDir, projFile = projectFile, content = contentDir;
 	const std::string base = basePakIn;
-	const int method = pakMethod, level = pakLevel;
+	const int method = pakMethod, level = pakLevel, blockMB = pakBlockMB;
 	const int splitMode = modSplitMode, splitCapMB = modSplitCapMB;
 	std::string distStr = distPath.empty() ? (bfs::path(projectDir) / "dist").string()
 	                    : (bfs::path(distPath).is_absolute() ? distPath
@@ -1963,8 +2061,9 @@ void EditorUI::PackageDlc(const std::string& dlcNameIn, const std::string& baseP
 				guidFiles[sh->guid].push_back(sh->psPath);
 	}
 	StatusBar::Set("packdlc", "Packaging DLC...", StatusBar::kIndeterminate);
-	nuke::Jobs::Schedule([projDir, projFile, content, base, name, method, level, splitMode, splitCapMB, distStr, guidFiles]()
+	nuke::Jobs::Schedule([projDir, projFile, content, base, name, method, level, blockMB, splitMode, splitCapMB, distStr, guidFiles]()
 	{
+		Package::CreateOptions pakOpts; pakOpts.blockBytes = (uint32_t)blockMB << 20;
 		boost::system::error_code ec;
 		Package::File bf;
 		if (!bf.Open(base))
@@ -2044,7 +2143,7 @@ void EditorUI::PackageDlc(const std::string& dlcNameIn, const std::string& baseP
 				{
 					StatusBar::Set("packdlc", "Packaging DLC... " + std::to_string(done) + "/" + std::to_string(total),
 					               total ? (float)done / total : 0.0f);
-				});
+				}, &pakOpts);
 			bfs::remove(manTmp, ec);
 			for (size_t pi = 0; ok && pi < partsOut.size(); ++pi)
 			{
@@ -2061,7 +2160,7 @@ void EditorUI::PackageDlc(const std::string& dlcNameIn, const std::string& baseP
 					{
 						StatusBar::Set("packdlc", "Packaging DLC part... " + std::to_string(done) + "/" + std::to_string(total),
 						               total ? (float)done / total : 0.0f);
-					}) && ok;
+					}, &pakOpts) && ok;
 				bfs::remove(ptmp, ec);
 				if (ok) std::cout << "[Package]\tDLC part: " << partFiles[pi] << " ("
 				                  << partsOut[pi].second.size() << " files)" << std::endl;
@@ -2149,11 +2248,12 @@ void EditorUI::DrawPackageProjectPopup()
 
 	{
 #ifdef _WIN32
-		const char* beModes[] = { "Direct3D 11", "Direct3D 12 (ray tracing)", "Vulkan" };
+		const char* beModes[] = { "Direct3D 11", "Direct3D 12 (DirectStorage)", "Vulkan" };
 		ImGui::Combo("Render Backend", &gbWin.backend, beModes, IM_ARRAYSIZE(beModes));
 		ImGui::SameLine(); ImGui::TextDisabled("(?)");
 		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Backend of the PACKAGED game.\n"
-		                                              "D3D12 enables ray tracing, window transparency and HDR10.\n"
+		                                              "D3D12 additionally brings DirectStorage (GDeflate paks inflate on the GPU,\n"
+		                                              "textures land straight in VRAM), window transparency and HDR10.\n"
 		                                              "The EDITOR's own backend is in Preferences.");
 #else
 		// This dialog packages for the CURRENT platform, and off Windows that means Vulkan —

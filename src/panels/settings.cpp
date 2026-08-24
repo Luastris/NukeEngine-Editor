@@ -4,6 +4,7 @@
 #include <API/Model/Layers.h>
 #include <API/Model/Wind.h>
 #include <API/Model/Surface.h>
+#include <API/Model/Package.h>   // pak compression levels per method
 #include <input/Input.h>   // Q6: Input Maps section (filter + provenance)
 #include <map>
 #include <algorithm>
@@ -314,7 +315,7 @@ void EditorUI::winSettings()
 
 		const ProjectSettings PSD = defaultPS();   // per-field default source for resetBtn
 
-		static const char* kCats[] = { "World", "Rendering", "Packaging", "Mods", "Disk sync", "Hotkeys", "Layers", "Input" };
+		static const char* kCats[] = { "World", "Rendering", "Packaging", "Mods", "Disk sync", "Layers", "Input" };
 		shellProj.Begin("projset", kCats, IM_ARRAYSIZE(kCats));
 		if (shellProj.Section("World", "World", "default world startup scene"))
 		{
@@ -544,18 +545,26 @@ void EditorUI::winSettings()
 				if (ImGui::Button(ICON_LC_ROTATE_CCW "##distrst")) { distPath.clear(); SaveProject(); }
 				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Reset to the default (<project>/dist)");
 			}
-			const char* methods[] = { "Store (no compression)", "Zlib", "Zstd" };
+			const char* methods[] = { "Store (no compression)", "Zlib", "Zstd", "GDeflate (DirectStorage, GPU decompression)" };
 			if (ImGui::Combo(LProp("Project pak compression").c_str(), &pakMethod, methods, IM_ARRAYSIZE(methods))) SaveProject();
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("GDeflate: the D3D12 runtime reads the pak through DirectStorage and inflates on the GPU,\n"
+				                  "textures land straight in VRAM. Other backends/platforms inflate it on the CPU.\n"
+				                  "Zstd packs tighter; DirectStorage then only bypasses the file stack (CPU inflate).");
 			if (pakMethod != 0)
 			{
-				int maxLv = (pakMethod == 2) ? 22 : 9;
+				int maxLv = nuke::Package::MaxLevel(pakMethod);
 				if (pakLevel > maxLv) pakLevel = maxLv;
 				if (ImGui::SliderInt(LProp("Project pak level").c_str(), &pakLevel, 1, maxLv)) SaveProject();
 			}
+			if (ImGui::DragInt(LProp("Pak block size (MB)").c_str(), &pakBlockMB, 0.25f, 1, 256)) { if (pakBlockMB < 1) pakBlockMB = 1; SaveProject(); }
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("Files pack in independent blocks of this size (each one is a DirectStorage request;\n"
+				                  "texture mips split to fit). Must not exceed the runtime staging buffer (config io.stagingMB, 32 default).");
 			if (ImGui::Combo(LProp("Mod pak compression").c_str(), &modMethod, methods, IM_ARRAYSIZE(methods))) SaveProject();
 			if (modMethod != 0)
 			{
-				int maxLv = (modMethod == 2) ? 22 : 9;
+				int maxLv = nuke::Package::MaxLevel(modMethod);
 				if (modLevel < 1) modLevel = 1;
 				if (modLevel > maxLv) modLevel = maxLv;
 				if (ImGui::SliderInt(LProp("Mod pak level").c_str(), &modLevel, 1, maxLv)) SaveProject();
@@ -766,35 +775,6 @@ void EditorUI::winSettings()
 		}
 		if (!psActive) psBefore = capturePS();
 
-		if (shellProj.Section("Hotkeys", "Hotkeys", "rebind key binding shortcut chord"))
-		{
-		ImGui::Text("Rebind, then press a key combo. Conflicting hotkeys stay unbound — assign manually.");
-		nuke::Hotkeys* hk = nuke::Hotkeys::Get();
-		if (ImGui::BeginTable("hk", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingStretchProp))
-		{
-			ImGui::TableSetupColumn("Action");
-			ImGui::TableSetupColumn("Binding");
-			ImGui::TableSetupColumn("");
-			ImGui::TableHeadersRow();
-			for (const nuke::Hotkey& h : hk->All())
-			{
-				ImGui::TableNextRow();
-				ImGui::TableNextColumn(); ImGui::TextUnformatted(h.name.c_str());
-				ImGui::TableNextColumn();
-				if (rebindId == h.id) ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1), "press keys...");
-				else if (h.bound)     ImGui::TextUnformatted(ImGui::GetKeyChordName((ImGuiKeyChord)h.chord));
-				else                  ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1), "(unbound - conflict)");
-				ImGui::TableNextColumn();
-				ImGui::PushID(h.id.c_str());
-				if (rebindId == h.id) { if (ImGui::SmallButton("cancel")) rebindId.clear(); }
-				else                  { if (ImGui::SmallButton("rebind")) rebindId = h.id; }
-				if (h.bound) { ImGui::SameLine(); if (ImGui::SmallButton("clear")) { hk->Unbind(h.id); SaveProject(); } }
-				ImGui::PopID();
-			}
-			ImGui::EndTable();
-		}
-
-		}
 		// 32 named render channels (Atom.layer + Camera.layerMask filter on them).
 		if (shellProj.Section("Layers", "Layers", "render channels layer mask atom camera"))
 		{
@@ -917,25 +897,6 @@ void EditorUI::winSettings()
 		}
 		shellProj.End();
 		// (".nuproj file association" moved to Preferences -> System: it is machine-wide.)
-
-		// Capture a chord for the hotkey being rebound: first non-modifier key + current mods.
-		// Runs OUTSIDE the sections — the capture must not stop when Hotkeys scrolls away.
-		if (!rebindId.empty())
-		{
-			ImGuiIO& io = ImGui::GetIO();
-			int mods = (io.KeyCtrl ? ImGuiMod_Ctrl : 0) | (io.KeyShift ? ImGuiMod_Shift : 0) | (io.KeyAlt ? ImGuiMod_Alt : 0);
-			for (ImGuiKey k = ImGuiKey_NamedKey_BEGIN; k < ImGuiKey_NamedKey_END; k = (ImGuiKey)(k + 1))
-			{
-				if (k >= ImGuiKey_LeftCtrl && k <= ImGuiKey_RightSuper) continue;   // skip pure modifier keys
-				if (ImGui::IsKeyPressed(k, false))
-				{
-					nuke::Hotkeys::Get()->Rebind(rebindId, mods | k);   // on conflict the hotkey keeps its state
-					SaveProject();
-					rebindId.clear();
-					break;
-				}
-			}
-		}
 	});
 }
 

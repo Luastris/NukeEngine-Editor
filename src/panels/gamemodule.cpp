@@ -525,12 +525,15 @@ void EditorUI::DiscoverProjectModules()
 
 // ---- build + reload cycle --------------------------------------------------------------------
 
-void EditorUI::BuildGameModules()
+void EditorUI::BuildGameModules() { BuildGameModules(nullptr, nullptr); }
+
+void EditorUI::BuildGameModules(const char* config, std::function<void(bool)> onDone)
 {
 	AppInstance* app = AppInstance::GetSingleton();
 	if (app->playState != 0)
 	{
 		std::cout << "[gamemodule]\tBuild & Reload refused while playing — stop PIE first" << std::endl;
+		if (onDone) onDone(false);
 		return;
 	}
 	boost::system::error_code ec;
@@ -539,6 +542,7 @@ void EditorUI::BuildGameModules()
 	if (!bfs::exists(srcDir / "CMakeLists.txt", ec) && !bfs::exists(srcDir, ec))
 	{
 		std::cout << "[gamemodule]\tno <project>/source — create one with Project > New C++ Game Module" << std::endl;
+		if (onDone) onDone(false);
 		return;
 	}
 	// Regenerate the top-level CMakeLists every build: source/ may gain modules at any time.
@@ -605,9 +609,10 @@ void EditorUI::BuildGameModules()
 #else
 	const char* cfg = "Release";
 #endif
-	StatusBar::Set("gmbuild", "Game modules: building...", StatusBar::kIndeterminate);
+	if (config) cfg = config;      // packaging builds Release regardless of the editor's config
+	StatusBar::Set("gmbuild", std::string("Game modules: building ") + cfg + "...", StatusBar::kIndeterminate);
 	const std::string srcStr = srcDir.string();
-	nuke::Jobs::Schedule([this, srcStr, cfg]()
+	nuke::Jobs::Schedule([this, srcStr, cfg, onDone]()
 	{
 		auto run = [&](const std::string& cmdLine) -> bool
 		{
@@ -691,12 +696,13 @@ void EditorUI::BuildGameModules()
 		bool ok = run("cmake -S \"" + srcStr + "\" -B \"" + bld + "\"" + rootArg);
 		if (ok) ok = run("cmake --build \"" + bld + "\" --config " + cfg + " --parallel");
 
-		nuke::Jobs::RunOnMain([this, ok]()
+		nuke::Jobs::RunOnMain([this, ok, onDone]()
 		{
 			StatusBar::Remove("gmbuild");
 			std::cout << "[gamemodule]\tbuild " << (ok ? "OK" : "FAILED") << std::endl;
 			// Re-discover either way: a failed build leaves the old DLLs to reload.
 			DiscoverProjectModules();
+			if (onDone) onDone(ok);
 		});
 	});
 }

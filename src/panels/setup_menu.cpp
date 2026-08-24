@@ -182,7 +182,9 @@ void EditorUI::SetUp()
 	ApplyProjectPlugins();
 
 	// Plugin hotkeys are registered by now: saved bindings can override the defaults.
+	// Legacy .nuproj bindings first, the machine Preferences last — the prefs win.
 	nuke::Hotkeys::Get()->ApplyBindings(pendingHotkeyBinds);
+	nuke::Hotkeys::Get()->ApplyBindings(prefsHotkeyBinds);
 
 	boost::system::error_code ec;
 	bfs::create_directories(contentDir, ec);
