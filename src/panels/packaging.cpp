@@ -290,18 +290,9 @@ static std::vector<std::string> ReadManifestShipModules(const std::string& projF
 	return out;
 }
 
-// Which modules THIS dist needs — not the whole plugin list. Ships:
-//   * every chosen service provider except "gui" (the runtime cannot exist without them);
-//   * the "gui" provider when the dev console is on or the content/scripts use it;
-//   * the project's own game modules (they ARE the game — usage is not a question);
-//   * plugin-list modules the shipped content actually uses: reflected component types in the
-//     packed JSON (ModulesForFiles), files their cookContent claimed (`cookClaimants`), script
-//     files a scripting backend owns, and modules with project pak extras of their own;
-//   * modules registering NO reflected types (input providers) — invisible to any walk, so
-//     being enabled is their only honest signal;
-//   * the manifest's "shipModules", verbatim;
-// then closes over hard binary imports (a shipped DLL importing another module needs the file
-// present or the OS loader refuses it). Enabled-but-unused modules are dropped with a log.
+// The modules this dist ships: service providers, the project's game modules, plugins the
+// shipped content/scripts actually use, the manifest's "shipModules", closed over binary
+// imports. Enabled-but-unused plugins are dropped with a log.
 static bool IsEditorOnlyModule(const bfs::path& dll);   // defined with the icon helpers below
 
 static std::set<std::string> ComputeShipModules(
@@ -543,11 +534,13 @@ static void CookScanJson(CookCtx& c, const nlohmann::json& j)
 static bool CookEngineType(const std::string& low, bool& isJson)
 {
 	auto ends = [&](const char* suf) { size_t n = strlen(suf); return low.size() > n && low.compare(low.size() - n, n, suf) == 0; };
-	isJson = ends(".nuworld") || ends(".nuprefab") || ends(".numat") || ends(".nubonemap") || ends(".nuproj");
+	isJson = ends(".nuworld") || ends(".nuprefab") || ends(".numat") || ends(".nubonemap") || ends(".nuproj")
+	      || ends(".nucursor");
 	if (isJson) return true;
 	return ends(".numesh") || ends(".nutex") || ends(".nuanim")
 	    || ends(".ogg") || ends(".wav") || ends(".mp3") || ends(".flac")
-	    || ends(".hlsl") || ends(".ico");
+	    || ends(".hlsl") || ends(".ico")
+	    || ends(".png") || ends(".jpg") || ends(".jpeg") || ends(".tga") || ends(".bmp");
 }
 
 static void CookProcess(CookCtx& c, const std::string& file)

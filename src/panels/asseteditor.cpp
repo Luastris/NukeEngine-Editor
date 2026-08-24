@@ -21,6 +21,8 @@
 #include <boost/filesystem.hpp>
 #include <boost/filesystem/fstream.hpp>
 #include <iterator>
+#include <nlohmann/json.hpp>
+#include <stb_image.h>
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/gtx/matrix_decompose.hpp>
 #include <glm/gtc/type_ptr.hpp>
@@ -1372,7 +1374,33 @@ void EditorUI::OpenAssetEditor(const std::string& path)
 	if (const auto* open = nuke::AssetEditorForExt(ext)) { (*open)(path); return; }
 	if (ext != ".numat" && ext != ".numesh" && ext != ".nuprefab" && ext != ".nutex" && ext != ".nuinput"
 	    && ext != ".nuseq" && ext != ".nuanim" && ext != ".nusm" && ext != ".nublend"
-	    && ext != ".nuskel" && ext != ".nurag" && ext != ".nubonemap" && !isAudio) return;
+	    && ext != ".nuskel" && ext != ".nurag" && ext != ".nubonemap" && ext != ".nucursor" && !isAudio) return;
+
+	if (ext == ".nucursor")   // frames/hotspot/fps: 2D, no preview scene
+	{
+		AssetEditorWin w;
+		w.path = path; w.ext = ext; w.wantFocus = true; w.detached = detachAssetEditors;
+		bfs::ifstream f{ bfs::path(path) };
+		nlohmann::json j = f ? nlohmann::json::parse(f, nullptr, false) : nlohmann::json();
+		if (!j.is_discarded() && j.is_object())
+		{
+			w.curFps  = j.value("fps", 12.0f);
+			w.curLoop = j.value("loop", true);
+			if (j.contains("frames") && j["frames"].is_array())
+				for (auto& fj : j["frames"])
+					if (fj.is_object())
+					{
+						AssetEditorWin::CurFrame fr;
+						fr.image = fj.value("image", std::string());
+						fr.hotX  = fj.value("hotX", 0);
+						fr.hotY  = fj.value("hotY", 0);
+						w.curFrames.push_back(std::move(fr));
+					}
+		}
+		if (w.curFrames.empty()) w.curFrames.push_back({});
+		assetEds.push_back(std::move(w));
+		return;
+	}
 
 	if (ext == ".nuskel")
 	{
@@ -2077,7 +2105,7 @@ void EditorUI::winAssetEditors()
 				const std::string title = bfs::path(w.path).filename().string();
 				const bool isSlicerH = (w.ext == ".nutex"), isInputH = (w.ext == ".nuinput");
 				const bool isAudioH = !w.pv && !isSlicerH && !isInputH
-				                    && w.ext != ".nuseq" && w.ext != ".nubonemap";
+				                    && w.ext != ".nuseq" && w.ext != ".nubonemap" && w.ext != ".nucursor";
 				const int hw = isAudioH ? 460 : (w.ext == ".nuprefab" ? 900 : (isSlicerH ? 760 : (isInputH ? 820
 				             : w.ext == ".nuanim" ? 1000 : w.ext == ".nusm" ? 1100 : w.ext == ".nublend" ? 900
 				             : w.ext == ".nuskel" ? 960 : w.ext == ".nurag" ? 900 : w.ext == ".nubonemap" ? 700 : 640)));
@@ -2145,13 +2173,14 @@ void EditorUI::winAssetEditors()
 		const bool isSkel  = (w.ext == ".nuskel");
 		const bool isRag   = (w.ext == ".nurag");
 		const bool isBmap  = (w.ext == ".nubonemap");
-		const bool isAudio = !w.pv && !isSlicer && !isInput && !isSeq && !isBmap;
+		const bool isCursor = (w.ext == ".nucursor");
+		const bool isAudio = !w.pv && !isSlicer && !isInput && !isSeq && !isBmap && !isCursor;
 		const float edW = w.ext == ".nuprefab" ? 900.0f : isSlicer ? 760.0f : isInput ? 820.0f
 		                : isSeq ? 980.0f : isAnim ? 1000.0f : isSm ? 1100.0f : isBlend ? 900.0f
 		                : isSkel ? 960.0f : isRag ? 900.0f : isBmap ? 700.0f : 420.0f;
 		ImGui::SetNextWindowSize(isAudio ? ImVec2(420.0f, 170.0f) : ImVec2(edW, 640.0f), ImGuiCond_FirstUseEver);
 		const char* icon = isSeq ? ICON_LC_FILM : isAnim ? ICON_LC_PLAY : isSm ? ICON_LC_WORKFLOW
-		                 : isBlend ? ICON_LC_BLEND
+		                 : isBlend ? ICON_LC_BLEND : isCursor ? ICON_LC_MOUSE_POINTER
 		                 : (isSkel || isBmap) ? ICON_LC_BONE : isRag ? ICON_LC_PERSON_STANDING
 		                 : isAudio ? ICON_LC_MUSIC : isSlicer ? ICON_LC_GRID_2X2 : isInput ? ICON_LC_SETTINGS_2
 		                 : w.ext == ".numat" ? ICON_LC_PALETTE : (w.ext == ".numesh" ? ICON_LC_BOX : ICON_LC_PACKAGE);
@@ -2201,6 +2230,7 @@ void EditorUI::winAssetEditors()
 				else if (w.ext == ".nuskel"   && w.skel)       w.skel->SaveToFile(w.path);
 				else if (w.ext == ".nurag"    && w.rag)        w.rag->SaveToFile(w.path);
 				else if (w.ext == ".nubonemap" && w.bmap)      w.bmap->SaveToFile(w.path);
+				else if (w.ext == ".nucursor")                 SaveCursorAsset(w);
 				w.dirty = false; w.open = false; aeCloseConfirm = -1; ImGui::CloseCurrentPopup();
 			}
 			ImGui::SameLine();
@@ -2232,6 +2262,12 @@ void EditorUI::winAssetEditors()
 				if (iRender* r = AppInstance::GetSingleton()->render) r->destroyTexture2D(w.texPreview);
 				w.texPreview = 0;
 			}
+			for (auto& cf : w.curFrames)
+				if (cf.tex)
+				{
+					if (iRender* r = AppInstance::GetSingleton()->render) r->destroyTexture2D(cf.tex);
+					cf.tex = 0;
+				}
 			if (w.tex) delete w.tex;
 			delete w.seqPv;
 			delete w.seq;
@@ -2265,6 +2301,12 @@ void EditorUI::winAssetEditors()
 void EditorUI::DrawAssetEditorBody(int i)
 {
 	AssetEditorWin& w = assetEds[i];
+	if (w.ext == ".nucursor")
+	{
+		if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)) aeFocused = i;
+		DrawCursorEditor(w);
+		return;
+	}
 	const bool isSlicer = (w.ext == ".nutex");
 	const bool isInput  = (w.ext == ".nuinput");
 	const bool isSeq    = (w.ext == ".nuseq");
@@ -2738,4 +2780,189 @@ void EditorUI::DrawAssetEditorBody(int i)
 				else if (w.ext == ".nuinput")                  w.idleI = InputMapJson(w);
 			}
 			w.editedNow = false;
+}
+
+// ---- .nucursor editor ---------------------------------------------------------------------
+
+void EditorUI::SaveCursorAsset(AssetEditorWin& w)
+{
+	nlohmann::json j;
+	j["fps"]  = w.curFps;
+	j["loop"] = w.curLoop;
+	nlohmann::json arr = nlohmann::json::array();
+	for (const auto& f : w.curFrames)
+	{
+		nlohmann::json fj;
+		fj["image"] = f.image;
+		fj["hotX"]  = f.hotX;
+		fj["hotY"]  = f.hotY;
+		arr.push_back(fj);
+	}
+	j["frames"] = arr;
+	bfs::ofstream out(bfs::path(w.path), std::ios::trunc);
+	if (out) { out << j.dump(2); w.dirty = false; }
+}
+
+void EditorUI::DrawCursorEditor(AssetEditorWin& w)
+{
+	// Frame image -> GPU preview, lazy (tw -1 = load failed, retried on the next path change).
+	auto ensureTex = [](AssetEditorWin::CurFrame& f)
+	{
+		if (f.tex || f.tw == -1 || f.image.empty()) return;
+		iRender* r = AppInstance::GetSingleton()->render;
+		const std::string abs = AppInstance::GetSingleton()->ResolveContent(f.image);
+		int wpx = 0, hpx = 0, n = 0;
+		unsigned char* px = stbi_load(abs.c_str(), &wpx, &hpx, &n, 4);
+		if (!px || !r) { if (px) stbi_image_free(px); f.tw = -1; return; }
+		f.tex = r->createTexture2D(px, wpx, hpx);
+		f.tw = wpx; f.th = hpx;
+		stbi_image_free(px);
+		if (!f.tex) f.tw = -1;
+	};
+	auto releaseTex = [](AssetEditorWin::CurFrame& f)
+	{
+		if (f.tex) { if (iRender* r = AppInstance::GetSingleton()->render) r->destroyTexture2D(f.tex); }
+		f.tex = 0; f.tw = 0; f.th = 0;
+	};
+
+	ImGui::SetNextItemWidth(90.0f);
+	if (ImGui::DragFloat("FPS", &w.curFps, 0.1f, 0.0f, 120.0f, "%.1f")) w.dirty = true;
+	ImGui::SameLine();
+	if (ImGui::Checkbox("Loop", &w.curLoop)) w.dirty = true;
+	ImGui::SameLine();
+	if (ImGui::Button(w.curPlay ? ICON_LC_PAUSE " Pause" : ICON_LC_PLAY " Play")) w.curPlay = !w.curPlay;
+	ImGui::SameLine();
+	if (ImGui::Button(ICON_LC_SAVE " Save")) SaveCursorAsset(w);
+	ImGui::SameLine();
+	ImGui::TextDisabled("click the preview to set the hotspot");
+
+	if (w.curPlay) w.curAnim += ImGui::GetIO().DeltaTime;
+	int shown = w.curSel;
+	if (w.curPlay && w.curFrames.size() > 1 && w.curFps > 0.0f)
+	{
+		const double fidx = w.curAnim * w.curFps;
+		shown = w.curLoop ? (int)fidx % (int)w.curFrames.size()
+		                  : (int)std::min<double>(fidx, (double)w.curFrames.size() - 1.0);
+	}
+	if (shown < 0 || shown >= (int)w.curFrames.size()) shown = 0;
+
+	// Preview on a checker, hotspot crosshair, click = set the hotspot of the shown frame.
+	{
+		AssetEditorWin::CurFrame& f = w.curFrames[shown];
+		ensureTex(f);
+		const float box = 280.0f;
+		ImVec2 p0 = ImGui::GetCursorScreenPos();
+		ImDrawList* dl = ImGui::GetWindowDrawList();
+		dl->AddRectFilled(p0, ImVec2(p0.x + box, p0.y + box), IM_COL32(35, 35, 40, 255));
+		for (int cy = 0; cy < 8; ++cy)
+			for (int cx = cy & 1; cx < 8; cx += 2)
+				dl->AddRectFilled(ImVec2(p0.x + cx * box / 8, p0.y + cy * box / 8),
+				                  ImVec2(p0.x + (cx + 1) * box / 8, p0.y + (cy + 1) * box / 8),
+				                  IM_COL32(46, 46, 52, 255));
+		float scale = 1.0f;
+		ImVec2 ip = p0;
+		if (f.tex && f.tw > 0)
+		{
+			scale = std::min(box / f.tw, box / f.th);
+			if (scale > 4.0f) scale = 4.0f;
+			ip = ImVec2(p0.x + (box - f.tw * scale) * 0.5f, p0.y + (box - f.th * scale) * 0.5f);
+			dl->AddImage((ImTextureID)f.tex, ip, ImVec2(ip.x + f.tw * scale, ip.y + f.th * scale));
+			ImVec2 hp(ip.x + f.hotX * scale, ip.y + f.hotY * scale);
+			dl->AddLine(ImVec2(hp.x - 7, hp.y), ImVec2(hp.x + 7, hp.y), IM_COL32(255, 80, 80, 255), 1.5f);
+			dl->AddLine(ImVec2(hp.x, hp.y - 7), ImVec2(hp.x, hp.y + 7), IM_COL32(255, 80, 80, 255), 1.5f);
+		}
+		else
+			dl->AddText(ImVec2(p0.x + 12, p0.y + 12), IM_COL32(150, 150, 160, 255),
+			            f.image.empty() ? "no image — drop a png below" : "image not found");
+		ImGui::InvisibleButton("##curprev", ImVec2(box, box));
+		if (f.tex && f.tw > 0 && ImGui::IsItemClicked(ImGuiMouseButton_Left))
+		{
+			ImVec2 mp = ImGui::GetIO().MousePos;
+			f.hotX = std::max(0, std::min((int)((mp.x - ip.x) / scale), f.tw - 1));
+			f.hotY = std::max(0, std::min((int)((mp.y - ip.y) / scale), f.th - 1));
+			w.dirty = true;
+		}
+	}
+
+	ImGui::SameLine();
+	ImGui::BeginGroup();
+	ImGui::TextUnformatted("Frames");
+	if (ImGui::BeginListBox("##curframes", ImVec2(-FLT_MIN, 170.0f)))
+	{
+		for (int i = 0; i < (int)w.curFrames.size(); ++i)
+		{
+			std::string lbl = std::to_string(i) + ": "
+			                + (w.curFrames[i].image.empty() ? "<no image>"
+			                                                : bfs::path(w.curFrames[i].image).filename().string())
+			                + "##cf" + std::to_string(i);
+			if (ImGui::Selectable(lbl.c_str(), w.curSel == i)) { w.curSel = i; w.curPlay = false; }
+		}
+		ImGui::EndListBox();
+	}
+	if (ImGui::Button(ICON_LC_PLUS " Add"))
+	{
+		AssetEditorWin::CurFrame nf;
+		if (!w.curFrames.empty()) { nf.image = w.curFrames.back().image; nf.hotX = w.curFrames.back().hotX; nf.hotY = w.curFrames.back().hotY; }
+		w.curFrames.push_back(std::move(nf));
+		w.curSel = (int)w.curFrames.size() - 1;
+		w.dirty = true;
+	}
+	ImGui::SameLine();
+	if (ImGui::Button(ICON_LC_TRASH " Remove") && w.curFrames.size() > 1)
+	{
+		const int at = std::max(0, std::min(w.curSel, (int)w.curFrames.size() - 1));
+		releaseTex(w.curFrames[at]);
+		w.curFrames.erase(w.curFrames.begin() + at);
+		w.curSel = std::max(0, std::min(w.curSel, (int)w.curFrames.size() - 1));
+		w.dirty = true;
+	}
+	if (w.curSel >= 0 && w.curSel < (int)w.curFrames.size())
+	{
+		AssetEditorWin::CurFrame& f = w.curFrames[w.curSel];
+		char buf[512];
+		strncpy(buf, f.image.c_str(), sizeof(buf) - 1);
+		buf[sizeof(buf) - 1] = 0;
+		ImGui::SetNextItemWidth(-FLT_MIN);
+		if (ImGui::InputText("##curimg", buf, sizeof(buf)))
+		{
+			releaseTex(f);
+			f.image = buf;
+			w.dirty = true;
+		}
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Content-relative image (png/jpg/tga/bmp).\nDrop one from the browser.");
+		if (ImGui::BeginDragDropTarget())
+		{
+			if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("NUKE_ASSET"))
+			{
+				std::string dropped((const char*)p->Data);
+				// The browser may hand a full path: store content-relative.
+				boost::system::error_code ec;
+				if (bfs::path(dropped).is_absolute())
+				{
+					bfs::path rel = bfs::relative(bfs::path(dropped), bfs::path(contentDir), ec);
+					if (!ec && !rel.empty() && rel.generic_string().compare(0, 2, "..") != 0)
+						dropped = rel.generic_string();
+				}
+				std::string dext = bfs::path(dropped).extension().string();
+				for (char& c : dext) c = (char)std::tolower((unsigned char)c);
+				if (dext == ".png" || dext == ".jpg" || dext == ".jpeg" || dext == ".tga" || dext == ".bmp")
+				{
+					releaseTex(f);
+					f.image = dropped;
+					w.dirty = true;
+				}
+			}
+			ImGui::EndDragDropTarget();
+		}
+		ImGui::SetNextItemWidth(90.0f);
+		if (ImGui::DragInt("Hot X", &f.hotX, 0.2f, 0, std::max(0, f.tw - 1))) w.dirty = true;
+		ImGui::SameLine();
+		ImGui::SetNextItemWidth(90.0f);
+		if (ImGui::DragInt("Hot Y", &f.hotY, 0.2f, 0, std::max(0, f.th - 1))) w.dirty = true;
+	}
+	ImGui::EndGroup();
+
+	if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)
+	    && ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S, false))
+		SaveCursorAsset(w);
 }

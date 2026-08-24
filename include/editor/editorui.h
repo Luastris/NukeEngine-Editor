@@ -655,6 +655,14 @@ public:
 		std::vector<nuke::InputContext> inContexts;
 		std::vector<std::string> undoI, redoI;   // .nuinput history (serialized map JSON)
 		std::string idleI;                        // pre-edit baseline (map JSON)
+		// .nucursor: parsed frames, animated preview state.
+		struct CurFrame { std::string image; int hotX = 0, hotY = 0; uint64_t tex = 0; int tw = 0, th = 0; };
+		std::vector<CurFrame> curFrames;
+		float  curFps = 12.0f;
+		bool   curLoop = true;
+		int    curSel = 0;
+		double curAnim = 0.0;
+		bool   curPlay = true;
 		Atom*     prefabRoot = nullptr;     // .nuprefab: loaded subtree (lives in pv->world)
 		long      prefabSelId = 0;          // selected atom in the prefab tree (stable id)
 		// .nuseq sequencer: owned editing copy + a detached preview player (atom-less; "/"
@@ -759,6 +767,8 @@ public:
 	void DrawSkeletonEditor(AssetEditorWin& w);      // .nuskel sockets/groups/IK rig (skeleteditor.cpp)
 	void DrawRagdollEditor(AssetEditorWin& w);       // .nurag capsules/joints (ragdolleditor.cpp)
 	void DrawBoneMapEditor(AssetEditorWin& w);
+	void DrawCursorEditor(AssetEditorWin& w);   // .nucursor: frames/hotspot/fps + animated preview
+	void SaveCursorAsset(AssetEditorWin& w);
 	// Trigger-tool click: unproject the mouse, raycast the preview mesh, fire the picked
 	// event AT the hit (UV or world point, by the space of the event's target mask).
 	void FireEventAtPreview(AssetEditorWin& w);       // .nubonemap name pairs (skeleteditor.cpp)
