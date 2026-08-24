@@ -250,10 +250,7 @@ void EditorUI::DrawEntityIcons(ImVec2 rmin, ImVec2 sz)
 		}
 }
 
-// ST-viz: the World Partition overlay. Ground rectangles of the XZ cells, colored by state
-// (loading > parked > loaded > cold-on-disk > known), an HLOD inset marker, per-cell size
-// labels where the cell is large enough on screen, and a summary line. Pure ImGui overlay
-// over the rendered image — same projection as the entity icons, works in edit AND play.
+// Streaming overlay: XZ cell rectangles colored by state, HLOD marker, size labels, summary.
 void EditorUI::DrawStreamCells(ImVec2 rmin, ImVec2 sz)
 {
 	AppInstance* app = AppInstance::GetSingleton();

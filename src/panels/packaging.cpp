@@ -1587,6 +1587,7 @@ void EditorUI::PackageProjectNow()
 					jw["showFps"]     = w.showFps;
 					jw["vsync"]       = w.vsync;
 					jw["showConsole"] = w.showConsole;
+					jw["fpsLimit"]    = w.fpsLimit;
 					jw.erase("title");
 				}
 				// Log/debug ship as the dialog set them; the editor's own values never leak in.
@@ -2547,6 +2548,7 @@ void EditorUI::PackageProjectCmd()
 					w.showFps     = j.value("showFps",     w.showFps);
 					w.vsync       = j.value("vsync",       w.vsync);
 					w.showConsole = j.value("showConsole", w.showConsole);
+					w.fpsLimit    = j.value("fpsLimit",    w.fpsLimit);
 				}
 			}
 		}
@@ -2606,6 +2608,11 @@ void EditorUI::DrawPackageProjectPopup()
 	}
 	ImGui::Checkbox("Resizable", &gbWin.resizable);
 	ImGui::Checkbox("VSync", &gbWin.vsync);
+	ImGui::SetNextItemWidth(110.0f);
+	ImGui::InputInt("FPS Limit", &gbWin.fpsLimit, 0);
+	ImGui::SameLine(); ImGui::TextDisabled("(?)");
+	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Manual frame cap for the shipped game (0 = uncapped).\n"
+	                                              "VSync still applies on top; Game.SetFpsLimit overrides live.");
 	ImGui::Checkbox("Show OS Console", &gbWin.showConsole);
 	ImGui::SameLine(); ImGui::TextDisabled("(?)");
 	if (ImGui::IsItemHovered()) ImGui::SetTooltip("The process's own log window. Off for a shipped game.");
@@ -2638,6 +2645,7 @@ void EditorUI::DrawPackageProjectPopup()
 		if (gbWin.h < 64) gbWin.h = 64;
 		if (gbWin.opacity < 0.1f) gbWin.opacity = 0.1f;
 		if (gbWin.opacity > 1.0f) gbWin.opacity = 1.0f;
+		if (gbWin.fpsLimit < 0) gbWin.fpsLimit = 0;
 		gbWin.fullscreen = gbWin.mode != 0;
 		gbWinSet = true;   // the packaging worker overrides the shipped window block with gbWin
 		ImGui::CloseCurrentPopup();
