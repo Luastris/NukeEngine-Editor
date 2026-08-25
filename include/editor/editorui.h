@@ -219,6 +219,9 @@ private:
 	bool profilerOpen = false, profilerFocus = false, profilerFrozen = false;
 	bool meshCostView = false;   // profiler's mesh-cost overlay (iRender::setDebugView)
 	char profilerFilter[64] = "";
+	// Edit-history window (over the same undo/redo stacks).
+	bool historyOpen = false, historyFocus = false;
+	int  undoTrimmed = 0;        // commands dropped by the 200 cap since the last reset
 	// Generic undo/redo stack: each action pushes its own inverse closures (atom edits are
 	// captured as a subtree delta, never the whole world). Push via PushUndo / RecordChange<T>.
 	struct UndoCmd { std::function<void()> undo, redo; std::string label; long serial = 0; };
@@ -377,6 +380,7 @@ private:
 	void SavePreferences();
 	void winPreferences();
 	void winProfiler();                                           // live phase breakdown (CPU + GPU)
+	void winHistory();                                            // edit-history timeline (click = jump)
 	// Open file:line in the user's chosen editor (falls back to the built-in text editor).
 	void OpenExternal(const std::string& file, int line);
 	std::string startupWorld = "scene.nuworld";    // from the .nuproj

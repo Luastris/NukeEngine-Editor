@@ -515,6 +515,8 @@ void EditorUI::EditorMenu()
 			ImGui::MenuItem("Plugins", nullptr, &win->plugmgr);
 			if (ImGui::MenuItem("Profiler", nullptr, profilerOpen))
 			{ profilerOpen = !profilerOpen; profilerFocus = profilerOpen; }
+			if (ImGui::MenuItem("Edit History", nullptr, historyOpen))
+			{ historyOpen = !historyOpen; historyFocus = historyOpen; }
 			ImGui::MenuItem("About", nullptr, &win->about);
 			ImGui::Separator();
 			ImGui::MenuItem("Project Settings", nullptr, &settingsOpen);

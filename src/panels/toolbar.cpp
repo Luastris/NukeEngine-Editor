@@ -461,6 +461,7 @@ void EditorUI::Draw()
 	winWorldSettings();   // World Settings window (global shadows etc., saved in the .nuworld)
 	winPreferences();     // engine-wide Preferences (external editor etc., %APPDATA% scope)
 	winProfiler();        // live CPU/GPU phase breakdown
+	winHistory();         // edit-history timeline (click = jump)
 	winTextEditor();      // Text editor: opened from the browser / asset inspector
 	winAssetEditors();    // Asset editors: material / mesh / prefab windows
 	DrawSaveAsPopup();    // "Save World As" modal
@@ -519,12 +520,12 @@ void EditorUI::PushUndo(const std::string& label, std::function<void()> undoFn, 
 	// Non-world commands inherit the current world serial, so they don't flip the dirty state.
 	const long ws = worldEdit ? ++editSerial : WorldEditSerial();
 	undoStack.push_back({ std::move(undoFn), std::move(redoFn), label, ws });
-	if (undoStack.size() > 200) undoStack.erase(undoStack.begin());
+	if (undoStack.size() > 200) { undoStack.erase(undoStack.begin()); ++undoTrimmed; }
 	redoStack.clear();
 	idleSnapValid = false;   // any recorded edit may have touched the selected subtree
 }
 
-void EditorUI::ResetUndo() { undoStack.clear(); redoStack.clear(); editing = false; editAtomId = 0; editBefore.clear(); idleSnap.clear(); idleAtomId = 0; idleSnapValid = false; }
+void EditorUI::ResetUndo() { undoStack.clear(); redoStack.clear(); undoTrimmed = 0; editing = false; editAtomId = 0; editBefore.clear(); idleSnap.clear(); idleAtomId = 0; idleSnapValid = false; }
 
 void EditorUI::Undo()
 {
