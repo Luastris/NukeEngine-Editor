@@ -1,9 +1,10 @@
 // Viewport panel: EditorUI method definitions.
 
-// Infinite camera look/pan: while an RMB/MMB drag is live the cursor is captured
-// (hidden, unbounded deltas) so rotation never dies at the screen edge.
-static bool s_camLookWant = false;      // set by the drag handlers each frame they apply
-static bool s_camLookCapture = false;   // capture currently engaged
+// Infinite camera look/pan: while an RMB/MMB drag is live the cursor hides and WRAPS at the
+// viewport-image edges — it can never land on other widgets or leave the panel (works for the
+// docked panel AND detached native-viewport windows); release puts it back at the press point.
+static bool s_lookActive = false;
+static bool s_lookWarpSkip = false;     // ignore the mouse delta on the frame after a warp
 // Fly-speed multiplier: wheel while RMB is held scales it (wheel without RMB still dollies).
 static float  s_flyMul = 1.0f;
 static double s_flyMulShowUntil = 0.0;   // brief on-screen readout after a change
@@ -11,7 +12,22 @@ static double s_flyMulShowUntil = 0.0;   // brief on-screen readout after a chan
 // marquee rect-select: armed by a press on empty space, live once the drag passes threshold.
 static bool  s_marqueeArm = false, s_marqueeLive = false;
 static ImVec2 s_marqueeStart;
+static ImVec2 s_lookPressPos;           // cursor restore point for the look wrap
 #include "nukeui.h"
+#include <GLFW/glfw3.h>   // look wrap: move the OS cursor of the current imgui viewport
+
+// Move the OS cursor to `to` (imgui screen coords) inside the CURRENT imgui viewport's window
+// and tell imgui, skipping the resulting delta. No-op where the panel has no GLFW window
+// (GDI-blit fallback hosts).
+static void WarpMouse(const ImVec2& to)
+{
+	ImGuiViewport* vp = ImGui::GetWindowViewport();
+	GLFWwindow* wnd = vp ? (GLFWwindow*)vp->PlatformHandle : nullptr;
+	if (!wnd) return;
+	glfwSetCursorPos(wnd, to.x - vp->Pos.x, to.y - vp->Pos.y);
+	ImGui::GetIO().AddMousePosEvent(to.x, to.y);
+	s_lookWarpSkip = true;
+}
 #include <interface/EditorHooks.h>   // module-registered viewport overlays
 #include "API/Model/Math.h"
 #include "API/Model/resdb.h"
@@ -1327,7 +1343,7 @@ void EditorUI::winRender()
 
 		// Camera control while hovering the image: RMB = orbit/look, MMB = pan, wheel = dolly.
 		// Suspended while possessed — the game owns the mouse and the editor camera isn't on screen.
-		if (!possessed && editorCam && editorCam->transform && ImGui::IsItemHovered())
+		if (!possessed && editorCam && editorCam->transform && (ImGui::IsItemHovered() || s_lookActive))
 		{
 			ImGuiIO& io = ImGui::GetIO();
 			Transform* t = editorCam->transform;
@@ -1555,6 +1571,15 @@ void EditorUI::winRender()
 			if (!ImGui::IsMouseDown(ImGuiMouseButton_Left) && !ImGui::IsMouseReleased(ImGuiMouseButton_Left))
 				s_marqueeArm = s_marqueeLive = false;
 
+			// Look/pan begins: latch the wrap mode + remember where to put the cursor back.
+			if (ImGui::IsMouseClicked(ImGuiMouseButton_Right) || ImGui::IsMouseClicked(ImGuiMouseButton_Middle))
+			{
+				s_lookActive = true;
+				s_lookPressPos = io.MousePos;
+			}
+			// A warp lands as one giant delta the next frame — swallow that one.
+			const ImVec2 lookDelta = s_lookWarpSkip ? ImVec2(0, 0) : io.MouseDelta;
+			s_lookWarpSkip = false;
 			// Sync orbit angles at drag start from the FORWARD vector, never EulerDeg(): its
 			// quat->euler recompute uses a different order/range and drops roll.
 			if (ImGui::IsMouseClicked(ImGuiMouseButton_Right))
@@ -1568,9 +1593,8 @@ void EditorUI::winRender()
 			}
 			if (ImGui::IsMouseDragging(ImGuiMouseButton_Right))
 			{
-				s_camLookWant = true;   // infinite-look capture (manager below)
-				camYaw   += io.MouseDelta.x * rotSpeed;
-				camPitch += io.MouseDelta.y * rotSpeed;
+				camYaw   += lookDelta.x * rotSpeed;
+				camPitch += lookDelta.y * rotSpeed;
 				const float lim = 1.55f; // ~89deg pitch clamp
 				if (camPitch >  lim) camPitch =  lim;
 				if (camPitch < -lim) camPitch = -lim;
@@ -1578,9 +1602,24 @@ void EditorUI::winRender()
 			}
 			if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle))
 			{
-				s_camLookWant = true;
-				t->position += t->right() * (double)(-io.MouseDelta.x * panSpeed)
-				             + t->up()    * (double)( io.MouseDelta.y * panSpeed);
+				t->position += t->right() * (double)(-lookDelta.x * panSpeed)
+				             + t->up()    * (double)( lookDelta.y * panSpeed);
+			}
+			// Edge wrap: the hidden cursor teleports to the opposite side just before it could
+			// leave the image, so the drag never dies and no other widget ever sees it.
+			if (s_lookActive && (ImGui::IsMouseDown(ImGuiMouseButton_Right) || ImGui::IsMouseDown(ImGuiMouseButton_Middle)))
+			{
+				ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
+				if (mx.x - mn.x > 24.0f && mx.y - mn.y > 24.0f)
+				{
+					ImVec2 p = io.MousePos;
+					bool wrap = false;
+					if      (p.x <= mn.x + 2.0f) { p.x = mx.x - 8.0f; wrap = true; }
+					else if (p.x >= mx.x - 2.0f) { p.x = mn.x + 8.0f; wrap = true; }
+					if      (p.y <= mn.y + 2.0f) { p.y = mx.y - 8.0f; wrap = true; }
+					else if (p.y >= mx.y - 2.0f) { p.y = mn.y + 8.0f; wrap = true; }
+					if (wrap) WarpMouse(p);
+				}
 			}
 			if (io.MouseWheel != 0.0f)
 			{
@@ -1621,23 +1660,18 @@ void EditorUI::winRender()
 	}
 
 	// Must run EVERY viewport frame (outside the hover gates) or a release is missed.
-	// NoMouseCursorChange stops the imgui backend re-arming the OS cursor while it is captured.
 	{
-		AppInstance* app = AppInstance::GetSingleton();
 		const bool down = ImGui::IsMouseDown(ImGuiMouseButton_Right) || ImGui::IsMouseDown(ImGuiMouseButton_Middle);
-		if (s_camLookWant && !s_camLookCapture && app && app->render)
+		if (s_lookActive)
 		{
-			app->render->setCursorMode(2);   // hidden + unbounded deltas (GLFW disabled mode)
-			ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
-			s_camLookCapture = true;
+			if (!down)
+			{
+				s_lookActive = false;
+				WarpMouse(s_lookPressPos);   // reappear where the look began
+			}
+			else
+				ImGui::SetMouseCursor(ImGuiMouseCursor_None);   // hidden while looking
 		}
-		else if (s_camLookCapture && !down && app && app->render)
-		{
-			app->render->setCursorMode(0);
-			ImGui::GetIO().ConfigFlags &= ~ImGuiConfigFlags_NoMouseCursorChange;
-			s_camLookCapture = false;
-		}
-		s_camLookWant = false;
 	}
 	});
 }
