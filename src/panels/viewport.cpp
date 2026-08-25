@@ -12,6 +12,7 @@ static double s_flyMulShowUntil = 0.0;   // brief on-screen readout after a chan
 static bool  s_marqueeArm = false, s_marqueeLive = false;
 static ImVec2 s_marqueeStart;
 #include "nukeui.h"
+#include <interface/EditorHooks.h>   // module-registered viewport overlays
 #include "API/Model/Math.h"
 #include "API/Model/resdb.h"
 #include "API/Model/Light.h"
@@ -254,7 +255,30 @@ void EditorUI::DrawEntityIcons(ImVec2 rmin, ImVec2 sz)
 		}
 }
 
-// Streaming overlay: XZ cell rectangles colored by state, HLOD marker, size labels, summary.
+// Module-registered viewport overlays (interface/EditorHooks.h): the editor hands over the
+// rect + editor-camera view-projection and knows nothing about who draws.
+void EditorUI::DrawModuleOverlays(ImVec2 rmin, ImVec2 sz)
+{
+	if (ViewportOverlays().empty()) return;
+	if (!editorCam || !editorCam->transform) return;
+	if (sz.x <= 1.0f || sz.y <= 1.0f) return;
+	glm::mat4 vp;
+	{
+		Transform* c = editorCam->transform;
+		Vector3 e = c->globalPosition();
+		Vector3 f = c->direction(), u = c->up();
+		glm::mat4 v = glm::lookAtLH(
+			glm::vec3((float)e.x, (float)e.y, (float)e.z),
+			glm::vec3((float)(e.x + f.x), (float)(e.y + f.y), (float)(e.z + f.z)),
+			glm::vec3((float)u.x, (float)u.y, (float)u.z));
+		vp = EditorCamProj(editorCam, sz.x / sz.y) * v;
+	}
+	EditorViewportCtx ctx;
+	ctx.x = rmin.x; ctx.y = rmin.y; ctx.w = sz.x; ctx.h = sz.y;
+	std::memcpy(ctx.viewProj, &vp[0][0], sizeof(ctx.viewProj));
+	for (const EditorViewportOverlay& o : ViewportOverlays()) o.draw(ctx);
+}
+
 void EditorUI::DrawStreamCells(ImVec2 rmin, ImVec2 sz)
 {
 	AppInstance* app = AppInstance::GetSingleton();
@@ -557,6 +581,7 @@ void EditorUI::winRender()
 			// Streaming overlay: edit AND play (streaming actually runs in play — that is the
 			// interesting view); hidden while possessed (the game owns the screen then).
 			if (!possessed && streamVizVisible) DrawStreamCells(imin, avail);
+			if (!possessed) DrawModuleOverlays(imin, avail);
 		}
 		else
 			ImGui::Text("No scene texture.");
@@ -614,17 +639,20 @@ void EditorUI::winRender()
 		{
 			AppInstance* wapp = AppInstance::GetSingleton();
 			Atom* wsel = wapp->selectedInHieararchy;
-			// WaterRiver lives in the water plugin DLL: find it by type-name CONTENT (pointer
-			// compare fails across DLLs) and reach `points` through reflection. The engine
-			// Spline goes through the same reflected seam so the undo path stays uniform.
+			// Candidates: the engine Spline + module types from the EditorHooks curve registry —
+			// matched by type-name CONTENT (pointer compare fails across DLLs), `points` reached
+			// through reflection so the undo path stays uniform.
 			nuke::Component* riv = nullptr;
 			const char* rvType = nullptr;
 			std::vector<float>* rvPts = nullptr;
 			if (wsel && wapp->playState == 0)
 				for (nuke::Component* c : wsel->components)
 				{
-					if (c && c->name && !strcmp(c->name, "WaterRiver")) { riv = c; rvType = "WaterRiver"; break; }
-					if (c && c->name && !strcmp(c->name, "Spline"))     { riv = c; rvType = "Spline"; break; }
+					if (!c || !c->name) continue;
+					if (!strcmp(c->name, "Spline")) { riv = c; rvType = "Spline"; break; }
+					for (const std::string& cc : nuke::CurveComponents())
+						if (!strcmp(c->name, cc.c_str())) { riv = c; rvType = cc.c_str(); break; }
+					if (riv) break;
 				}
 			if (riv)
 				if (nuke::TypeInfo* rti = nuke::Registry_Find(rvType))

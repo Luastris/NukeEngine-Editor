@@ -11,6 +11,7 @@
 #include <API/Model/Jobs.h>
 #include <interface/AtomCreators.h>   // registered atom templates for the "+" menu
 #include <reflect/Reflect.h>          // Registry_All: creator components by type name
+#include <interface/EditorHooks.h>    // module-registered view toggles in the snap popup
 #include <config.h>                   // packaging dev hooks mirror the Game Build dialog
 #include <iostream>
 #include <algorithm>
@@ -233,6 +234,13 @@ void EditorUI::Toolbar()
 			ImGui::Checkbox("Show streaming cells", &streamVizVisible);
 			if (ImGui::IsItemHovered()) ImGui::SetTooltip("World Partition overlay: XZ cells colored by state\n"
 			                                              "(loaded / parked / cold on disk / loading / HLOD) + sizes.");
+			// Module-registered view toggles (interface/EditorHooks.h) — no module names here.
+			for (const EditorToggle& t : EditorToggles())
+			{
+				bool on = t.get();
+				if (ImGui::Checkbox(t.label.c_str(), &on)) t.set(on);
+				if (!t.tip.empty() && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", t.tip.c_str());
+			}
 			ImGui::TextDisabled("Hold V while moving: surface snap");
 			ImGui::EndPopup();
 		}

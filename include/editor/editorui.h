@@ -219,6 +219,7 @@ private:
 	bool profilerOpen = false, profilerFocus = false, profilerFrozen = false;
 	bool meshCostView = false;   // profiler's mesh-cost overlay (iRender::setDebugView)
 	char profilerFilter[64] = "";
+	void DrawModuleOverlays(ImVec2 rmin, ImVec2 sz);   // module-registered viewport overlays (EditorHooks)
 	// Edit-history window (over the same undo/redo stacks).
 	bool historyOpen = false, historyFocus = false;
 	int  undoTrimmed = 0;        // commands dropped by the 200 cap since the last reset
