@@ -9,7 +9,15 @@
 
 void EditorUI::winProfiler()
 {
-	if (!profilerOpen) return;
+	if (!profilerOpen)
+	{
+		if (meshCostView)   // the cost overlay lives with the profiler: window closed = view off
+		{
+			meshCostView = false;
+			if (nuke::AppInstance::GetSingleton()->render) nuke::AppInstance::GetSingleton()->render->setDebugView(0);
+		}
+		return;
+	}
 	if (profilerFocus) { ImGui::SetNextWindowFocus(); profilerFocus = false; }
 	// Through DocPanel like every other panel: caption buttons, docking and tear-off come from
 	// there — a bare ImGui::Begin window has none of it.
@@ -26,8 +34,48 @@ void EditorUI::winProfiler()
 	if (ImGui::Button(ICON_LC_DOWNLOAD " Capture CSV"))
 		nuke::Profiler::Capture("profile.csv");   // logged with the absolute path
 	ImGui::SameLine();
+	{
+		bool on = meshCostView;
+		if (on) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+		if (ImGui::Button(ICON_LC_BOXES " Mesh cost"))
+		{
+			meshCostView = !meshCostView;
+			if (nuke::AppInstance::GetSingleton()->render)
+				nuke::AppInstance::GetSingleton()->render->setDebugView(meshCostView ? 1 : 0);
+		}
+		if (on) ImGui::PopStyleColor();
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("Color every mesh in the viewport by its triangle load\n"
+			                  "(triangles of the drawn LOD/section x instances), flat fill + wireframe.");
+	}
+	ImGui::SameLine();
 	ImGui::SetNextItemWidth(140);
 	ImGui::InputTextWithHint("##pfilter", ICON_LC_SEARCH " filter", profilerFilter, sizeof(profilerFilter));
+	if (meshCostView)
+	{
+		// Legend: the renderer's log10 ramp (CostColor) — same stops, same colors.
+		static const ImU32 kStops[5] = {
+			IM_COL32( 26, 191,  38, 255), IM_COL32(230, 217,  13, 255), IM_COL32(255, 115,   5, 255),
+			IM_COL32(255,  13,   5, 255), IM_COL32(255,   0, 230, 255) };
+		static const char* kLabels[5] = { "1k", "10k", "100k", "1M", "10M" };
+		ImDrawList* dl = ImGui::GetWindowDrawList();
+		const float w = ImGui::GetContentRegionAvail().x, h = ImGui::GetTextLineHeight();
+		const ImVec2 p0 = ImGui::GetCursorScreenPos();
+		for (int s = 0; s < 4; ++s)
+			dl->AddRectFilledMultiColor(ImVec2(p0.x + w * s / 4.0f, p0.y), ImVec2(p0.x + w * (s + 1) / 4.0f, p0.y + h),
+			                            kStops[s], kStops[s + 1], kStops[s + 1], kStops[s]);
+		ImGui::Dummy(ImVec2(w, h));
+		const ImVec2 lp = ImGui::GetCursorScreenPos();
+		const ImU32 tcol = ImGui::GetColorU32(ImGuiCol_TextDisabled);
+		for (int s = 0; s < 5; ++s)
+		{
+			const float ts = ImGui::CalcTextSize(kLabels[s]).x;
+			const float lx = w * s / 4.0f - (s == 0 ? 0.0f : (s == 4 ? ts : ts * 0.5f));
+			dl->AddText(ImVec2(p0.x + lx, lp.y), tcol, kLabels[s]);
+		}
+		ImGui::Dummy(ImVec2(w, h));
+		ImGui::TextDisabled("triangles drawn per mesh section x instances");
+	}
 	ImGui::Separator();
 
 	// Snapshot: a frozen view keeps the numbers still while they are read.

@@ -217,6 +217,7 @@ private:
 	std::vector<std::function<void()>> hierPendingOps;
 	// Profiler window (Window menu / clicking the status-bar timings).
 	bool profilerOpen = false, profilerFocus = false, profilerFrozen = false;
+	bool meshCostView = false;   // profiler's mesh-cost overlay (iRender::setDebugView)
 	char profilerFilter[64] = "";
 	// Generic undo/redo stack: each action pushes its own inverse closures (atom edits are
 	// captured as a subtree delta, never the whole world). Push via PushUndo / RecordChange<T>.
