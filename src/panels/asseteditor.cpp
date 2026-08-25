@@ -9,6 +9,8 @@
 #include <API/Model/Surface.h>   // trigger tool: preview hit reactions (Hit + DrainHits)
 #include <set>
 #include <API/Model/Audio.h>
+#include <API/Model/PairedAnim.h>   // .nupair editor: save hot-reloads live sessions
+#include <API/Model/resdb.h>        // .nupair editor: clip pickers
 #include <input/Input.h>
 #include <interface/AssetCreators.h>   // module-supplied asset editors
 #include "nukeui.h"                     // NukeUI host windows for detached editors
@@ -1374,7 +1376,33 @@ void EditorUI::OpenAssetEditor(const std::string& path)
 	if (const auto* open = nuke::AssetEditorForExt(ext)) { (*open)(path); return; }
 	if (ext != ".numat" && ext != ".numesh" && ext != ".nuprefab" && ext != ".nutex" && ext != ".nuinput"
 	    && ext != ".nuseq" && ext != ".nuanim" && ext != ".nusm" && ext != ".nublend"
-	    && ext != ".nuskel" && ext != ".nurag" && ext != ".nubonemap" && ext != ".nucursor" && !isAudio) return;
+	    && ext != ".nuskel" && ext != ".nurag" && ext != ".nubonemap" && ext != ".nucursor"
+	    && ext != ".nupair" && !isAudio) return;
+
+	if (ext == ".nupair")   // role clips + offsets: form only, no preview scene
+	{
+		AssetEditorWin w;
+		w.path = path; w.ext = ext; w.wantFocus = true; w.detached = detachAssetEditors;
+		bfs::ifstream f{ bfs::path(path) };
+		nlohmann::json j = f ? nlohmann::json::parse(f, nullptr, false) : nlohmann::json();
+		if (!j.is_discarded() && j.is_object())
+		{
+			w.prLoop = j.value("loop", false);
+			w.prSpeed = j.value("speed", 1.0f);
+			if (j.contains("roles") && j["roles"].is_array())
+				for (int i = 0; i < 2 && i < (int)j["roles"].size(); ++i)
+				{
+					const nlohmann::json& r = j["roles"][i];
+					w.prRole[i].clip = r.value("clip", std::string());
+					w.prRole[i].align = r.value("align", false);
+					w.prRole[i].yaw = r.value("yaw", 0.0f);
+					if (r.contains("pos") && r["pos"].is_array() && r["pos"].size() >= 3)
+						for (int k = 0; k < 3; ++k) w.prRole[i].pos[k] = r["pos"][k].get<float>();
+				}
+		}
+		assetEds.push_back(std::move(w));
+		return;
+	}
 
 	if (ext == ".nucursor")   // frames/hotspot/fps: 2D, no preview scene
 	{
@@ -2105,7 +2133,8 @@ void EditorUI::winAssetEditors()
 				const std::string title = bfs::path(w.path).filename().string();
 				const bool isSlicerH = (w.ext == ".nutex"), isInputH = (w.ext == ".nuinput");
 				const bool isAudioH = !w.pv && !isSlicerH && !isInputH
-				                    && w.ext != ".nuseq" && w.ext != ".nubonemap" && w.ext != ".nucursor";
+				                    && w.ext != ".nuseq" && w.ext != ".nubonemap" && w.ext != ".nucursor"
+				                    && w.ext != ".nupair";
 				const int hw = isAudioH ? 460 : (w.ext == ".nuprefab" ? 900 : (isSlicerH ? 760 : (isInputH ? 820
 				             : w.ext == ".nuanim" ? 1000 : w.ext == ".nusm" ? 1100 : w.ext == ".nublend" ? 900
 				             : w.ext == ".nuskel" ? 960 : w.ext == ".nurag" ? 900 : w.ext == ".nubonemap" ? 700 : 640)));
@@ -2231,6 +2260,7 @@ void EditorUI::winAssetEditors()
 				else if (w.ext == ".nurag"    && w.rag)        w.rag->SaveToFile(w.path);
 				else if (w.ext == ".nubonemap" && w.bmap)      w.bmap->SaveToFile(w.path);
 				else if (w.ext == ".nucursor")                 SaveCursorAsset(w);
+				else if (w.ext == ".nupair")                   SavePairAsset(w);
 				w.dirty = false; w.open = false; aeCloseConfirm = -1; ImGui::CloseCurrentPopup();
 			}
 			ImGui::SameLine();
@@ -2305,6 +2335,12 @@ void EditorUI::DrawAssetEditorBody(int i)
 	{
 		if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)) aeFocused = i;
 		DrawCursorEditor(w);
+		return;
+	}
+	if (w.ext == ".nupair")
+	{
+		if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)) aeFocused = i;
+		DrawPairEditor(w);
 		return;
 	}
 	const bool isSlicer = (w.ext == ".nutex");
@@ -2780,6 +2816,90 @@ void EditorUI::DrawAssetEditorBody(int i)
 				else if (w.ext == ".nuinput")                  w.idleI = InputMapJson(w);
 			}
 			w.editedNow = false;
+}
+
+// ---- .nupair editor -----------------------------------------------------------------------
+
+void EditorUI::SavePairAsset(AssetEditorWin& w)
+{
+	nlohmann::json j;
+	j["type"] = "PairedAnimation";
+	j["version"] = 1;
+	j["loop"] = w.prLoop;
+	j["speed"] = w.prSpeed;
+	nlohmann::json roles = nlohmann::json::array();
+	for (int i = 0; i < 2; ++i)
+	{
+		nlohmann::json r;
+		r["clip"] = w.prRole[i].clip;
+		r["align"] = w.prRole[i].align;
+		r["pos"] = { w.prRole[i].pos[0], w.prRole[i].pos[1], w.prRole[i].pos[2] };
+		r["yaw"] = w.prRole[i].yaw;
+		roles.push_back(r);
+	}
+	j["roles"] = roles;
+	bfs::ofstream out(bfs::path(w.path), std::ios::trunc);
+	if (out) { out << j.dump(2); w.dirty = false; }
+	// Poke live sessions/caches with the content-relative path (what components reference).
+	std::string rel = w.path;
+	const std::string content = AppInstance::GetSingleton()->contentRoot;
+	if (!content.empty())
+	{
+		boost::system::error_code ec;
+		bfs::path r = bfs::relative(bfs::path(w.path), bfs::path(content), ec);
+		if (!ec && !r.empty() && r.generic_string().compare(0, 2, "..") != 0) rel = r.generic_string();
+	}
+	nuke::PairedAnim::Reload(rel);
+}
+
+void EditorUI::DrawPairEditor(AssetEditorWin& w)
+{
+	auto clipCombo = [&](const char* label, std::string& ref) -> bool
+	{
+		// Shows the clip NAME; stores the guid. The field also edits raw (name refs work too).
+		nuke::ResDB* db = nuke::ResDB::getSingleton();
+		std::string shown = ref;
+		if (nuke::AnimClip* c = db->GetClip(ref)) shown = c->name;
+		bool changed = false;
+		ImGui::SetNextItemWidth(240.0f);
+		if (ImGui::BeginCombo(label, shown.empty() ? "(none)" : shown.c_str()))
+		{
+			if (ImGui::Selectable("(none)", ref.empty())) { ref.clear(); changed = true; }
+			for (nuke::AnimClip* c : db->clips)
+			{
+				if (!c) continue;
+				ImGui::PushID(c);
+				if (ImGui::Selectable(c->name.c_str(), ref == c->guid)) { ref = c->guid; changed = true; }
+				ImGui::PopID();
+			}
+			ImGui::EndCombo();
+		}
+		return changed;
+	};
+
+	if (ImGui::Button(ICON_LC_SAVE " Save")) SavePairAsset(w);
+	ImGui::SameLine();
+	if (ImGui::Checkbox("Loop", &w.prLoop)) w.dirty = true;
+	ImGui::SameLine();
+	ImGui::SetNextItemWidth(90.0f);
+	if (ImGui::DragFloat("Speed", &w.prSpeed, 0.01f, 0.05f, 10.0f, "%.2f")) w.dirty = true;
+	ImGui::Separator();
+	ImGui::TextDisabled("Entry offsets are in ANCHOR space (the receiver / an interaction slot).");
+
+	const char* names[2] = { "Role A  (initiator, master clock)", "Role B  (receiver / object)" };
+	for (int i = 0; i < 2; ++i)
+	{
+		AssetEditorWin::PairRoleEd& r = w.prRole[i];
+		ImGui::PushID(i);
+		ImGui::SeparatorText(names[i]);
+		if (clipCombo("Clip", r.clip)) w.dirty = true;
+		if (ImGui::Checkbox("Align To Anchor", &r.align)) w.dirty = true;
+		ImGui::SetNextItemWidth(240.0f);
+		if (ImGui::DragFloat3("Offset", r.pos, 0.01f)) w.dirty = true;
+		ImGui::SetNextItemWidth(120.0f);
+		if (ImGui::DragFloat("Yaw", &r.yaw, 0.5f, -180.0f, 180.0f, "%.1f deg")) w.dirty = true;
+		ImGui::PopID();
+	}
 }
 
 // ---- .nucursor editor ---------------------------------------------------------------------

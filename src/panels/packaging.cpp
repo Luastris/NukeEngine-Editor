@@ -535,7 +535,7 @@ static bool CookEngineType(const std::string& low, bool& isJson)
 {
 	auto ends = [&](const char* suf) { size_t n = strlen(suf); return low.size() > n && low.compare(low.size() - n, n, suf) == 0; };
 	isJson = ends(".nuworld") || ends(".nuprefab") || ends(".numat") || ends(".nubonemap") || ends(".nuproj")
-	      || ends(".nucursor");
+	      || ends(".nucursor") || ends(".nupair");
 	if (isJson) return true;
 	return ends(".numesh") || ends(".nutex") || ends(".nuanim")
 	    || ends(".ogg") || ends(".wav") || ends(".mp3") || ends(".flac")

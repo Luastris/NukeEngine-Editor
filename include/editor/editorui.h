@@ -670,6 +670,11 @@ public:
 		int    curSel = 0;
 		double curAnim = 0.0;
 		bool   curPlay = true;
+		// .nupair paired animation: two roles (clip + entry offset from the anchor) + loop/speed.
+		struct PairRoleEd { std::string clip; bool align = false; float pos[3] = { 0, 0, 0 }; float yaw = 0; };
+		PairRoleEd prRole[2];
+		bool  prLoop = false;
+		float prSpeed = 1.0f;
 		Atom*     prefabRoot = nullptr;     // .nuprefab: loaded subtree (lives in pv->world)
 		long      prefabSelId = 0;          // selected atom in the prefab tree (stable id)
 		// .nuseq sequencer: owned editing copy + a detached preview player (atom-less; "/"
@@ -776,6 +781,8 @@ public:
 	void DrawBoneMapEditor(AssetEditorWin& w);
 	void DrawCursorEditor(AssetEditorWin& w);   // .nucursor: frames/hotspot/fps + animated preview
 	void SaveCursorAsset(AssetEditorWin& w);
+	void DrawPairEditor(AssetEditorWin& w);     // .nupair: role clips + entry offsets + loop/speed
+	void SavePairAsset(AssetEditorWin& w);
 	// Trigger-tool click: unproject the mouse, raycast the preview mesh, fire the picked
 	// event AT the hit (UV or world point, by the space of the event's target mask).
 	void FireEventAtPreview(AssetEditorWin& w);       // .nubonemap name pairs (skeleteditor.cpp)
