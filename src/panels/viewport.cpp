@@ -666,6 +666,7 @@ void EditorUI::winRender()
 				{
 					if (!c || !c->name) continue;
 					if (!strcmp(c->name, "Spline")) { riv = c; rvType = "Spline"; break; }
+					if (!strcmp(c->name, "Rope"))   { riv = c; rvType = "Rope"; break; }
 					for (const std::string& cc : nuke::CurveComponents())
 						if (!strcmp(c->name, cc.c_str())) { riv = c; rvType = cc.c_str(); break; }
 					if (riv) break;

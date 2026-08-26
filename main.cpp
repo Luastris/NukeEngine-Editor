@@ -746,6 +746,13 @@ int main(int argc, char** argv)
 	nuke::RegisterAtomCreator({ "Effects", "Wind Zone", "\xee\x86\xb0" /* ICON_LC_WIND */, { "WindZone" } });
 	// Engine component icons for the viewport overlay.
 	nuke::RegisterComponentIcon({ "WindZone", "\xee\x86\xb0" /* ICON_LC_WIND */, { 0.63f, 0.9f, 0.78f, 0.92f } });
+	nuke::RegisterComponentIcon({ "HingeJoint",    "\xee\x8b\xaa" /* ICON_LC_ROTATE_3D */, { 0.5f, 0.8f, 1.0f, 0.92f } });
+	nuke::RegisterComponentIcon({ "SliderJoint",   "\xee\x90\xbe" /* ICON_LC_UNFOLD_VERTICAL */, { 0.5f, 0.8f, 1.0f, 0.92f } });
+	nuke::RegisterComponentIcon({ "DistanceJoint", "\xee\x84\x82" /* ICON_LC_LINK */, { 0.5f, 0.8f, 1.0f, 0.92f } });
+	nuke::RegisterComponentIcon({ "SpringJoint",   "\xee\x93\xa3" /* ICON_LC_CABLE */, { 0.5f, 0.8f, 1.0f, 0.92f } });
+	nuke::RegisterComponentIcon({ "ConeJoint",     "\xee\x94\xa3" /* ICON_LC_CONE */, { 0.5f, 0.8f, 1.0f, 0.92f } });
+	nuke::RegisterAtomCreator({ "Physics", "Rope", "\xee\x93\xa3" /* ICON_LC_CABLE */, { "Rope" } });
+	nuke::RegisterComponentIcon({ "Rope", "\xee\x93\xa3" /* ICON_LC_CABLE */, { 0.85f, 0.7f, 0.45f, 0.92f } });
 
 	// Workers before SetUp: its heavy tail loads in the background (EditorUI::StartBootLoad).
 	nuke::Jobs::Init(Config::getSingleton()->jobWorkers, Config::getSingleton()->jobPinCores);
