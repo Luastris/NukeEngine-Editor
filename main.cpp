@@ -753,6 +753,8 @@ int main(int argc, char** argv)
 	nuke::RegisterComponentIcon({ "ConeJoint",     "\xee\x94\xa3" /* ICON_LC_CONE */, { 0.5f, 0.8f, 1.0f, 0.92f } });
 	nuke::RegisterAtomCreator({ "Physics", "Rope", "\xee\x93\xa3" /* ICON_LC_CABLE */, { "Rope" } });
 	nuke::RegisterComponentIcon({ "Rope", "\xee\x93\xa3" /* ICON_LC_CABLE */, { 0.85f, 0.7f, 0.45f, 0.92f } });
+	nuke::RegisterComponentIcon({ "Vehicle", "\xee\x87\x95" /* ICON_LC_CAR */, { 0.95f, 0.75f, 0.35f, 0.92f } });
+	nuke::RegisterComponentIcon({ "Wheel",   "\xee\x82\xaf" /* ICON_LC_DISC */, { 0.7f, 0.7f, 0.75f, 0.92f } });
 
 	// Workers before SetUp: its heavy tail loads in the background (EditorUI::StartBootLoad).
 	nuke::Jobs::Init(Config::getSingleton()->jobWorkers, Config::getSingleton()->jobPinCores);
