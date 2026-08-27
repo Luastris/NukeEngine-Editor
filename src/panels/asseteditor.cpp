@@ -1108,6 +1108,27 @@ bool EditorUI::DrawLiveMaterialSections(nuke::Material* m)
 		ch |= ImGui::DragFloat("Wind Volume", &m->liveSound.windVolume, 0.01f, 0.0f, 2.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 	}
 
+	if (ImGui::CollapsingHeader("Flammability"))
+	{
+		ImGui::TextDisabled("Fire: ignition/spread/burn-out; char = this material's \"burn\" state.");
+		bool flam = m->liveIgnite >= 0.0f;
+		if (ImGui::Checkbox("Flammable", &flam))
+		{ m->liveIgnite = flam ? 3.0f : -1.0f; ch = true; }
+		if (flam)
+		{
+			ch |= ImGui::DragFloat("Ignition", &m->liveIgnite, 0.05f, 0.05f, 120.0f, "%.2f s", ImGuiSliderFlags_AlwaysClamp);
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Seconds of neighbouring heat before catching fire");
+			ch |= ImGui::DragFloat("Burn Time", &m->liveBurn, 0.1f, 0.5f, 600.0f, "%.1f s", ImGuiSliderFlags_AlwaysClamp);
+			ch |= ImGui::DragFloat("Heat Radius", &m->liveSpread, 0.05f, 0.0f, 50.0f, "%.2f m", ImGuiSliderFlags_AlwaysClamp);
+			ch |= AssetPicker("Fire Prefab", m->liveFirePrefab, "file:.nuprefab");
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Looping visual while burning (flames/smoke/light); parented to the burning atom");
+			ch |= AssetPicker("Debris Prefab", m->liveDebrisPrefab, "file:.nuprefab");
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Burn-out destruction: the atom shatters into these (empty = survives charred)");
+			if (!m->liveDebrisPrefab.empty())
+				ch |= ImGui::DragInt("Debris Count", &m->liveDebrisCount, 0.1f, 1, 64);
+		}
+	}
+
 	if (ImGui::CollapsingHeader("Surface Shape"))
 	{
 		ImGui::TextDisabled("Displacement height + anti-tiling variation.");
