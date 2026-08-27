@@ -1108,7 +1108,7 @@ bool EditorUI::DrawLiveMaterialSections(nuke::Material* m)
 		ch |= ImGui::DragFloat("Wind Volume", &m->liveSound.windVolume, 0.01f, 0.0f, 2.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 	}
 
-	if (ImGui::CollapsingHeader("Flammability"))
+	if (ImGui::CollapsingHeader("Fire & Destruction"))
 	{
 		ImGui::TextDisabled("Fire: ignition/spread/burn-out; char = this material's \"burn\" state.");
 		bool flam = m->liveIgnite >= 0.0f;
@@ -1122,11 +1122,14 @@ bool EditorUI::DrawLiveMaterialSections(nuke::Material* m)
 			ch |= ImGui::DragFloat("Heat Radius", &m->liveSpread, 0.05f, 0.0f, 50.0f, "%.2f m", ImGuiSliderFlags_AlwaysClamp);
 			ch |= AssetPicker("Fire Prefab", m->liveFirePrefab, "file:.nuprefab");
 			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Looping visual while burning (flames/smoke/light); parented to the burning atom");
-			ch |= AssetPicker("Debris Prefab", m->liveDebrisPrefab, "file:.nuprefab");
-			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Burn-out destruction: the atom shatters into these (empty = survives charred)");
-			if (!m->liveDebrisPrefab.empty())
-				ch |= ImGui::DragInt("Debris Count", &m->liveDebrisCount, 0.1f, 1, 64);
 		}
+		ImGui::TextDisabled("Shatter debris: burn-out and Destruct.Shatter (the game decides when).");
+		ch |= AssetPicker("Debris Prefab", m->liveDebrisPrefab, "file:.nuprefab");
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("The atom shatters into these (empty = never shatters)");
+		if (!m->liveDebrisPrefab.empty())
+			ch |= ImGui::DragInt("Debris Count", &m->liveDebrisCount, 0.1f, 1, 64);
+		ch |= AssetPicker("Inside Material", m->liveInsideMat, "material");
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Cut faces of fractured pieces draw this (brick core, wood grain); empty = the surface material");
 	}
 
 	if (ImGui::CollapsingHeader("Surface Shape"))
