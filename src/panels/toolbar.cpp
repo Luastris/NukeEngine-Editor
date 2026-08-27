@@ -13,6 +13,9 @@
 #include <reflect/Reflect.h>          // Registry_All: creator components by type name
 #include <interface/EditorHooks.h>    // module-registered view toggles in the snap popup
 #include <config.h>                   // packaging dev hooks mirror the Game Build dialog
+#include <import/assimporter.h>       // NUKE_IMPORT dev hook (probe runs)
+#include <interface/AppInstance.h>
+#include <boost/filesystem.hpp>
 #include <iostream>
 #include <algorithm>
 #include <cstring>
@@ -372,6 +375,34 @@ void EditorUI::Draw()
 			if (modDelay > 0 && strcmp(e, "1") != 0) modHookName = e;
 		}
 		if (modDelay > 0 && --modDelay == 0) PackageMod(modHookName);
+		// NUKE_IMPORT=<file;file;...>: convert sources into content/Imported (probe runs).
+		static int impDelay = -2;
+		static std::string impList;
+		if (impDelay == -2)
+		{
+			const char* e = std::getenv("NUKE_IMPORT");
+			impDelay = (e && e[0]) ? 120 : -1;
+			if (impDelay > 0) impList = e;
+		}
+		if (impDelay > 0 && --impDelay == 0)
+		{
+			namespace bfs = boost::filesystem;
+			bfs::path dest = bfs::path(nuke::AppInstance::GetSingleton()->contentRoot) / "Imported";
+			boost::system::error_code iec;
+			bfs::create_directories(dest, iec);
+			size_t p = 0;
+			while (p < impList.size())
+			{
+				size_t sc = impList.find(';', p);
+				if (sc == std::string::npos) sc = impList.size();
+				std::string src = impList.substr(p, sc - p);
+				p = sc + 1;
+				if (src.empty()) continue;
+				const bool ok = nuke::AssImporter::getSingleton()->ImportAny(src.c_str(), dest.string().c_str());
+				std::cout << "[Import]\thook " << (ok ? "ok " : "FAILED ") << src << std::endl;
+			}
+			std::cout << "[Import]\thook done" << std::endl;
+		}
 		// NUKE_GM_NEW=<Name>: scaffold a C++ game module; NUKE_GM_BUILD=1: Build & Reload Game Modules.
 		static int gmNewDelay = -2;
 		static std::string gmNewName;
