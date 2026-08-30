@@ -10,9 +10,15 @@
 #include <set>
 #include <API/Model/Audio.h>
 #include <API/Model/PairedAnim.h>   // .nupair editor: save hot-reloads live sessions
+#include <API/Model/Physics.h>      // prefab simulate: sandbox scene routing (PhysicsSceneScope)
+#include <API/Model/Collider.h>     // prefab simulate: the invisible preview ground
+#include <interface/Services.h>     // GetService<iPhysics> (sandbox create/destroy)
+#include <service/iPhysics.h>
 #include <API/Model/resdb.h>        // .nupair editor: clip pickers
 #include <input/Input.h>
 #include <interface/AssetCreators.h>   // module-supplied asset editors
+#include <editor/animshared.h>          // EditorApplyMeshMaterials: mesh windows use import mats
+#include <API/Model/VariantSet.h>       // custom variant-switch body (combos over child prefixes)
 #include "nukeui.h"                     // NukeUI host windows for detached editors
 #include "imgui_internal.h"             // MovingWindow/ClearActiveID — drag-out detach
 #ifdef _WIN32
@@ -121,6 +127,16 @@ EditorUI::PreviewWorld* EditorUI::AcquirePreview()
 void EditorUI::ReleasePreview(PreviewWorld* s)
 {
 	if (!s) return;
+	if (s->phys)   // window closed mid-simulate: the sandbox dies with it (bodies included)
+	{
+		if (nuke::Atom* g = s->world ? s->world->Get("PreviewGround") : nullptr)
+		{
+			nuke::PhysicsSceneScope ps(s->phys);   // the ground's body lives in the sandbox
+			s->world->RemoveAtomById((long)g->id.id);
+		}
+		if (nuke::iPhysics* main = nuke::GetService<nuke::iPhysics>()) main->destroyScene(s->phys);
+		s->phys = nullptr;
+	}
 	s->mr->mesh = nullptr;
 	s->mr->meshGuid.clear();
 	s->mr->matGuid.clear();
@@ -318,6 +334,9 @@ void EditorUI::DrawPreviewImage(PreviewWorld& s, ImVec2 size)
 		const float rotSpeed = 0.005f, panSpeed = 0.0025f * k, zoomSpeed = 0.25f * k;
 
 		// Re-derive yaw/pitch from forward on drag start; recomputing from eulers snaps.
+		// STORED IN THE ORBIT FRAME (yaw of center->camera = euler yaw - 180°): the F-focus
+		// auto-frame reuses s.yaw/s.pitch in that frame, so storing euler yaw here made F
+		// flip the view 180° after the first RMB look.
 		if (ImGui::IsMouseClicked(ImGuiMouseButton_Right))
 		{
 			Vector3 f = t->direction();
@@ -325,7 +344,7 @@ void EditorUI::DrawPreviewImage(PreviewWorld& s, ImVec2 size)
 			if (len > 1e-6) { f.x /= len; f.y /= len; f.z /= len; }
 			double py = f.y; if (py > 1.0) py = 1.0; if (py < -1.0) py = -1.0;
 			s.pitch = (float)std::asin(-py);
-			s.yaw   = (float)std::atan2(f.x, f.z);
+			s.yaw   = (float)std::atan2(-f.x, -f.z);
 		}
 		if (ImGui::IsMouseDragging(ImGuiMouseButton_Right))
 		{
@@ -334,7 +353,7 @@ void EditorUI::DrawPreviewImage(PreviewWorld& s, ImVec2 size)
 			const float lim = 1.55f;
 			if (s.pitch >  lim) s.pitch =  lim;
 			if (s.pitch < -lim) s.pitch = -lim;
-			t->SetEulerDeg(Vector3(s.pitch * 57.29578f, s.yaw * 57.29578f, 0.0f));
+			t->SetEulerDeg(Vector3(s.pitch * 57.29578f, s.yaw * 57.29578f + 180.0f, 0.0f));
 		}
 		if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle))
 			t->position += t->right() * (double)(-io.MouseDelta.x * panSpeed)
@@ -602,8 +621,11 @@ static nuke::Atom* FindInSubtree(nuke::Atom* a, long id);
 static const size_t kAeUndoCap = 64;
 
 // Replace the live prefab subtree with a snapshot; atom ids survive, so the selection does.
+// Physics routes through the window's sandbox (if any): the removed subtree's colliders must
+// destroy THEIR bodies, not fumble ids at the game scene.
 static void RestorePrefabState(EditorUI::AssetEditorWin& w, const std::string& json)
 {
+	nuke::PhysicsSceneScope ps(w.pv ? w.pv->phys : nullptr);
 	if (w.prefabRoot) w.pv->world->RemoveAtomById((long)w.prefabRoot->id.id);
 	w.prefabRoot = nuke::LoadAtomFromString(json);
 	if (w.prefabRoot)
@@ -631,12 +653,33 @@ static void TickAnimators(nuke::Atom* a)
 	if (!a) return;
 	if (nuke::Animator* an = a->GetComponent<nuke::Animator>())
 		if (an->enabled) an->Update();
+	// Spring chains are physics and self-drive from their own Update (an idle Animator
+	// commits nothing) — the mini-PIE must tick them like the world would.
+	for (nuke::Component* c : a->components)
+		if (c && c->enabled && std::strcmp(c->name, "SpringBones") == 0) c->Update();
 	for (nuke::Atom* ch : a->children) TickAnimators(ch);
 }
 
 void EditorUI::TickAnimPreview(AssetEditorWin& w)
 {
-	if (w.prefabRoot) TickAnimators(w.prefabRoot);
+	if (!w.prefabRoot) return;
+	nuke::PhysicsSceneScope ps(w.pv ? w.pv->phys : nullptr);
+	TickAnimators(w.prefabRoot);
+	// Physics rides the same play toggle, stepping the window's PRIVATE sandbox at the
+	// world's fixed cadence off real frame time (the game's fixed thread never touches
+	// preview worlds).
+	if (w.pv && w.pv->phys && w.pv->world)
+	{
+		const float fdt = w.pv->world->settings.fixedDt > 0.0001f ? w.pv->world->settings.fixedDt
+		                                                          : 1.0f / 60.0f;
+		w.physAcc += ImGui::GetIO().DeltaTime;
+		if (w.physAcc > fdt * 4.0f) w.physAcc = fdt * 4.0f;   // hitch: no burst catch-up
+		while (w.physAcc >= fdt)
+		{
+			w.pv->world->FixedUpdate();
+			w.physAcc -= fdt;
+		}
+	}
 }
 
 void EditorUI::ToggleAnimPreview(AssetEditorWin& w)
@@ -645,6 +688,24 @@ void EditorUI::ToggleAnimPreview(AssetEditorWin& w)
 	{
 		if (!w.prefabRoot) return;
 		w.animSnap = nuke::SaveAtomToString(w.prefabRoot);   // pose + structure before play
+		// Physics sandbox: a private scene per playing window plus an invisible static
+		// ground at the visual grid level, so bodies land instead of falling forever.
+		if (w.pv && !w.pv->phys)
+			if (nuke::iPhysics* main = nuke::GetService<nuke::iPhysics>())
+			{
+				w.pv->phys = main->createScene();
+				if (w.pv->phys && !w.pv->world->Get("PreviewGround"))
+				{
+					nuke::Atom* g = new nuke::Atom("PreviewGround");
+					nuke::Collider* c = new nuke::Collider();
+					c->halfExtents = nuke::Vector3(200.0, 0.5, 200.0);
+					g->AddComponent(c);
+					g->GetTransform().position = nuke::Vector3(0, -0.5, 0);
+					w.pv->world->Add(g);
+				}
+			}
+		w.physAcc = 0.0f;
+		w.animDirty0 = w.dirty;   // sim edits are transient; stop restores this
 		w.animPlay = true;
 	}
 	else
@@ -652,10 +713,21 @@ void EditorUI::ToggleAnimPreview(AssetEditorWin& w)
 		w.animPlay = false;
 		if (!w.animSnap.empty())
 		{
-			const bool wasDirty = w.dirty;   // restoring the pre-play pose is not an edit
 			RestorePrefabState(w, w.animSnap);
-			w.dirty = wasDirty;
+			w.dirty = w.animDirty0;   // everything done DURING play was rolled back with it
 			w.animSnap.clear();
+		}
+		// Drop the sandbox with its remaining bodies (the ground, anything the restore left).
+		if (w.pv && w.pv->phys)
+		{
+			if (nuke::Atom* g = w.pv->world->Get("PreviewGround"))
+			{
+				nuke::PhysicsSceneScope ps(w.pv->phys);
+				w.pv->world->RemoveAtomById((long)g->id.id);
+			}
+			if (nuke::iPhysics* main = nuke::GetService<nuke::iPhysics>())
+				main->destroyScene(w.pv->phys);
+			w.pv->phys = nullptr;
 		}
 	}
 }
@@ -1597,8 +1669,7 @@ void EditorUI::OpenAssetEditor(const std::string& path)
 		const std::string guid = db->GuidForPath(path);
 		w.pv->mr->meshGuid = guid;
 		w.pv->mr->mesh = db->GetMesh(guid);
-		w.pv->mr->matGuid = "builtin:default";
-		if (w.pv->mr->mat) { delete w.pv->mr->mat; w.pv->mr->mat = nullptr; }
+		EditorApplyMeshMaterials(w.pv->mr, guid);   // the mesh's own materials, not a white default
 		FramePreview(*w.pv, nullptr);
 	}
 	else   // .nuprefab
@@ -1956,7 +2027,9 @@ void EditorUI::DrawPrefabTree(AssetEditorWin& w, Atom* a)
 	                      | ImGuiTreeNodeFlags_DefaultOpen;
 	if (a->children.empty())        tf |= ImGuiTreeNodeFlags_Leaf;
 	if ((long)a->id.id == w.prefabSelId) tf |= ImGuiTreeNodeFlags_Selected;
+	if (!a->enabled) ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyle().Colors[ImGuiCol_TextDisabled]);
 	bool openNode = ImGui::TreeNodeEx(a->GetName().c_str(), tf);
+	if (!a->enabled) ImGui::PopStyleColor();
 	if (ImGui::IsItemClicked()) w.prefabSelId = (long)a->id.id;
 
 	// Drag to reparent within this prefab window; the world pose is preserved.
@@ -2020,6 +2093,10 @@ bool EditorUI::DrawPrefabAtomEditor(AssetEditorWin& w, Atom* a)
 
 	char nameBuf[128];
 	strncpy(nameBuf, a->GetName().c_str(), 127); nameBuf[127] = 0;
+	bool aen = a->enabled;
+	if (ImGui::Checkbox("##atomon", &aen)) { a->enabled = aen; edited = true; }
+	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Atom enabled (disabled subtrees neither render nor update)");
+	ImGui::SameLine();
 	ImGui::SetNextItemWidth(240);
 	if (ImGui::InputText("Name", nameBuf, sizeof(nameBuf))) { a->SetName(nameBuf); edited = true; }
 
@@ -2033,24 +2110,46 @@ bool EditorUI::DrawPrefabAtomEditor(AssetEditorWin& w, Atom* a)
 		double scl[3] = { t.scale.x, t.scale.y, t.scale.z };
 		if (EditV3("Scale", scl)) { t.scale = Vector3(scl[0], scl[1], scl[2]); edited = true; }
 	}
+	if (ImGui::SmallButton("Expand All"))   w.compFold = 2;
+	ImGui::SameLine();
+	if (ImGui::SmallButton("Collapse All")) w.compFold = 1;
+
 	Component* toRemove = nullptr;
 	for (Component* c : a->components)
 	{
 		if (!c) continue;
 		nuke::TypeInfo* ti = c->GetType();
 		if (!ti) continue;
-		ImGui::PushID(c);
+		ImGui::PushID((int)c->id.id);   // stable across restores (pointers are reborn on sim stop)
 		bool keep = true;
+		ImGui::SetNextItemAllowOverlap();   // the sync button rides the header
+		if (w.compFold != 0) ImGui::SetNextItemOpen(w.compFold == 2);
 		bool openHdr = ImGui::CollapsingHeader(ti->name.c_str(), &keep, ImGuiTreeNodeFlags_DefaultOpen);
 		if (!keep) toRemove = c;   // header close button = remove component
+		ImGui::SameLine(ImGui::GetContentRegionMax().x - 46);   // sync edit within THIS prefab
+		DrawSyncEditButton(c, w.prefabRoot, w.syncEdit);
 		if (openHdr)
 		{
 			bool en = c->enabled;
-			if (ImGui::Checkbox("Enabled", &en)) { c->enabled = en; edited = true; }
-			if (DrawFields(c, ti)) edited = true;
+			if (ImGui::Checkbox("Enabled", &en))
+			{
+				c->enabled = en;
+				SyncEnabled(c, w.prefabRoot, w.syncEdit, en);   // mass edit follows the checkmarks
+				edited = true;
+			}
+			std::vector<nuke::ReflectValue> sbefore;
+			const bool ssnap = SyncSnapshot(c, w.syncEdit, sbefore);
+			if (DrawFields(c, ti))
+			{
+				edited = true;
+				if (ssnap) SyncMirror(c, w.prefabRoot, w.syncEdit, sbefore);
+			}
+			if (ti->name == "VariantSet" && DrawVariantSetUI(c))
+				edited = true;   // per-group combos over the child variants
 		}
 		ImGui::PopID();
 	}
+	w.compFold = 0;   // the fold applied to every header this frame
 	if (toRemove)
 	{
 		// Edit-time removal: not Destroy(), which is the runtime hook.
@@ -2306,7 +2405,11 @@ void EditorUI::winAssetEditors()
 		{
 			AssetEditorWin& w = assetEds[i];
 			if (w.audioVoice) { nuke::Audio::Stop((double)w.audioVoice); w.audioVoice = 0; }
-			if (w.prefabRoot && w.pv) w.pv->world->RemoveAtomById((long)w.prefabRoot->id.id);
+			if (w.prefabRoot && w.pv)
+			{
+				nuke::PhysicsSceneScope ps(w.pv->phys);   // closed mid-simulate: bodies die in the sandbox
+				w.pv->world->RemoveAtomById((long)w.prefabRoot->id.id);
+			}
 			if (w.mat) delete w.mat;
 			delete w.idleM;
 			for (Material* m : w.undoM) delete m;
@@ -2444,7 +2547,10 @@ void EditorUI::DrawAssetEditorBody(int i)
 					}
 					else if (w.ext == ".nuprefab" && w.prefabRoot)
 					{
-						w.pv->world->RemoveAtomById((long)w.prefabRoot->id.id);
+						{
+							nuke::PhysicsSceneScope ps(w.pv->phys);   // revert mid-simulate: sandbox bodies
+							w.pv->world->RemoveAtomById((long)w.prefabRoot->id.id);
+						}
 						w.prefabRoot = nuke::LoadPrefab(w.path);
 						if (w.prefabRoot) { w.pv->world->Add(w.prefabRoot); w.prefabSelId = (long)w.prefabRoot->id.id; }
 						FramePreview(*w.pv, w.prefabRoot);
@@ -2594,6 +2700,7 @@ void EditorUI::DrawAssetEditorBody(int i)
 				{
 					if (w.pendingDeleteId != (long)w.prefabRoot->id.id)
 					{
+						nuke::PhysicsSceneScope ps(w.pv ? w.pv->phys : nullptr);   // colliders die in the sandbox
 						w.pv->world->RemoveAtomById(w.pendingDeleteId);
 						if (w.prefabSelId == w.pendingDeleteId) w.prefabSelId = (long)w.prefabRoot->id.id;
 						w.dirty = true; w.editedNow = true;
@@ -2610,7 +2717,12 @@ void EditorUI::DrawAssetEditorBody(int i)
 				ImGui::BeginChild("##pright", ImVec2(0, 0), ImGuiChildFlags_None,
 				                  ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 				{
-					const float tbw = 34.0f;
+					// Button width from the actual glyphs — fixed 34 px clipped the icons on
+					// larger UI fonts.
+					float tbw = 34.0f;
+					for (const char* ic : { ICON_LC_MOUSE_POINTER, ICON_LC_MOVE, ICON_LC_ROTATE_3D,
+					                        ICON_LC_SCALING, ICON_LC_GLOBE, ICON_LC_AXIS_3D, ICON_LC_PLAY })
+						tbw = std::max(tbw, ImGui::CalcTextSize(ic).x + ImGui::GetStyle().FramePadding.x * 2.0f + 2.0f);
 					if (ToolBtn(ICON_LC_MOUSE_POINTER, "Select (Q)", w.gizmoOp == 0, tbw)) w.gizmoOp = 0; ImGui::SameLine();
 					if (ToolBtn(ICON_LC_MOVE,          "Move (W)",   w.gizmoOp == 1, tbw)) w.gizmoOp = 1; ImGui::SameLine();
 					if (ToolBtn(ICON_LC_ROTATE_3D,     "Rotate (E)", w.gizmoOp == 2, tbw)) w.gizmoOp = 2; ImGui::SameLine();
@@ -2628,6 +2740,25 @@ void EditorUI::DrawAssetEditorBody(int i)
 						            w.animPlay, tbw))
 							ToggleAnimPreview(w);
 					}
+					if (w.animPlay)
+					{
+						// Keep the SIMULATED state instead of rolling back: stop without the
+						// restore — what the sim did becomes the edit.
+						ImGui::SameLine();
+						if (ToolBtn(ICON_LC_CHECK, "Apply simulation (stop and KEEP this state)", false, tbw))
+						{
+							w.animSnap.clear();       // no snapshot -> stop keeps the live subtree
+							ToggleAnimPreview(w);
+							w.dirty = true;
+							w.editedNow = true;
+						}
+					}
+					ImGui::SameLine();
+					if (ToolBtn(w.prefabEdRight ? ICON_LC_PANEL_RIGHT : ICON_LC_PANEL_BOTTOM,
+					            w.prefabEdRight ? "Atom editor: right column (click for bottom strip)"
+					                            : "Atom editor: bottom strip (click for right column)",
+					            false, tbw))
+						w.prefabEdRight = !w.prefabEdRight;
 					if (w.animPlay) TickAnimPreview(w);
 
 					// Viewport hotkeys scoped to this window; suppressed while typing or flying.
@@ -2651,9 +2782,14 @@ void EditorUI::DrawAssetEditorBody(int i)
 					}
 
 					ImVec2 av = ImGui::GetContentRegionAvail();
-					float edH = 320.0f;                                   // atom editor strip
+					float edH = w.prefabEdH;                              // atom editor strip (edge-resizable)
 					if (av.y - edH < 160.0f) edH = std::max(120.0f, av.y * 0.45f);
-					DrawPreviewImage(*w.pv, ImVec2(av.x, av.y - edH - 8.0f));
+					float edW = w.prefabEdW;                              // right-column variant
+					if (av.x - edW < 260.0f) edW = std::max(220.0f, av.x * 0.45f);
+					if (w.prefabEdRight)
+						DrawPreviewImage(*w.pv, ImVec2(av.x - edW - 14.0f, av.y));
+					else
+						DrawPreviewImage(*w.pv, ImVec2(av.x, av.y - edH - 14.0f));
 
 					// Transform gizmo over the 3D view.
 					Atom* sel = FindInSubtree(w.prefabRoot, w.prefabSelId);
@@ -2744,10 +2880,50 @@ void EditorUI::DrawAssetEditorBody(int i)
 							            f.z + ndcx * thf * aspect * rr.z + ndcy * thf * uu.z);
 							Atom* hit = w.pv->world->Pick(o, dir);
 							// Only atoms of this prefab are selectable; the pick can return scene furniture.
+							// Same rhythm as the main viewport: the first click grabs the WHOLE prefab
+							// (its root), the next one drills into the part under the cursor, and a
+							// third returns to the root.
 							if (hit && FindInSubtree(w.prefabRoot, (long)hit->id.id))
-								w.prefabSelId = (long)hit->id.id;
+							{
+								const long root = (long)w.prefabRoot->id.id;
+								const long hid  = (long)hit->id.id;
+								if (hid == root)                w.prefabSelId = root;   // single-atom prefab
+								else if (w.prefabSelId == root) w.prefabSelId = hid;    // drill into the part
+								else if (w.prefabSelId == hid)  w.prefabSelId = root;   // back out to the whole
+								else                            w.prefabSelId = root;   // new pick: whole first
+							}
 							else if (!hit)
 								w.prefabSelId = 0;   // clicked empty space = deselect
+						}
+					}
+
+					// Drag edge between the 3D view and the atom editor (resizes the panel).
+					if (w.prefabEdRight)
+					{
+						ImGui::SameLine();
+						ImGui::InvisibleButton("##psplitv", ImVec2(6.0f, std::max(av.y, 1.0f)));
+						if (ImGui::IsItemHovered() || ImGui::IsItemActive())
+							ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+						if (ImGui::IsItemActive() && ImGui::GetIO().MouseDelta.x != 0.0f)
+						{
+							w.prefabEdW -= ImGui::GetIO().MouseDelta.x;
+							const float mxW = std::max(220.0f, av.x - 260.0f);
+							if (w.prefabEdW < 220.0f) w.prefabEdW = 220.0f;
+							if (w.prefabEdW > mxW)    w.prefabEdW = mxW;
+						}
+						ImGui::SameLine();
+					}
+					else
+					{
+						ImGui::InvisibleButton("##psplit", ImVec2(std::max(av.x, 1.0f), 6.0f));
+						if (ImGui::IsItemHovered() || ImGui::IsItemActive())
+							ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+						if (ImGui::IsItemActive() && ImGui::GetIO().MouseDelta.y != 0.0f)
+						{
+							w.prefabEdH -= ImGui::GetIO().MouseDelta.y;
+							const float mxH = std::max(120.0f, av.y - 160.0f);
+							if (w.prefabEdH < 120.0f) w.prefabEdH = 120.0f;
+							if (w.prefabEdH > mxH)    w.prefabEdH = mxH;
 						}
 					}
 

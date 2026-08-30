@@ -4,6 +4,7 @@
 #include "nukeui.h"   // DocPanel: detachable panels
 #include <API/Model/Camera.h>
 #include <API/Model/CharacterController.h>
+#include <API/Model/VariantSet.h>   // custom variant-switch body (combos over child prefixes)
 #include <API/Model/Foliage.h>
 #include <API/Model/Surface.h>
 #include <API/Model/StatusBar.h>
@@ -1274,6 +1275,233 @@ bool EditorUI::CurveKeysEditor(std::vector<float>& keys, float vLo, float vHi, c
 	return changed;
 }
 
+// ---- Sync edit: mass-edit of same-type components --------------------------------------
+
+// Find an atom by stable id in `root`'s subtree, or (root null) across the current world.
+static nuke::Atom* SyncFindAtom(nuke::Atom* root, long id)
+{
+	if (root)
+	{
+		if ((long)root->id.id == id) return root;
+		for (nuke::Atom* ch : root->children)
+			if (nuke::Atom* a = SyncFindAtom(ch, id)) return a;
+		return nullptr;
+	}
+	nuke::World* w = nuke::AppInstance::GetSingleton()->currentWorld;
+	if (!w) return nullptr;
+	for (nuke::Atom* a : w->GetHierarchy())
+		if (a)
+			if (nuke::Atom* f = SyncFindAtom(a, id)) return f;
+	return nullptr;
+}
+
+// Every component of `type` in scope, with the atom that carries it.
+static void SyncCollect(nuke::Atom* a, const std::string& type,
+                        std::vector<std::pair<nuke::Atom*, nuke::Component*>>& out)
+{
+	if (!a) return;
+	for (nuke::Component* c : a->components)
+		if (c && type == c->name && !dynamic_cast<nuke::UnknownComponent*>(c))
+			out.push_back({ a, c });
+	for (nuke::Atom* ch : a->children) SyncCollect(ch, type, out);
+}
+
+void EditorUI::DrawSyncEditButton(nuke::Component* cmp, nuke::Atom* scopeRoot,
+                                  std::map<std::string, std::set<std::pair<long, long>>>& scope)
+{
+	if (!cmp || !cmp->GetType()) return;
+	const std::string type = cmp->name;
+	std::set<std::pair<long, long>>& targets = scope[type];
+	const bool active = !targets.empty();
+	if (active) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.35f, 0.85f, 0.45f, 1.0f));
+	if (ImGui::SmallButton(ICON_LC_LINK "##sync")) ImGui::OpenPopup("syncedit");
+	if (active) ImGui::PopStyleColor();
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip(active ? "Sync edit ON: edits mirror into %d checked %s component(s)"
+		                         : "Sync edit: mirror edits into other %s components",
+		                  active ? (int)targets.size() : 0, type.c_str());
+	if (!ImGui::BeginPopup("syncedit")) return;
+
+	std::vector<std::pair<nuke::Atom*, nuke::Component*>> cands;
+	if (scopeRoot) SyncCollect(scopeRoot, type, cands);
+	else if (nuke::World* w = nuke::AppInstance::GetSingleton()->currentWorld)
+		for (nuke::Atom* a : w->GetHierarchy()) SyncCollect(a, type, cands);
+
+	ImGui::TextDisabled("%s: edits mirror into the checked", type.c_str());
+	if (ImGui::SmallButton("All"))
+	{
+		for (auto& c : cands)
+			if (c.second != cmp) targets.insert({ (long)c.first->id.id, (long)c.second->id.id });
+	}
+	ImGui::SameLine();
+	if (ImGui::SmallButton("None")) targets.clear();
+	ImGui::Separator();
+	// Per-atom running index disambiguates several same-type components on one atom.
+	std::map<nuke::Atom*, int> nth;
+	for (auto& c : cands)
+	{
+		const int k = nth[c.first]++;
+		if (c.second == cmp)
+		{
+			ImGui::TextDisabled(ICON_LC_PEN " %s%s  (this one)", c.first->GetName().c_str(),
+			                    k ? (" #" + std::to_string(k + 1)).c_str() : "");
+			continue;
+		}
+		const std::pair<long, long> key{ (long)c.first->id.id, (long)c.second->id.id };
+		bool on = targets.count(key) != 0;
+		std::string lbl = c.first->GetName() + (k ? " #" + std::to_string(k + 1) : "");
+		if (ImGui::Checkbox((lbl + "##" + std::to_string(key.second)).c_str(), &on))
+		{
+			if (on) targets.insert(key);
+			else    targets.erase(key);
+		}
+	}
+	if (cands.size() <= 1) ImGui::TextDisabled("(no other %s in scope)", type.c_str());
+	ImGui::EndPopup();
+}
+
+bool EditorUI::SyncSnapshot(nuke::Component* cmp,
+                            std::map<std::string, std::set<std::pair<long, long>>>& scope,
+                            std::vector<nuke::ReflectValue>& out)
+{
+	nuke::TypeInfo* ti = cmp ? cmp->GetType() : nullptr;
+	if (!ti) return false;
+	auto it = scope.find(cmp->name);
+	if (it == scope.end() || it->second.empty()) return false;
+	for (const nuke::Field& f : ti->fields) out.push_back(nuke::Reflect_GetField(cmp, f));
+	return true;
+}
+
+bool EditorUI::DrawVariantSetUI(nuke::Component* c)
+{
+	nuke::VariantSet* vs = dynamic_cast<nuke::VariantSet*>(c);
+	if (!vs || !vs->atom) return false;
+	bool edited = false;
+	// groups + their children, first-seen order
+	std::vector<std::string> order;
+	std::map<std::string, std::vector<nuke::Atom*>> byG;
+	for (nuke::Atom* ch : vs->atom->children)
+	{
+		std::string g, it;
+		if (!ch || !nuke::VariantSet::Split(ch->GetName(), g, it)) continue;
+		if (!byG.count(g)) order.push_back(g);
+		byG[g].push_back(ch);
+	}
+	if (order.empty())
+	{
+		ImGui::TextDisabled("No \"<Group> - <Item>\" children to switch.");
+		return false;
+	}
+	// One uniform row per group: label LEFT, full-width combo. Multi groups keep the
+	// popup open and tick items with checkboxes; exclusive groups pick one (or none).
+	float lblW = 0.0f;
+	for (const std::string& g : order) lblW = std::max(lblW, ImGui::CalcTextSize(g.c_str()).x);
+	for (const std::string& g : order)
+	{
+		ImGui::PushID(g.c_str());
+		std::vector<nuke::Atom*>& items = byG[g];
+		const bool isMulti = vs->IsMulti(g);
+		ImGui::AlignTextToFramePadding();
+		ImGui::TextUnformatted(g.c_str());
+		ImGui::SameLine(lblW + ImGui::GetStyle().ItemSpacing.x * 2.0f);
+		ImGui::SetNextItemWidth(-1);
+		// preview: none / the item / "N selected"
+		std::string prev = "(none)";
+		int nOn = 0;
+		for (nuke::Atom* ch : items)
+			if (ch->enabled)
+			{
+				std::string g2, it;
+				nuke::VariantSet::Split(ch->GetName(), g2, it);
+				if (++nOn == 1) prev = it;
+			}
+		if (nOn > 1) prev = std::to_string(nOn) + " selected";
+		if (ImGui::BeginCombo("##vsg", prev.c_str()))
+		{
+			if (isMulti)
+			{
+				for (nuke::Atom* ch : items)
+				{
+					std::string g2, it;
+					nuke::VariantSet::Split(ch->GetName(), g2, it);
+					bool on = ch->enabled;   // Checkbox keeps the popup open: real multi-select
+					if (ImGui::Checkbox(it.c_str(), &on)) { ch->enabled = on; edited = true; }
+				}
+			}
+			else
+			{
+				if (ImGui::Selectable("(none)", nOn == 0))
+				{
+					for (nuke::Atom* ch : items) ch->enabled = false;
+					edited = true;
+				}
+				for (nuke::Atom* ch : items)
+				{
+					std::string g2, it;
+					nuke::VariantSet::Split(ch->GetName(), g2, it);
+					if (ImGui::Selectable(it.c_str(), ch->enabled))
+					{
+						vs->Select(g, it, true);
+						edited = true;
+					}
+				}
+			}
+			ImGui::EndCombo();
+		}
+		ImGui::PopID();
+	}
+	return edited;
+}
+
+void EditorUI::SyncEnabled(nuke::Component* cmp, nuke::Atom* scopeRoot,
+                           std::map<std::string, std::set<std::pair<long, long>>>& scope, bool on)
+{
+	if (!cmp) return;
+	auto it = scope.find(cmp->name);
+	if (it == scope.end() || it->second.empty()) return;
+	for (const std::pair<long, long>& key : it->second)
+	{
+		nuke::Atom* a = SyncFindAtom(scopeRoot, key.first);
+		if (!a) continue;
+		for (nuke::Component* c : a->components)
+			if (c && (long)c->id.id == key.second && c != cmp && std::strcmp(cmp->name, c->name) == 0)
+			{ c->enabled = on; break; }
+	}
+}
+
+void EditorUI::SyncMirror(nuke::Component* cmp, nuke::Atom* scopeRoot,
+                          std::map<std::string, std::set<std::pair<long, long>>>& scope,
+                          const std::vector<nuke::ReflectValue>& before)
+{
+	nuke::TypeInfo* ti = cmp ? cmp->GetType() : nullptr;
+	if (!ti) return;
+	auto it = scope.find(cmp->name);
+	if (it == scope.end() || it->second.empty()) return;
+	size_t fi = 0;
+	for (const nuke::Field& f : ti->fields)
+	{
+		if (fi >= before.size()) break;
+		nuke::ReflectValue now = nuke::Reflect_GetField(cmp, f);
+		const nuke::ReflectValue& was = before[fi++];
+		const bool same = now.type == was.type && now.b == was.b && now.num == was.num
+		               && now.str == was.str && now.atom == was.atom && now.obj == was.obj
+		               && memcmp(now.v, was.v, sizeof(now.v)) == 0;
+		if (same) continue;
+		for (const std::pair<long, long>& key : it->second)
+		{
+			nuke::Atom* a = SyncFindAtom(scopeRoot, key.first);
+			if (!a) continue;
+			for (nuke::Component* c : a->components)
+				if (c && (long)c->id.id == key.second && c != cmp && std::strcmp(cmp->name, c->name) == 0)
+				{
+					nuke::Reflect_SetField(c, f, now);
+					nuke::Reflect_ComponentFieldChanged(c, f);
+					break;
+				}
+		}
+	}
+}
+
 bool EditorUI::DrawFields(void* obj, nuke::TypeInfo* ti)
 {
 	if (!ti) return false;
@@ -1552,7 +1780,10 @@ bool EditorUI::EditV3(const char* rowLabel, double v[3])
 	ImGui::PushID(rowLabel);
 	ImGui::AlignTextToFramePadding();
 	ImGui::TextUnformatted(rowLabel);
-	ImGui::SameLine(84.0f);
+	// Label column sized by the widest sibling label ("Rotation"), not a fixed pixel count —
+	// larger UI fonts overflowed 84 px and the X axis letter landed on top of the label.
+	const float labelCol = ImGui::CalcTextSize("Rotation").x + ImGui::GetStyle().ItemSpacing.x * 2.0f;
+	ImGui::SameLine(std::max(84.0f, labelCol));
 	float w = (ImGui::GetContentRegionAvail().x - 66.0f) / 3.0f;   // 3 axis letters + spacing
 	if (w < 36.0f) w = 36.0f;
 	for (int i = 0; i < 3; ++i)
@@ -1862,6 +2093,11 @@ void EditorUI::winInspector()
 				ImGui::SameLine(ImGui::GetContentRegionMax().x - 22);   // remove (undoable)
 				if (ImGui::SmallButton(ICON_LC_X "##delcomp")) { pendingCompAtom = sltd; pendingCompDel = cmp; }
 				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remove component");
+				if (!uc)
+				{
+					ImGui::SameLine(ImGui::GetContentRegionMax().x - 46);   // sync edit (same-type mass edit)
+					DrawSyncEditButton(cmp, nullptr, syncEditWorld);
+				}
 				if (st)
 				{
 					if (uc)
@@ -1873,7 +2109,8 @@ void EditorUI::winInspector()
 					}
 					else
 					{
-						ImGui::Checkbox("Enabled", &cmp->enabled);
+						if (ImGui::Checkbox("Enabled", &cmp->enabled))
+							SyncEnabled(cmp, nullptr, syncEditWorld, cmp->enabled);
 						// InputInt's item width covers the whole widget (text box + both step buttons),
 						// so the field must stay wide enough for the number on narrow panels.
 						{
@@ -1897,11 +2134,15 @@ void EditorUI::winInspector()
 						}
 						// multi-edit: snapshot the fields, draw, then mirror ONLY the fields
 						// that changed to every selected atom carrying the same component type.
+						// Sync-edit mirrors the same way into its CHECKED components (any atom).
 						nuke::TypeInfo* mti = cmp->GetType();
+						std::vector<nuke::ReflectValue> sbefore;
+						const bool ssnap = SyncSnapshot(cmp, syncEditWorld, sbefore);
 						std::vector<nuke::ReflectValue> mbefore;
 						if (multi && mti)
 							for (const nuke::Field& f : mti->fields) mbefore.push_back(nuke::Reflect_GetField(cmp, f));
 						const bool mchg = DrawFields(cmp, cmp->GetType());   // auto fields from [[nuke::prop]] schema
+						if (ssnap && mchg) SyncMirror(cmp, nullptr, syncEditWorld, sbefore);
 						if (multi && mti && mchg)
 						{
 							size_t fi = 0;
@@ -1924,6 +2165,8 @@ void EditorUI::winInspector()
 								}
 							}
 						}
+						if (mti && mti->name == "VariantSet")
+							DrawVariantSetUI(cmp);         // per-group combos over the child variants
 						DrawDynamicProps(cmp);             // dynamic props (e.g. Lua script vars)
 
 						if (nuke::TypeInfo* cti = cmp->GetType())

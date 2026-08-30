@@ -9,6 +9,7 @@
 #include "API/Model/Camera.h"
 #include <glm/gtc/type_ptr.hpp>
 #include <algorithm>
+#include <cctype>
 
 using namespace nuke;
 
@@ -272,33 +273,66 @@ void EditorUI::DrawSkeletonEditor(AssetEditorWin& w)
 	ImGui::SameLine();
 	ImGui::BeginChild("##skpanel", ImVec2(panelW, 0), true);
 	{
-		// bone tree
+		// bone tree: filterable (ancestor paths to matches survive), edge-resizable height
 		ImGui::SeparatorText("Bones");
-		ImGui::BeginChild("##skbones", ImVec2(0, 180), ImGuiChildFlags_Borders,
+		ImGui::SetNextItemWidth(-1);
+		ImGui::InputTextWithHint("##skbonefilter", "filter bones", w.skBoneFilter, sizeof(w.skBoneFilter));
+		std::string flt = w.skBoneFilter;
+		std::transform(flt.begin(), flt.end(), flt.begin(), [](unsigned char c) { return (char)tolower(c); });
+		ImGui::BeginChild("##skbones", ImVec2(0, w.skBonesH), ImGuiChildFlags_Borders,
 		                  ImGuiWindowFlags_HorizontalScrollbar);
 		{
+			const int nb = (int)sk->bones.size();
+			std::vector<std::vector<int>> kidsOf(nb);
+			for (int i = 0; i < nb; ++i)
+				if (sk->bones[i].parent >= 0 && sk->bones[i].parent < nb) kidsOf[sk->bones[i].parent].push_back(i);
+			// keep = matches itself or holds a match below (the path to a match stays visible)
+			std::vector<char> keep(nb, 1);
+			if (!flt.empty())
+			{
+				std::function<bool(int)> mark = [&](int bi) -> bool
+				{
+					std::string nm = sk->bones[bi].name;
+					std::transform(nm.begin(), nm.end(), nm.begin(), [](unsigned char c) { return (char)tolower(c); });
+					bool k = nm.find(flt) != std::string::npos;
+					for (int c : kidsOf[bi]) k = mark(c) || k;
+					keep[bi] = k ? 1 : 0;
+					return k;
+				};
+				for (int i = 0; i < nb; ++i)
+					if (sk->bones[i].parent < 0) mark(i);
+			}
 			std::function<void(int)> drawBone = [&](int bi)
 			{
+				if (!keep[bi]) return;
 				const MeshBone& b = sk->bones[bi];
-				std::vector<int> kids;
-				for (int i = 0; i < (int)sk->bones.size(); ++i)
-					if (sk->bones[i].parent == bi) kids.push_back(i);
+				bool anyKid = false;
+				for (int k : kidsOf[bi]) anyKid = anyKid || keep[k];
 				ImGuiTreeNodeFlags fl = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_DefaultOpen
 				                      | ImGuiTreeNodeFlags_SpanAvailWidth
-				                      | (kids.empty() ? ImGuiTreeNodeFlags_Leaf : 0)
+				                      | (!anyKid ? ImGuiTreeNodeFlags_Leaf : 0)
 				                      | (w.skSelBone == bi ? ImGuiTreeNodeFlags_Selected : 0);
+				if (!flt.empty()) ImGui::SetNextItemOpen(true);   // filtering opens the paths
 				const bool open = ImGui::TreeNodeEx((void*)(intptr_t)bi, fl, ICON_LC_BONE " %s", b.name.c_str());
 				if (ImGui::IsItemClicked()) w.skSelBone = bi;
 				if (open)
 				{
-					for (int k : kids) drawBone(k);
+					for (int k : kidsOf[bi]) drawBone(k);
 					ImGui::TreePop();
 				}
 			};
-			for (int i = 0; i < (int)sk->bones.size(); ++i)
+			for (int i = 0; i < nb; ++i)
 				if (sk->bones[i].parent < 0) drawBone(i);
 		}
 		ImGui::EndChild();
+		ImGui::InvisibleButton("##skbones_split", ImVec2(std::max(ImGui::GetContentRegionAvail().x, 1.0f), 6.0f));
+		if (ImGui::IsItemHovered() || ImGui::IsItemActive()) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+		if (ImGui::IsItemActive())
+		{
+			w.skBonesH += ImGui::GetIO().MouseDelta.y;
+			if (w.skBonesH < 80.0f)   w.skBonesH = 80.0f;
+			if (w.skBonesH > 1600.0f) w.skBonesH = 1600.0f;
+		}
 
 		// sockets
 		ImGui::SeparatorText("Sockets");

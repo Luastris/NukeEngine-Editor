@@ -59,6 +59,7 @@ std::string EditorPickExeFile();    // .exe picker (custom external editor)
 bool        EditorRelaunch(const std::string& projectPath);   // spawn a new editor on that project
 
 class TextEditor;   // vendored ImGuiColorTextEdit (src/textedit)
+namespace nuke { class iPhysics; }   // preview physics sandbox handle (PreviewWorld::phys)
 
 // Register the .nuproj extension under HKEY_CURRENT_USER so double-clicking a project
 // opens this editor. Returns success. (macOS: LaunchServices registration of the .app.)
@@ -551,6 +552,35 @@ public:
 	void ApplyProjectSettings(const ProjectSettings& ps);   // set members+config, push to renderer, persist (nuproj+config)
 	bool DrawFields(void* obj, nuke::TypeInfo* ti);
 	void DrawDynamicProps(nuke::Component* cmp);
+
+	// --- Sync edit: mass-edit of same-type components -----------------------------------
+	// One checked target set per component TYPE per scope (main inspector = syncEditWorld,
+	// each prefab editor window = its own map). While targets are checked, every field
+	// edit on the source component mirrors that field into all of them. `scopeRoot` null =
+	// candidates from the whole current world, else from that subtree.
+	std::map<std::string, std::set<std::pair<long, long>>> syncEditWorld;   // (atomId, compId)
+	void DrawSyncEditButton(nuke::Component* cmp, nuke::Atom* scopeRoot,
+	                        std::map<std::string, std::set<std::pair<long, long>>>& scope);
+	bool SyncSnapshot(nuke::Component* cmp,
+	                  std::map<std::string, std::set<std::pair<long, long>>>& scope,
+	                  std::vector<nuke::ReflectValue>& out);
+	void SyncEnabled(nuke::Component* cmp, nuke::Atom* scopeRoot,
+	                 std::map<std::string, std::set<std::pair<long, long>>>& scope, bool on);
+	// VariantSet body: per-group combos (exclusive) / checkbox lists (multi) over the
+	// atom's "<Group> - <Item>" children. True when a toggle changed.
+	bool DrawVariantSetUI(nuke::Component* c);
+	void SyncMirror(nuke::Component* cmp, nuke::Atom* scopeRoot,
+	                std::map<std::string, std::set<std::pair<long, long>>>& scope,
+	                const std::vector<nuke::ReflectValue>& before);
+
+	// --- Browser bulk edit: mass-edit of files of one type ------------------------------
+	std::vector<std::string> bulkFiles;     // the files offered by the tool (checkbox each)
+	std::vector<char>        bulkOn;        // per-file checkbox
+	std::string              bulkExt;       // ".numat" / ".nutex"
+	nuke::Material*          bulkMat = nullptr;   // .numat source template (first file's copy)
+	int                      bulkTexUsage = -1;  // .nutex: pending usage (-1 = show first file's)
+	bool                     bulkOpen = false;
+	void DrawBulkEditWindow();
 	bool EditV3(const char* rowLabel, double v[3]);
 	void winInspector();
 	// Inspector body for a browser-selected asset (texture usage/info, material fields,
@@ -610,6 +640,9 @@ public:
 		bool    orbit = false;
 		// Static shot: no camera input at all (inspector material preview — just a look).
 		bool    locked = false;
+		// Private physics sandbox (iPhysics::createScene) for the prefab editor's simulate:
+		// created on play start, destroyed on stop/release. Never the game's scene.
+		nuke::iPhysics* phys = nullptr;
 	};
 	std::vector<PreviewWorld*> pvPool;      // every created scene (in use or free)
 	PreviewWorld* AcquirePreview();
@@ -677,6 +710,12 @@ public:
 		float prSpeed = 1.0f;
 		Atom*     prefabRoot = nullptr;     // .nuprefab: loaded subtree (lives in pv->world)
 		long      prefabSelId = 0;          // selected atom in the prefab tree (stable id)
+		float     prefabEdH = 320.0f;       // atom-editor strip height (drag the edge above it)
+		bool      prefabEdRight = true;     // atom editor as a RIGHT column (else the bottom strip)
+		float     prefabEdW = 380.0f;       // right-column width (drag the edge)
+		float     physAcc = 0.0f;           // simulate: accumulated real time -> fixed steps
+		// Sync-edit scope of this window (see EditorUI::DrawSyncEditButton).
+		std::map<std::string, std::set<std::pair<long, long>>> syncEdit;
 		// .nuseq sequencer: owned editing copy + a detached preview player (atom-less; "/"
 		// paths resolve from the live world's roots) + timeline/record state.
 		nuke::Sequence*       seq = nullptr;
@@ -719,6 +758,10 @@ public:
 		// on save) + selection + a bind-pose rig for the overlay.
 		nuke::Skeleton* skel = nullptr;
 		int    skSelBone = -1, skSelSocket = -1, skSelGroup = -1, skSelChain = -1;
+		bool   animDirty0 = false;         // dirty at sim start (stop rolls edits back with the pose)
+		int    compFold = 0;               // 1 = collapse all component headers this frame, 2 = expand
+		float  skBonesH = 260.0f;          // bone-tree panel height (edge-resizable)
+		char   skBoneFilter[64] = { 0 };   // bone-name filter (tree paths to matches survive)
 		std::string skRigSkel;
 		long   skAtomId = 0;
 		std::vector<std::string> undoSk, redoSk;

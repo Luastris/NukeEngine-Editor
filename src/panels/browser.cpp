@@ -6,6 +6,7 @@
 #include "API/Model/Texture.h"
 #include "API/Model/Package.h"
 #include <nlohmann/json.hpp>
+#include "reflect/ReflectBind.h"   // bulk edit: field get/set by reflection
 #include "interface/AssetCreators.h"
 #include "API/Model/Prefab.h"
 #include "API/Model/MeshRenderer.h"
@@ -600,6 +601,37 @@ void EditorUI::UnlinkResources(const std::vector<std::string>& guids)
 
 void EditorUI::UnlinkResource(const std::string& guid) { UnlinkResources({ guid }); }
 
+// Every registered guid a delete target holds: the file's own, or — for a DIRECTORY —
+// every registered file inside it. Folder deletes previously unloaded NOTHING from the
+// ResDB: the dead assets stayed live until restart and reimports resolved against the
+// ghosts (chain stamping hit the stale skeleton, retargets went silently dead).
+static void CollectDeleteGuids(nuke::ResDB* db, const std::string& path, std::vector<std::string>& out)
+{
+	// Registered paths and browser paths differ in slashes/case AND in absolute-vs-relative
+	// form (the scanner registers CWD-relative paths) — match on the absolute normalized form.
+	auto norm = [](const std::string& p)
+	{
+		boost::system::error_code nec;
+		std::string g = bfs::absolute(bfs::path(p)).lexically_normal().generic_string();
+		for (char& c : g) c = (char)tolower((unsigned char)c);
+		return g;
+	};
+	std::map<std::string, std::string> byNorm;
+	for (const auto& kv : db->guidByPath) byNorm[norm(kv.first)] = kv.second;
+	auto take = [&](const std::string& p)
+	{
+		auto it = byNorm.find(norm(p));
+		if (it != byNorm.end()) out.push_back(it->second);
+	};
+	boost::system::error_code ec;
+	if (bfs::is_directory(path, ec))
+	{
+		for (bfs::recursive_directory_iterator it(path, ec), end; it != end && !ec; it.increment(ec))
+			if (!bfs::is_directory(it->path())) take(it->path().string());
+	}
+	else take(path);
+}
+
 // Collect dependents (one scan for the whole batch) and open the delete-confirm modal.
 void EditorUI::RequestDelete(const std::vector<std::string>& paths)
 {
@@ -607,7 +639,7 @@ void EditorUI::RequestDelete(const std::vector<std::string>& paths)
 	pendingDeletes = paths;
 	std::vector<std::string> guids;
 	for (const std::string& p : paths)
-		guids.push_back(ResDB::getSingleton()->GuidForPath(p));
+		CollectDeleteGuids(ResDB::getSingleton(), p, guids);
 	deleteDeps = FindDependents(guids);
 	openDeletePopup = true;
 }
@@ -620,10 +652,7 @@ void EditorUI::PerformDeletes(const std::vector<std::string>& paths)
 	ResDB* db = ResDB::getSingleton();
 	std::vector<std::string> guids;
 	for (const std::string& p : paths)
-	{
-		const std::string g = db->GuidForPath(p);
-		if (!g.empty()) guids.push_back(g);
-	}
+		CollectDeleteGuids(db, p, guids);
 	if (unlinkOnDelete) UnlinkResources(guids);
 	for (const std::string& g : guids) db->RemoveByGuid(g);   // drop from the live DB so pickers forget it
 	for (const std::string& p : paths) BrowserDelete(p);
@@ -1039,7 +1068,37 @@ void EditorUI::winBrowser()
 	ImGui::SameLine();
 	if (ImGui::Button(ICON_LC_FILE_PLUS " New")) ImGui::OpenPopup("bnew");
 	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Create a new asset/folder here");
+	// Bulk edit: several files of ONE editable type selected -> one shared parameter editor.
+	{
+		std::vector<std::string> bs = BrowserSelection();
+		std::string ext;
+		bool same = bs.size() > 1;
+		for (const std::string& f : bs)
+		{
+			std::string e = bfs::path(f).extension().string();
+			for (char& ch : e) ch = (char)tolower((unsigned char)ch);
+			if (ext.empty()) ext = e;
+			else if (e != ext) { same = false; break; }
+		}
+		if (same && (ext == ".numat" || ext == ".nutex"))
+		{
+			ImGui::SameLine();
+			if (ImGui::Button(ICON_LC_LAYERS " Bulk Edit"))
+			{
+				bulkFiles = bs;
+				bulkOn.assign(bs.size(), 1);
+				bulkExt = ext;
+				bulkTexUsage = -1;
+				delete bulkMat; bulkMat = nullptr;
+				if (ext == ".numat") bulkMat = nuke::Material::LoadFromFile(bulkFiles[0]);
+				bulkOpen = true;
+			}
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("Edit shared parameters across the %d selected %s files", (int)bs.size(), ext.c_str());
+		}
 	}
+	}
+	DrawBulkEditWindow();
 	if (ImGui::BeginPopup("bnew"))
 	{
 		std::string folder = browserCwd.empty() ? contentDir : browserCwd;
@@ -1443,4 +1502,113 @@ void EditorUI::winBrowser()
 	}
 	ImGui::EndChild();
 	});
+}
+
+// Bulk edit window: shared parameters over N same-type files (opened from the browser
+// toolbar with a multi-selection). Edits apply IMMEDIATELY to every checked file — live
+// registered assets are patched in place (the scene follows), the files are saved, and
+// asset hot-reload keeps everything else in sync.
+void EditorUI::DrawBulkEditWindow()
+{
+	if (!bulkOpen) return;
+	ImGui::SetNextWindowSize(ImVec2(460, 540), ImGuiCond_FirstUseEver);
+	if (!ImGui::Begin((std::string(ICON_LC_LAYERS " Bulk Edit (") + bulkExt + ")###bulkedit").c_str(), &bulkOpen))
+	{
+		ImGui::End();
+		return;
+	}
+	ImGui::TextDisabled("%d file(s); edits apply to the CHECKED ones", (int)bulkFiles.size());
+	if (ImGui::SmallButton("All"))  std::fill(bulkOn.begin(), bulkOn.end(), (char)1);
+	ImGui::SameLine();
+	if (ImGui::SmallButton("None")) std::fill(bulkOn.begin(), bulkOn.end(), (char)0);
+	ImGui::BeginChild("##bulkfiles", ImVec2(0, 150), ImGuiChildFlags_Borders);
+	for (size_t i = 0; i < bulkFiles.size(); ++i)
+	{
+		bool on = i < bulkOn.size() && bulkOn[i] != 0;
+		if (ImGui::Checkbox((bfs::path(bulkFiles[i]).filename().string() + "##bf" + std::to_string(i)).c_str(), &on))
+			bulkOn[i] = on ? 1 : 0;
+	}
+	ImGui::EndChild();
+	ImGui::Separator();
+
+	if (bulkExt == ".numat" && bulkMat)
+	{
+		ImGui::TextDisabled("Values shown: %s", bfs::path(bulkFiles[0]).filename().string().c_str());
+		nuke::TypeInfo* ti = bulkMat->GetType();
+		std::vector<nuke::ReflectValue> before;
+		if (ti)
+			for (const nuke::Field& f : ti->fields) before.push_back(nuke::Reflect_GetField(bulkMat, f));
+		if (ti && DrawFields(bulkMat, ti))
+		{
+			size_t fi = 0;
+			for (const nuke::Field& f : ti->fields)
+			{
+				if (fi >= before.size()) break;
+				nuke::ReflectValue now = nuke::Reflect_GetField(bulkMat, f);
+				const nuke::ReflectValue& was = before[fi++];
+				const bool same = now.type == was.type && now.b == was.b && now.num == was.num
+				               && now.str == was.str && now.atom == was.atom && now.obj == was.obj
+				               && memcmp(now.v, was.v, sizeof(now.v)) == 0;
+				if (same) continue;
+				nuke::ResDB* db = nuke::ResDB::getSingleton();
+				for (size_t i = 0; i < bulkFiles.size(); ++i)
+				{
+					if (i >= bulkOn.size() || !bulkOn[i]) continue;
+					// The LIVE registered material first (the scene updates this frame).
+					nuke::Material* live = nullptr;
+					boost::system::error_code ec;
+					for (nuke::Material* m : db->materials)
+					{
+						if (!m) continue;
+						const std::string p = db->PathForGuid(m->guid);
+						if (!p.empty() && (p == bulkFiles[i] || bfs::equivalent(p, bulkFiles[i], ec)))
+						{ live = m; break; }
+					}
+					if (live)
+					{
+						nuke::Reflect_SetField(live, f, now);
+						live->Resolve();
+						live->SaveToFile(bulkFiles[i]);
+					}
+					else if (nuke::Material* mm = nuke::Material::LoadFromFile(bulkFiles[i]))
+					{
+						nuke::Reflect_SetField(mm, f, now);
+						mm->SaveToFile(bulkFiles[i]);
+						delete mm;
+					}
+				}
+			}
+		}
+	}
+	else if (bulkExt == ".nutex")
+	{
+		if (bulkTexUsage < 0 && !bulkFiles.empty())
+		{
+			if (nuke::Texture* t = nuke::Texture::LoadFromFile(bulkFiles[0]))
+			{ bulkTexUsage = t->usage; delete t; }
+			else bulkTexUsage = 0;
+		}
+		static const char* kUsage[] = { "Color", "Normal", "Data", "Emissive", "Sprite" };
+		int u = bulkTexUsage < 0 ? 0 : bulkTexUsage;
+		ImGui::TextUnformatted("Texture Type");
+		ImGui::SameLine();
+		ImGui::SetNextItemWidth(160);
+		if (ImGui::Combo("##bulkusage", &u, kUsage, 5))
+		{
+			bulkTexUsage = u;
+			for (size_t i = 0; i < bulkFiles.size(); ++i)
+			{
+				if (i >= bulkOn.size() || !bulkOn[i]) continue;
+				if (nuke::Texture* t = nuke::Texture::LoadFromFile(bulkFiles[i]))
+				{
+					t->usage = (nuke::Texture::Usage)u;
+					t->SaveToFile(bulkFiles[i]);
+					delete t;
+				}
+			}
+		}
+		ImGui::TextDisabled("Applied to the checked files on change; hot reload refreshes live users.");
+	}
+	ImGui::End();
+	if (!bulkOpen) { delete bulkMat; bulkMat = nullptr; }
 }

@@ -14,6 +14,16 @@
 #include <interface/EditorHooks.h>    // module-registered view toggles in the snap popup
 #include <config.h>                   // packaging dev hooks mirror the Game Build dialog
 #include <import/assimporter.h>       // NUKE_IMPORT dev hook (probe runs)
+#include <API/Model/Animator.h>       // NUKE_PREFAB_ANIM_TEST dev hook
+#include <API/Model/BoneMap.h>
+#include <API/Model/Game.h>           // NUKE_ASSET_SHOT dev hook (editor screenshot)
+#include <API/Model/SkinnedMeshRenderer.h>
+#include <API/Model/AnimClip.h>
+#include <API/Model/resdb.h>
+#include <functional>
+#include <cmath>
+#include <interface/Importers.h>      // NUKE_PLUGIN_TOGGLE_TEST: registry purge probe
+#include <interface/Modular.h>
 #include <interface/AppInstance.h>
 #include <boost/filesystem.hpp>
 #include <iostream>
@@ -384,6 +394,29 @@ void EditorUI::Draw()
 			impDelay = (e && e[0]) ? 120 : -1;
 			if (impDelay > 0) impList = e;
 		}
+		// NUKE_PLUGIN_TOGGLE_TEST=<dll file name>: disable -> probe -> re-enable (registry
+		// purge check: a disabled plugin's import formats must leave the registries).
+		static int tglDelay = -2;
+		static std::string tglName;
+		if (tglDelay == -2)
+		{
+			const char* e = std::getenv("NUKE_PLUGIN_TOGGLE_TEST");
+			tglDelay = (e && e[0]) ? 220 : -1;
+			if (tglDelay > 0) tglName = e;
+		}
+		if (tglDelay > 0 && --tglDelay == 0)
+			for (auto& m : nuke::GetModules())
+				if (m && bfs::path(m->moduleFile).filename().string() == tglName)
+				{
+					const bool before = nuke::ImporterForExt(".vrm") != nullptr;
+					nuke::DisablePlugin(m.get());
+					const bool off = nuke::ImporterForExt(".vrm") != nullptr;
+					nuke::EnablePlugin(m.get());
+					const bool back = nuke::ImporterForExt(".vrm") != nullptr;
+					std::cout << "[PluginToggleTest]	" << tglName << " .vrm importer: before="
+					          << before << " disabled=" << off << " reenabled=" << back << std::endl;
+					break;
+				}
 		if (impDelay > 0 && --impDelay == 0)
 		{
 			namespace bfs = boost::filesystem;
@@ -429,6 +462,216 @@ void EditorUI::Draw()
 			}
 			app->playState = 1;
 			std::cout << "[editor]\t\tNUKE_PLAY hook: entering PIE" << std::endl;
+		}
+		// NUKE_PREFAB_SIM_TEST=<.nuprefab path>: open the prefab editor, toggle simulate,
+		// verify the subtree's rigidbody FALLS in the private sandbox, stop, verify restore.
+		static int simDelay = -2;
+		static std::string simPath;
+		static int simPhase = 0, simFrames = 0;
+		static double simY0 = 0.0;
+		if (simDelay == -2)
+		{
+			const char* e = std::getenv("NUKE_PREFAB_SIM_TEST");
+			simDelay = (e && e[0]) ? 200 : -1;
+			if (simDelay > 0) simPath = e;
+		}
+		if (simDelay > 0 && --simDelay == 0) { OpenAssetEditor(simPath); simPhase = 1; }
+		if (simPhase > 0)
+			for (auto& w : assetEds)
+				if (w.path == simPath && w.prefabRoot)
+				{
+					if (simPhase == 1 && ++simFrames > 30)
+					{
+						simY0 = w.prefabRoot->GetTransform().position.y;
+						ToggleAnimPreview(w);
+						simPhase = 2; simFrames = 0;
+					}
+					else if (simPhase == 2 && ++simFrames > 150)
+					{
+						const double y1 = w.prefabRoot->GetTransform().position.y;
+						ToggleAnimPreview(w);
+						const double y2 = w.prefabRoot->GetTransform().position.y;
+						std::cout << "[PrefabSimTest]\ty0=" << simY0 << " y1=" << y1
+						          << " restored=" << y2
+						          << " fell=" << (y1 < simY0 - 0.5 ? 1 : 0)
+						          << " landed=" << (std::fabs(y1 - 0.5) < 0.2 ? 1 : 0)
+						          << " back=" << (std::fabs(y2 - simY0) < 0.01 ? 1 : 0) << std::endl;
+						std::cout << "[PrefabSimTest]\tdone" << std::endl;
+						simPhase = 0;
+					}
+					break;
+				}
+		// NUKE_PREFAB_ANIM_TEST=<.nuprefab path>|<clip name>[|<bonemap name>|<probe bone>]:
+		// open the prefab editor, set the clip (and bone map) on the preview Animator (the
+		// inspector picker path), toggle Play, verify the pose actually moves — and that no
+		// skinned mesh EXPLODES (posed AABB diagonal vs the bind diagonal, every enabled SMR).
+		static int patDelay = -2;
+		static std::string patPath, patClip, patMap, patBone = "J_Bip_L_Hand";
+		static int patPhase = 0, patFrames = 0;
+		static float patP0[16], patPeak = 0.0f;
+		if (patDelay == -2)
+		{
+			const char* e = std::getenv("NUKE_PREFAB_ANIM_TEST");
+			patDelay = (e && e[0]) ? 200 : -1;
+			if (patDelay > 0)
+			{
+				std::string s = e;
+				std::vector<std::string> part;
+				size_t p0 = 0;
+				while (true)
+				{
+					const size_t bar = s.find('|', p0);
+					part.push_back(s.substr(p0, bar == std::string::npos ? std::string::npos : bar - p0));
+					if (bar == std::string::npos) break;
+					p0 = bar + 1;
+				}
+				patPath = part.size() > 0 ? part[0] : "";
+				patClip = part.size() > 1 ? part[1] : "";
+				patMap  = part.size() > 2 ? part[2] : "";
+				if (part.size() > 3 && !part[3].empty()) patBone = part[3];
+			}
+		}
+		if (patDelay > 0 && --patDelay == 0) { OpenAssetEditor(patPath); patPhase = 1; }
+		if (patPhase > 0)
+			for (auto& w : assetEds)
+				if (w.path == patPath && w.prefabRoot)
+				{
+					nuke::SkinnedMeshRenderer* smr = nullptr;
+					{
+						std::function<nuke::SkinnedMeshRenderer*(nuke::Atom*)> find =
+							[&](nuke::Atom* a) -> nuke::SkinnedMeshRenderer*
+						{
+							if (!a) return nullptr;
+							if (auto* s = a->GetComponent<nuke::SkinnedMeshRenderer>()) return s;
+							for (nuke::Atom* ch : a->children)
+								if (auto* s = find(ch)) return s;
+							return nullptr;
+						};
+						smr = find(w.prefabRoot);
+					}
+					if (patPhase == 1 && ++patFrames > 30)
+					{
+						nuke::Animator* an = w.prefabRoot->GetComponent<nuke::Animator>();
+						nuke::AnimClip* c = an ? nuke::ResDB::getSingleton()->GetClipByName(patClip) : nullptr;
+						std::cout << "[PrefabAnimTest]\tanimator=" << (an != nullptr)
+						          << " clip=" << (c != nullptr) << " smr=" << (smr != nullptr) << std::endl;
+						if (an && c) { an->clipGuid = c->guid; an->playOnStart = true; an->loop = true; }
+						if (an && !patMap.empty())
+							for (nuke::BoneMap* bm : nuke::ResDB::getSingleton()->boneMaps)
+								if (bm && bm->name == patMap) { an->boneMapGuid = bm->guid; break; }
+						ToggleAnimPreview(w);
+						if (smr) smr->BoneGlobal(patBone, patP0);
+						patPhase = 2; patFrames = 0; patPeak = 0.0f;
+					}
+					else if (patPhase == 2)
+					{
+						float g[16];
+						if (smr && smr->BoneGlobal(patBone, g))
+						{
+							const float dx = g[12] - patP0[12], dy = g[13] - patP0[13], dz = g[14] - patP0[14];
+							const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
+							if (d > patPeak) patPeak = d;
+						}
+						if (++patFrames > 240)
+						{
+							std::cout << "[PrefabAnimTest]\tbonePeak=" << patPeak
+							          << " ok=" << (patPeak > 0.005f ? 1 : 0) << std::endl;
+							// Explosion check: every enabled SMR's POSED bounds stay in the same
+							// order of magnitude as its bind bounds (heterogeneous binds used to
+							// smear variant meshes across the world on the first ApplyPose).
+							{
+								std::function<void(nuke::Atom*)> walk = [&](nuke::Atom* a)
+								{
+									if (!a || !a->enabled) return;
+									if (auto* s = a->GetComponent<nuke::SkinnedMeshRenderer>())
+										if (s->enabled && s->mesh && s->mesh->vertexArray)
+										{
+											s->mesh->boundsValid = false;
+											s->mesh->EnsureBounds();
+											auto diag = [](const float* mn, const float* mx)
+											{
+												const float dx = mx[0] - mn[0], dy = mx[1] - mn[1], dz = mx[2] - mn[2];
+												return std::sqrt(dx * dx + dy * dy + dz * dz);
+											};
+											nuke::Mesh* src = !s->meshGuid.empty()
+											                ? nuke::ResDB::getSingleton()->GetMesh(s->meshGuid) : nullptr;
+											float b = 0.0f;
+											if (src) { src->EnsureBounds(); b = diag(src->aabbMin, src->aabbMax); }
+											const float d = diag(s->mesh->aabbMin, s->mesh->aabbMax);
+											std::cout << "[PrefabAnimTest]\tsmr '" << a->GetName()
+											          << "' posedDiag=" << d << " bindDiag=" << b
+											          << " blown=" << ((b > 0.0f && d > b * 3.0f + 1.0f) ? 1 : 0)
+											          << std::endl;
+										}
+									for (nuke::Atom* ch : a->children) walk(ch);
+								};
+								walk(w.prefabRoot);
+							}
+							ToggleAnimPreview(w);
+							std::cout << "[PrefabAnimTest]\tdone" << std::endl;
+							patPhase = 0;
+						}
+					}
+					break;
+				}
+		// NUKE_ASSET_SHOT=<asset path>|<png>: open the asset's editor window, let it settle,
+		// screenshot the editor (probe runs: verify skeleton/ragdoll/mesh previews visually).
+		static int ashotDelay = -2, ashotWait = 0;
+		static std::string ashotPath, ashotPng;
+		if (ashotDelay == -2)
+		{
+			const char* e = std::getenv("NUKE_ASSET_SHOT");
+			ashotDelay = (e && e[0]) ? 200 : -1;
+			if (ashotDelay > 0)
+			{
+				std::string s = e;
+				const size_t bar = s.find('|');
+				ashotPath = s.substr(0, bar == std::string::npos ? s.size() : bar);
+				ashotPng = bar == std::string::npos ? "asset_shot.png" : s.substr(bar + 1);
+			}
+		}
+		if (ashotDelay > 0 && --ashotDelay == 0) { OpenAssetEditor(ashotPath); ashotWait = 180; }
+		if (ashotWait > 0 && --ashotWait == 0)
+		{
+			nuke::Game::Screenshot(ashotPng);
+			std::cout << "[AssetShot]\twrote " << ashotPng << std::endl;
+			// Rig-preview coherence dump: the POSED bounds of every skinned part (skeleton /
+			// ragdoll editors build the rig by code — scattered parts mean the bind skin
+			// never ran or the palettes disagree).
+			for (auto& w : assetEds)
+				if (w.path == ashotPath && w.pv && w.pv->world)
+				{
+					const long rid = w.skAtomId ? w.skAtomId : w.rgAtomId;
+					if (nuke::Atom* rig = rid ? w.pv->world->GetById(rid) : nullptr)
+						for (nuke::Atom* ch : rig->children)
+							if (auto* s = ch->GetComponent<nuke::SkinnedMeshRenderer>())
+								if (s->mesh && s->mesh->boundsValid)
+									std::cout << "[AssetShot]\tpart '" << s->mesh->name
+									          << "' y=[" << s->mesh->aabbMin[1] << " .. "
+									          << s->mesh->aabbMax[1] << "]" << std::endl;
+					break;
+				}
+			std::cout << "[AssetShot]\tdone" << std::endl;
+		}
+		// NUKE_DELETE_TEST=<path>: PerformDeletes on the path (folder or file) and report how
+		// many live skeletons/clips remain registered — the folder-delete unload probe.
+		static int delDelay = -2;
+		static std::string delPath;
+		if (delDelay == -2)
+		{
+			const char* e = std::getenv("NUKE_DELETE_TEST");
+			delDelay = (e && e[0]) ? 200 : -1;
+			if (delDelay > 0) delPath = e;
+		}
+		if (delDelay > 0 && --delDelay == 0)
+		{
+			nuke::ResDB* db = nuke::ResDB::getSingleton();
+			const size_t sk0 = db->skeletons.size(), cl0 = db->clips.size(), mt0 = db->materials.size();
+			PerformDeletes({ delPath });
+			std::cout << "[DeleteTest]\tskeletons " << sk0 << " -> " << db->skeletons.size()
+			          << ", clips " << cl0 << " -> " << db->clips.size()
+			          << ", materials " << mt0 << " -> " << db->materials.size() << std::endl;
+			std::cout << "[DeleteTest]\tdone" << std::endl;
 		}
 		// NUKE_OPEN_PROJECT=<path>: the child inherits the env var, so skip when the target
 		// is already open — otherwise the spawned editor relaunches itself forever.

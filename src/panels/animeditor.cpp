@@ -154,6 +154,10 @@ Animator* EditorEnsureRig(EditorUI* ui, EditorUI::PreviewWorld* pv, long& atomId
 			s->mesh = ResDB::getSingleton()->GetMesh(g);
 			s->skelGuid = skelGuid;
 			EditorApplyMeshMaterials(s, g);   // the mesh's own materials, not a white default
+			// Skin the bind pose NOW: raw verts are NOT the rest pose (per-mesh bake spaces —
+			// un-skinned parts render scattered), and idle editors (skeleton/ragdoll) never
+			// tick an Animator to do it for us. Also fills Globals() for the bone overlays.
+			s->ApplyPose();
 			rig->AddChild(part);
 		}
 		if (an) an->Reset();        // rebind: pick up the new subtree SMRs + skeleton
