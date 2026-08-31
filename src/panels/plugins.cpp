@@ -14,6 +14,22 @@ static bool ContainsCI(const std::string& hay, const std::string& needle)
 	return it != hay.end();
 }
 
+// Framed colored kind badge drawn AT the cursor (the caller reserves the room — it must
+// never overlap the title): GREEN = engine plugin, ORANGE = editor tool, BLUE = service.
+static void KindBadge(const char* text, ImU32 col)
+{
+	const ImVec2 p0 = ImGui::GetCursorScreenPos();
+	ImGui::PushStyleColor(ImGuiCol_Text, col);
+	ImGui::TextUnformatted(text);
+	ImGui::PopStyleColor();
+	const ImVec2 p1 = ImGui::GetItemRectMax();
+	ImGui::GetWindowDrawList()->AddRect(ImVec2(p0.x - 4, p0.y - 1), ImVec2(p1.x + 4, p1.y + 1), col);
+}
+static float KindBadgeWidth(const char* text) { return ImGui::CalcTextSize(text).x + 8.0f; }
+static ImU32 kBadgeEngine  = IM_COL32(90, 200, 90, 255);
+static ImU32 kBadgeEditor  = IM_COL32(255, 165, 60, 255);
+static ImU32 kBadgeService = IM_COL32(90, 160, 255, 255);
+
 static bool PassesFilter(nuke::NUKEModule* m, const std::string& text, const std::string& service)
 {
 	if (!service.empty())
@@ -77,21 +93,27 @@ void EditorUI::PluginMGRWindow()
 			if (ImGui::Checkbox("##en", &on))   // deferred: applied after the frame, never mid-iteration
 				pendingPluginToggle.push_back({ mod.get(), on });
 
+			// Kind badge: BLUE service (named), ORANGE editor tool, GREEN engine plugin. The
+			// title gets a WIDTH-CAPPED selectable so the badge has reserved room — it never
+			// draws over the text.
+			const char* badge = *service ? service
+			                  : nuke::ModuleIsEditorTool(mod.get()) ? "editor" : "engine";
+			const ImU32 badgeCol = *service ? kBadgeService
+			                     : nuke::ModuleIsEditorTool(mod.get()) ? kBadgeEditor : kBadgeEngine;
+			const float bw = KindBadgeWidth(badge);
+
 			ImGui::SameLine();
 			bool sel = (selectedPluginIndex == idx);
 			if (!mod->loaded) ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-			if (ImGui::Selectable(mod->title, sel))
+			const float titleW = ImGui::GetContentRegionAvail().x - bw - 12.0f;
+			if (ImGui::Selectable(mod->title, sel, 0, ImVec2(titleW > 40.0f ? titleW : 40.0f, 0)))
 			{
 				selectedPluginIndex = idx;
 				selectedPlugin = mod;
 			}
 			if (!mod->loaded) ImGui::PopStyleColor();
-
-			if (*service)   // service badge on the right of the row
-			{
-				ImGui::SameLine(ImGui::GetContentRegionMax().x - ImGui::CalcTextSize(service).x - 8);
-				ImGui::TextDisabled("[%s]", service);
-			}
+			ImGui::SameLine(ImGui::GetContentRegionMax().x - bw);
+			KindBadge(badge, badgeCol);
 			ImGui::PopID();
 			++idx;
 		}
@@ -104,6 +126,14 @@ void EditorUI::PluginMGRWindow()
 		if (selectedPlugin)
 		{
 			ImGui::TextUnformatted(selectedPlugin->title);
+			// Kind badge on its OWN line — never over the title.
+			if (*selectedPlugin->provides())
+				KindBadge("system module", kBadgeService);
+			else if (nuke::ModuleIsEditorTool(selectedPlugin.get()))
+				KindBadge("editor plugin", kBadgeEditor);
+			else
+				KindBadge("engine plugin", kBadgeEngine);
+			ImGui::Spacing();
 			ImGui::TextUnformatted(selectedPlugin->author);
 			ImGui::TextUnformatted(selectedPlugin->version);
 			ImGui::Text("%s", selectedPlugin->moduleFile.c_str());
@@ -146,7 +176,8 @@ void EditorUI::PluginMGRWindow()
 		}
 		else
 		{
-			ImGui::TextWrapped("Select a plugin on the left. To install one, put its DLL in the `modules` directory.");
+			ImGui::TextWrapped("Select a plugin on the left. To install one, put its DLL in `plugins` "
+			                   "(optional add-ons) or `modules` (the engine's system modules / services).");
 		}
 		ImGui::EndChild();
 	});

@@ -339,6 +339,7 @@ void EditorUI::Draw()
 	ImGuizmo::BeginFrame();   // must come right after ImGui::NewFrame (done by NukeUI)
 
 	nuke::Time::getSingleton()->NewFrame();
+	ProfilerHistoryTick();   // frame-time curves (profiler graph + viewport overlay)
 
 	nuke::Jobs::PumpMain();   // deliver background-job results to the game thread
 

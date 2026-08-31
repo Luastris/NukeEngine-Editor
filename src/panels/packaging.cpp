@@ -1659,17 +1659,21 @@ void EditorUI::PackageProjectNow()
 				// spelling ("NukeVFX" -> NukeVFX.dll / libNukeVFX.so). Legacy entries that
 				// still carry a foreign extension resolve through the same helper.
 				const std::string native = nuke::ModuleFileName(nuke::ModuleName(m));
-				std::string shipName = native;   // the file name that lands in dist/modules
+				std::string shipName = native;   // the file name that lands in dist/<tier>
+				std::string shipDir  = "modules";   // plugins/ entries keep their tier in dist
 				boost::system::error_code mec;
 				bfs::path src = rt / "modules" / native;
+				// plugins/ — the optional add-on tier beside modules/ (services).
+				if (!bfs::exists(src, mec)) { src = rt / "plugins" / native; if (bfs::exists(src, mec)) shipDir = "plugins"; }
 				// Project-local game modules ship too; editor modules win on name clash.
-				if (!bfs::exists(src, mec)) src = bfs::path(projDir) / "modules" / distCfg / native;
+				if (!bfs::exists(src, mec)) { src = bfs::path(projDir) / "modules" / distCfg / native; shipDir = "modules"; }
 				if (!bfs::exists(src, mec)) src = bfs::path(projDir) / "modules" / native;
 				// Last resort: the entry verbatim (a hand-written file name).
 				if (!bfs::exists(src, mec) && m != native)
 				{
 					src = rt / "modules" / m;
-					if (!bfs::exists(src, mec)) src = bfs::path(projDir) / "modules" / distCfg / m;
+					if (!bfs::exists(src, mec)) { src = rt / "plugins" / m; if (bfs::exists(src, mec)) shipDir = "plugins"; }
+					if (!bfs::exists(src, mec)) { src = bfs::path(projDir) / "modules" / distCfg / m; shipDir = "modules"; }
 					if (!bfs::exists(src, mec)) src = bfs::path(projDir) / "modules" / m;
 					if (bfs::exists(src, mec)) shipName = m;
 				}
@@ -1688,7 +1692,7 @@ void EditorUI::PackageProjectNow()
 						std::cout << "[Package]\tWARNING: module '" << shipName << "' is a DEBUG build (imports ucrtbased.dll)"
 						          << " — it will NOT load on machines without Visual Studio. Rebuild it Release." << std::endl;
 				}
-				if (!CopyOne(src, dist / "modules" / shipName))
+				if (!CopyOne(src, dist / shipDir / shipName))
 					std::cout << "[Package]\tmodule missing, skipped: " << m << std::endl;
 			}
 			// Module dist extras: relative sources resolve against the shipped runtime dir,

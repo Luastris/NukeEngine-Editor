@@ -598,6 +598,24 @@ void EditorUI::winRender()
 			// interesting view); hidden while possessed (the game owns the screen then).
 			if (!possessed && streamVizVisible) DrawStreamCells(imin, avail);
 			if (!possessed) DrawModuleOverlays(imin, avail);
+			// Fullscreen video (Video::Play / .nuvid preview): in the editor it belongs INSIDE
+			// the game viewport, letterboxed — never over the panels (the claim mutes the
+			// renderer's backbuffer overlay pass; standalone keeps the fullscreen draw).
+			{
+				int vidW = 0, vidH = 0;
+				if (uint64_t vid = r->claimScreenOverlay(&vidW, &vidH))
+				{
+					const float vw = (float)(vidW > 0 ? vidW : 1), vh = (float)(vidH > 0 ? vidH : 1);
+					const float s  = std::min(avail.x / vw, avail.y / vh);
+					const float qw = vw * s, qh = vh * s;
+					const ImVec2 q0(imin.x + (avail.x - qw) * 0.5f, imin.y + (avail.y - qh) * 0.5f);
+					ImGui::GetWindowDrawList()->AddImage((ImTextureID)vid, q0, ImVec2(q0.x + qw, q0.y + qh));
+				}
+			}
+			// Frame-time curves over the viewport (profiler's Overlay toggle) — play too:
+			// perf is most interesting while the game runs.
+			if (perfOverlay)
+				DrawPerfGraph(imin.x + 8.0f, imin.y + 8.0f, std::min(360.0f, avail.x - 16.0f), 92.0f);
 		}
 		else
 			ImGui::Text("No scene texture.");

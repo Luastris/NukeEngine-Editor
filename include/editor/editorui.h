@@ -219,6 +219,9 @@ private:
 	// Profiler window (Window menu / clicking the status-bar timings).
 	bool profilerOpen = false, profilerFocus = false, profilerFrozen = false;
 	bool meshCostView = false;   // profiler's mesh-cost overlay (iRender::setDebugView)
+	bool perfOverlay = false;    // frame-time curves drawn over the viewport
+	void ProfilerHistoryTick();  // record this frame's curve samples (call once per frame)
+	void DrawPerfGraph(float x, float y, float w, float h);   // curves + legend at screen pos
 	char profilerFilter[64] = "";
 	void DrawModuleOverlays(ImVec2 rmin, ImVec2 sz);   // module-registered viewport overlays (EditorHooks)
 	// Edit-history window (over the same undo/redo stacks).

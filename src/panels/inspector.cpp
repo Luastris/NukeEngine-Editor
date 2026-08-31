@@ -9,6 +9,7 @@
 #include <API/Model/Surface.h>
 #include <API/Model/StatusBar.h>
 #include <API/Model/Package.h>  // pickers list pak/mod content too
+#include <config.h>            // writableDir: pak-entry scratch extraction
 #include <interface/Services.h> // csclass picker: scripting providers
 #include <service/iScript.h>
 #include <reflect/ReflectBind.h>   // multi-edit: per-field mirror across the selection
@@ -2263,7 +2264,9 @@ void EditorUI::winInspector()
 			ImGui::EndPopup();
 		}
 	}
-	else if (!browserSel.empty() && bfs::is_regular_file(bfs::path(browserSel)))
+	// pak:// entries have no disk file — the asset inspector reads them from the mounted pak.
+	else if (!browserSel.empty() && (browserSel.rfind("pak://", 0) == 0
+	                                 || bfs::is_regular_file(bfs::path(browserSel))))
 	{
 		DrawAssetInspector(browserSel);
 	}
@@ -2281,8 +2284,35 @@ void EditorUI::DrawAssetInspector(const std::string& path)
 	std::string ext = bfs::path(path).extension().string();
 	for (char& c : ext) c = (char)std::tolower((unsigned char)c);
 
+	// A pak entry has no disk file: extract its bytes to a scratch file once per selection
+	// and run the normal inspector on that, read-only (every mutator below is disabled).
+	const bool pakRO = path.rfind("pak://", 0) == 0;
+	static std::string s_pakTemp;
+	std::string realPath = path;
+	if (pakRO)
+	{
+		if (path != inspAssetPath)
+		{
+			s_pakTemp.clear();
+			std::string bytes;
+			if (nuke::Package::Read(path.substr(6), bytes))
+			{
+				bfs::path tmp = nuke::Config::writableDir() / ("insp_pak" + ext);
+				bfs::ofstream f(tmp, std::ios::binary);
+				if (f) { f.write(bytes.data(), (std::streamsize)bytes.size()); s_pakTemp = tmp.string(); }
+			}
+		}
+		realPath = s_pakTemp;
+		if (realPath.empty())
+		{
+			ImGui::TextUnformatted(bfs::path(path).filename().string().c_str());
+			ImGui::TextDisabled("(pak entry — could not be read)");
+			return;
+		}
+	}
+
 	boost::system::error_code mec;
-	long long mtime = (long long)bfs::last_write_time(bfs::path(path), mec);
+	long long mtime = pakRO ? 0 : (long long)bfs::last_write_time(bfs::path(path), mec);
 	if (path != inspAssetPath || mtime != inspAssetMtime)   // new selection or a reimport on disk
 	{
 		if (inspTex) { delete inspTex; inspTex = nullptr; }
@@ -2294,8 +2324,8 @@ void EditorUI::DrawAssetInspector(const std::string& path)
 		}
 		pvStaged.clear();   // restage the 3D preview for the new selection
 		inspAssetPath = path; inspAssetMtime = mtime;
-		if      (ext == ".nutex") inspTex = nuke::Texture::LoadFromFile(path);
-		else if (ext == ".numat") inspMat = nuke::Material::LoadFromFile(path);
+		if      (ext == ".nutex") inspTex = nuke::Texture::LoadFromFile(realPath);
+		else if (ext == ".numat") inspMat = nuke::Material::LoadFromFile(realPath);
 		// Decode mip0 and upload once per change; downsample to a 2048 cap first so huge sheets
 		// don't spike VRAM for a panel-width thumbnail.
 		if (inspTex && !inspTex->renderTexture)
@@ -2330,11 +2360,12 @@ void EditorUI::DrawAssetInspector(const std::string& path)
 
 	ImGui::TextUnformatted(bfs::path(path).filename().string().c_str());
 	ImGui::SameLine(); ImGui::TextDisabled("%s", ext.c_str());
+	if (pakRO) { ImGui::SameLine(); ImGui::TextDisabled("(pak — read-only)"); }
 	// Types with a dedicated editor window, module-supplied ones included.
-	const bool hasOwnEditor = ext == ".numat" || ext == ".numesh" || ext == ".nuprefab"
+	const bool hasOwnEditor = !pakRO && (ext == ".numat" || ext == ".numesh" || ext == ".nuprefab"
 	                       || ext == ".nuanim" || ext == ".nusm" || ext == ".nublend"
 	                       || ext == ".nuskel" || ext == ".nurag" || ext == ".nubonemap"
-	                       || nuke::AssetEditorForExt(ext) != nullptr;
+	                       || nuke::AssetEditorForExt(ext) != nullptr);
 	if (hasOwnEditor)
 	{
 		ImGui::SameLine(ImGui::GetContentRegionAvail().x - (IsTextFile(ext) ? 190.0f : 120.0f));
@@ -2345,7 +2376,7 @@ void EditorUI::DrawAssetInspector(const std::string& path)
 			if (ImGui::SmallButton(ICON_LC_FILE_PEN " Edit")) OpenExternal(path, 0);
 		}
 	}
-	else if (IsTextFile(ext))
+	else if (IsTextFile(ext) && !pakRO)
 	{
 		ImGui::SameLine(ImGui::GetContentRegionAvail().x - 60.0f);
 		if (ImGui::SmallButton(ICON_LC_FILE_PEN " Edit")) OpenExternal(path, 0);
@@ -2384,6 +2415,7 @@ void EditorUI::DrawAssetInspector(const std::string& path)
 		ImGui::Text("%d x %d   %s   %d mip(s)", inspTex->width, inspTex->height, fmt, inspTex->mipCount);
 		if (inspTex->frameCount > 1) ImGui::Text("Animated: %d frames", inspTex->frameCount);
 		ImGui::Spacing();
+		if (pakRO) ImGui::BeginDisabled();
 		const char* usages[] = { "Color (sRGB)", "Normal Map", "Data (linear)", "Emissive (sRGB)", "Sprite (sheet)" };
 		int u = inspTex->usage;
 		if (ImGui::Combo("Texture Type", &u, usages, IM_ARRAYSIZE(usages)) && u != inspTex->usage)
@@ -2498,21 +2530,24 @@ void EditorUI::DrawAssetInspector(const std::string& path)
 			}
 			ImGui::TextDisabled("Pick the background colour (or eyedrop the preview), then Apply.\nBC textures re-encode to BC3 to carry alpha.");
 		}
+		if (pakRO) ImGui::EndDisabled();   // pairs with the BeginDisabled above the usage combo
 	}
 	else if (ext == ".numat" && inspMat)
 	{
-		DrawAssetPreview3D(path, ext);
+		DrawAssetPreview3D(realPath, ext);
+		if (pakRO) ImGui::BeginDisabled();
 		if (nuke::TypeInfo* ti = inspMat->GetType())
-			if (DrawFields(inspMat, ti))
+			if (DrawFields(inspMat, ti) && !pakRO)
 			{
 				inspMat->SaveToFile(path);   // reflected material fields; save on edit
 				pvStaged.clear();            // re-resolve the preview instance from the saved asset
 			}
+		if (pakRO) ImGui::EndDisabled();
 	}
 	else if (ext == ".numesh")
 	{
-		DrawAssetPreview3D(path, ext);
-		if (inspPv && inspPv->mr->mesh && pvStaged == path)
+		DrawAssetPreview3D(realPath, ext);
+		if (inspPv && inspPv->mr->mesh && pvStaged == realPath)
 		{
 			nuke::Mesh* m = inspPv->mr->mesh;
 			ImGui::Text("%d vertices   %d triangles   %d section(s)   %d LOD(s)",
@@ -2526,13 +2561,13 @@ void EditorUI::DrawAssetInspector(const std::string& path)
 	else
 	{
 		boost::system::error_code ec;
-		uintmax_t sz = bfs::file_size(bfs::path(path), ec);
+		uintmax_t sz = bfs::file_size(bfs::path(realPath), ec);
 		if (!ec) ImGui::Text("Size: %.1f KB", (double)sz / 1024.0);
-		if (ext == ".nuworld")  { if (ImGui::Button(ICON_LC_GLOBE " Open World", ImVec2(-FLT_MIN, 0)))  OpenWorldFromBrowser(path); }
+		if (ext == ".nuworld" && !pakRO)  { if (ImGui::Button(ICON_LC_GLOBE " Open World", ImVec2(-FLT_MIN, 0)))  OpenWorldFromBrowser(path); }
 		else if (ext == ".nuprefab")
 		{
 			ImGui::TextDisabled("Prefab — drag into the world to instantiate.");
-			if (ImGui::Button(ICON_LC_PACKAGE_PLUS " Instantiate", ImVec2(-FLT_MIN, 0))) SpawnPrefab(path);
+			if (!pakRO && ImGui::Button(ICON_LC_PACKAGE_PLUS " Instantiate", ImVec2(-FLT_MIN, 0))) SpawnPrefab(path);
 		}
 		else if (ext == ".nuproj")
 		{

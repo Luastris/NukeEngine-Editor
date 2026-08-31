@@ -1106,15 +1106,8 @@ void EditorUI::winBrowser()
 		ImGui::Separator();
 		if (ImGui::MenuItem(ICON_LC_GLOBE " World"))       CreateWorldAsset(folder);
 		if (ImGui::MenuItem(ICON_LC_PALETTE " Material"))  CreateMaterialAsset(folder);
-		if (ImGui::MenuItem(ICON_LC_BONE " Bone Map"))     CreateBoneMapAsset(folder);
-		if (ImGui::MenuItem(ICON_LC_WORKFLOW " Anim Controller")) CreateAnimSMAsset(folder);
-		if (ImGui::MenuItem(ICON_LC_BLEND " Blend Space")) CreateBlendSpaceAsset(folder);
-		if (ImGui::MenuItem(ICON_LC_FILM " Sequence"))     CreateSequenceAsset(folder);
-		if (ImGui::MenuItem(ICON_LC_FILE_CODE " Shader"))  CreateShaderAsset(folder);
-		if (ImGui::MenuItem(ICON_LC_IMAGE " RenderTexture")) CreateRenderTextureAsset(folder);
 		// Plugin-registered file types, grouped by category ("" = flat entry).
 		const std::vector<nuke::AssetCreator>& creators = nuke::AssetCreators();
-		if (!creators.empty()) ImGui::Separator();
 		auto creatorItem = [&](const nuke::AssetCreator& ac)
 		{
 			const char* icon = ac.icon.empty() ? ICON_LC_FILE_CODE : ac.icon.c_str();
@@ -1131,7 +1124,25 @@ void EditorUI::winBrowser()
 				StartRename(p.string());
 			}
 		};
-		std::vector<std::string> doneCategories;
+		// Animation-related types live under ONE submenu, not scattered in the root — module
+		// creators registered under an "Animation" category join it (never a duplicate menu).
+		if (ImGui::BeginMenu(ICON_LC_PERSON_STANDING " Animation"))
+		{
+			if (ImGui::MenuItem(ICON_LC_BONE " Bone Map"))     CreateBoneMapAsset(folder);
+			if (ImGui::MenuItem(ICON_LC_WORKFLOW " Anim Controller")) CreateAnimSMAsset(folder);
+			if (ImGui::MenuItem(ICON_LC_BLEND " Blend Space")) CreateBlendSpaceAsset(folder);
+			if (ImGui::MenuItem(ICON_LC_FILM " Sequence"))     CreateSequenceAsset(folder);
+			for (const nuke::AssetCreator& in : creators)
+				if (in.category == "Animation") creatorItem(in);
+			ImGui::EndMenu();
+		}
+		if (ImGui::MenuItem(ICON_LC_FILE_CODE " Shader"))  CreateShaderAsset(folder);
+		if (ImGui::MenuItem(ICON_LC_IMAGE " RenderTexture")) CreateRenderTextureAsset(folder);
+		std::vector<std::string> doneCategories = { "Animation" };   // merged above
+		bool anyOutside = false;
+		for (const nuke::AssetCreator& ac : creators)
+			if (ac.category != "Animation") { anyOutside = true; break; }
+		if (anyOutside) ImGui::Separator();
 		for (const nuke::AssetCreator& ac : creators)
 		{
 			if (ac.category.empty()) { creatorItem(ac); continue; }
@@ -1161,10 +1172,19 @@ void EditorUI::winBrowser()
 	bfs::path cwd  = browserCwd.empty() ? root : bfs::path(browserCwd);
 	{
 		// A cwd outside the current root (root switch, deleted folder, stale state) snaps back.
+		// A folder that exists only INSIDE a mounted pak has no disk directory — it is still
+		// a valid location (its entries render from the pak union below), so don't snap.
 		boost::system::error_code cec;
-		bfs::path relc = bfs::relative(cwd, root, cec);
+		bfs::path relc = cwd.lexically_relative(root);   // lexical: pak-only folders can't stat
 		const std::string rs = relc.generic_string();
-		if (cec || rs.compare(0, 2, "..") == 0 || !bfs::exists(cwd, cec))
+		bool ok = !rs.empty() && rs != "." && rs.compare(0, 2, "..") != 0;
+		if (ok && !bfs::exists(cwd, cec))
+		{
+			ok = false;
+			if (browserRoot == 0 && Package::MountedCount() > 0)
+				ok = !Package::List("content/" + rs + "/").empty();
+		}
+		if (!ok && !(rs.empty() || rs == "."))
 		{
 			cwd = root;
 			browserCwd = root.string();
@@ -1211,9 +1231,9 @@ void EditorUI::winBrowser()
 		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Browse the project content or its C++ sources");
 		ImGui::SameLine();
 	}
-	bfs::path rel = bfs::relative(cwd, root, rc);
+	bfs::path rel = cwd.lexically_relative(root);   // lexical: pak-only folders can't stat
 	std::string loc = hasSrc ? "" : "content";   // the combo already names the root
-	if (!rc && !rel.empty() && rel.generic_string() != ".") loc += "/" + rel.generic_string();
+	if (!rel.empty() && rel.generic_string() != ".") loc += "/" + rel.generic_string();
 	ImGui::Text("%s", loc.c_str());
 	ImGui::Separator();
 
