@@ -552,6 +552,10 @@ public:
 	void ApplyProjectSettings(const ProjectSettings& ps);   // set members+config, push to renderer, persist (nuproj+config)
 	bool DrawFields(void* obj, nuke::TypeInfo* ti);
 	void DrawDynamicProps(nuke::Component* cmp);
+	// Body of an open "add component" popup: search box + cascading category submenus
+	// (the inspector's menu). Returns the picked type, or null. `target` gates
+	// context-dependent types (PostProcess needs a Camera).
+	nuke::TypeInfo* DrawAddComponentMenu(nuke::Atom* target);
 
 	// --- Sync edit: mass-edit of same-type components -----------------------------------
 	// One checked target set per component TYPE per scope (main inspector = syncEditWorld,
@@ -807,6 +811,7 @@ public:
 		bool      editing = false;               // edit burst in progress (coalescing)
 		bool      editedNow = false;             // an edit happened THIS frame (latch input)
 		bool dirty = false, open = true, wantFocus = false;
+		bool wantAddComp = false;                // Add Component pressed: open the popup at WINDOW level
 	};
 	std::vector<AssetEditorWin> assetEds;
 	int  aeCloseConfirm = -1;               // editor index awaiting the discard-changes modal

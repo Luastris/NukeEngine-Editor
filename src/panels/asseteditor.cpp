@@ -1,5 +1,6 @@
 // Per-asset editor windows (material / mesh / prefab / texture / input map), each with a
 // live 3D view backed by a pooled preview world rendered before the main scene.
+#include <boost/chrono.hpp>   // preview perf probe (NUKE_AE_PERF)
 #include <editor/editorui.h>
 #include <API/Model/Material.h>
 #include <API/Model/Texture.h>
@@ -654,17 +655,26 @@ static void TickAnimators(nuke::Atom* a)
 	if (nuke::Animator* an = a->GetComponent<nuke::Animator>())
 		if (an->enabled) an->Update();
 	// Spring chains are physics and self-drive from their own Update (an idle Animator
-	// commits nothing) — the mini-PIE must tick them like the world would.
+	// commits nothing) — the mini-PIE must tick them like the world would. Cloth writes its
+	// render sheet from Update (interpolated between fixed steps): without this tick the sim
+	// runs but the skirt renders frozen in bind pose.
 	for (nuke::Component* c : a->components)
-		if (c && c->enabled && std::strcmp(c->name, "SpringBones") == 0) c->Update();
+		if (c && c->enabled && (std::strcmp(c->name, "SpringBones") == 0
+		                     || std::strcmp(c->name, "Cloth") == 0)) c->Update();
 	for (nuke::Atom* ch : a->children) TickAnimators(ch);
 }
 
 void EditorUI::TickAnimPreview(AssetEditorWin& w)
 {
 	if (!w.prefabRoot) return;
+	static const bool prfDbg = std::getenv("NUKE_AE_PERF") != nullptr;
+	const auto t0 = boost::chrono::steady_clock::now();
+	double animMs = 0.0, physMs = 0.0;
+	int steps = 0;
 	nuke::PhysicsSceneScope ps(w.pv ? w.pv->phys : nullptr);
 	TickAnimators(w.prefabRoot);
+	if (prfDbg) animMs = boost::chrono::duration_cast<boost::chrono::duration<double, boost::milli>>(
+		boost::chrono::steady_clock::now() - t0).count();
 	// Physics rides the same play toggle, stepping the window's PRIVATE sandbox at the
 	// world's fixed cadence off real frame time (the game's fixed thread never touches
 	// preview worlds).
@@ -674,10 +684,29 @@ void EditorUI::TickAnimPreview(AssetEditorWin& w)
 		                                                          : 1.0f / 60.0f;
 		w.physAcc += ImGui::GetIO().DeltaTime;
 		if (w.physAcc > fdt * 4.0f) w.physAcc = fdt * 4.0f;   // hitch: no burst catch-up
+		const auto t1 = boost::chrono::steady_clock::now();
 		while (w.physAcc >= fdt)
 		{
 			w.pv->world->FixedUpdate();
 			w.physAcc -= fdt;
+			++steps;
+		}
+		if (prfDbg) physMs = boost::chrono::duration_cast<boost::chrono::duration<double, boost::milli>>(
+			boost::chrono::steady_clock::now() - t1).count();
+	}
+	if (prfDbg)
+	{
+		static int frames = 0;
+		static double accAnim = 0.0, accPhys = 0.0, accDt = 0.0;
+		static int accSteps = 0;
+		accAnim += animMs; accPhys += physMs; accDt += ImGui::GetIO().DeltaTime * 1000.0;
+		accSteps += steps;
+		if (++frames >= 60)
+		{
+			std::cout << "[AePerf]\tframe " << accDt / frames << " ms (anim " << accAnim / frames
+			          << " ms, phys " << accPhys / frames << " ms, " << (double)accSteps / frames
+			          << " steps/frame)" << std::endl;
+			frames = 0; accAnim = accPhys = accDt = 0.0; accSteps = 0;
 		}
 	}
 }
@@ -2152,32 +2181,20 @@ bool EditorUI::DrawPrefabAtomEditor(AssetEditorWin& w, Atom* a)
 	w.compFold = 0;   // the fold applied to every header this frame
 	if (toRemove)
 	{
-		// Edit-time removal: not Destroy(), which is the runtime hook.
+		// Edit-time removal. Destroy() runs first: a component that registered itself in a
+		// global tick list (Cloth) or holds runtime resources must let go before the free.
+		toRemove->Destroy();
 		a->components.remove(toRemove);
 		delete toRemove;
 		edited = true;
 	}
 
-	// Add any registered, create-able Component type, plugin types included.
+	// Add any registered, create-able Component type, plugin types included. The popup itself
+	// opens at WINDOW level (winAssetEditors): a popup parented to this nested child loses its
+	// category submenus — the submenu closes before the click can land.
 	ImGui::Separator();
 	if (ImGui::Button(ICON_LC_PLUS " Add Component"))
-		ImGui::OpenPopup("prefab_addcomp");
-	if (ImGui::BeginPopup("prefab_addcomp"))
-	{
-		for (nuke::TypeInfo* ti : nuke::Registry_All())
-		{
-			if (!ti->create || ti->base != "Component")
-				continue;
-			if (ti->name == "PostProcess" && !a->GetComponent<nuke::Camera>())
-				continue;
-			if (ImGui::MenuItem(ti->name.c_str()))
-			{
-				a->AddComponent((nuke::Component*)ti->create());
-				edited = true;
-			}
-		}
-		ImGui::EndPopup();
-	}
+		w.wantAddComp = true;
 	return edited;
 }
 
@@ -2185,6 +2202,30 @@ void EditorUI::winAssetEditors()
 {
 	aeFocused = -1;   // recomputed below; EditorUI::Undo/Redo route by it
 	NukeUI::DocDetachDefault(detachAssetEditors);
+
+	// NUKE_AE_PLAY=1: start the first prefab editor's anim preview after boot (probe runs).
+	{
+		static int aePlayDelay = -2;
+		if (aePlayDelay == -2)
+		{
+			const char* e = std::getenv("NUKE_AE_PLAY");
+			aePlayDelay = (e && *e == '1') ? 240 : -1;
+		}
+		if (aePlayDelay > 0)
+		{
+			bool ready = false;   // hold the countdown until a prefab window is actually loaded
+			for (AssetEditorWin& w : assetEds)
+				if (w.ext == ".nuprefab" && w.prefabRoot) { ready = true; break; }
+			if (ready && --aePlayDelay == 0)
+				for (AssetEditorWin& w : assetEds)
+					if (w.ext == ".nuprefab" && w.prefabRoot && !w.animPlay)
+					{
+						ToggleAnimPreview(w);
+						std::cout << "[AssetEditor]\tNUKE_AE_PLAY: preview started for " << w.path << std::endl;
+						break;
+					}
+		}
+	}
 
 	// Tear-off (D3D fallback only; native viewports let imgui detach): dragging a title bar
 	// past the main-window edge hands the drag to a host OS window. Re-dock lands in HostDockDrop.
@@ -2936,6 +2977,22 @@ void EditorUI::DrawAssetEditorBody(int i)
 					ImGui::EndChild();
 				}
 				ImGui::EndChild();
+
+				// Add Component popup, parented to the EDITOR WINDOW (not a nested child):
+				// submenus of a child-parented popup close before the click lands.
+				if (w.wantAddComp) { ImGui::OpenPopup("prefab_addcomp"); w.wantAddComp = false; }
+				if (ImGui::BeginPopup("prefab_addcomp"))
+				{
+					Atom* psel = FindInSubtree(w.prefabRoot, w.prefabSelId);
+					if (!psel) ImGui::CloseCurrentPopup();
+					else if (nuke::TypeInfo* picked = DrawAddComponentMenu(psel))
+					{
+						psel->AddComponent((nuke::Component*)picked->create());
+						w.dirty = true; w.editedNow = true;
+						ImGui::CloseCurrentPopup();
+					}
+					ImGui::EndPopup();
+				}
 			}
 			else if (isAudio)   // transport on the Preview bus, never game-paused
 			{

@@ -410,6 +410,71 @@ bool EditorUI::AssetPicker(const char* label, std::string& guid, const std::stri
 	return changed;
 }
 
+// Body of an open "add component" popup: a search box, then either a flat filtered list
+// (typing) or cascading category submenus (browsing). Shared by the inspector and the
+// prefab/asset editors so the menu looks the same everywhere.
+nuke::TypeInfo* EditorUI::DrawAddComponentMenu(nuke::Atom* target)
+{
+	static char compSearch[64] = "";
+	if (ImGui::IsWindowAppearing()) { compSearch[0] = 0; ImGui::SetKeyboardFocusHere(); }
+	ImGui::SetNextItemWidth(240.0f);
+	ImGui::InputTextWithHint("##compsearch", "Search components...", compSearch, sizeof(compSearch));
+
+	std::vector<nuke::TypeInfo*> comps;
+	for (nuke::TypeInfo* ti : nuke::Registry_All())
+	{
+		if (!ti->create || !nuke::Registry_IsComponentType(ti)) continue;
+		// PostProcess is a per-camera effect — only offer it on an atom that has a Camera.
+		if (ti->name == "PostProcess" && (!target || !target->GetComponent<nuke::Camera>())) continue;
+		comps.push_back(ti);
+	}
+	std::sort(comps.begin(), comps.end(),
+	          [](nuke::TypeInfo* a, nuke::TypeInfo* b) { return a->name < b->name; });
+	auto lc = [](std::string s) { for (char& c : s) c = (char)std::tolower((unsigned char)c); return s; };
+	const std::string needle = lc(compSearch);
+	auto matches = [&](nuke::TypeInfo* ti) { return needle.empty() || lc(ti->name).find(needle) != std::string::npos; };
+
+	nuke::TypeInfo* picked = nullptr;
+	if (!needle.empty())
+	{
+		// searching: a flat filtered list (height-capped scroll); Enter = first hit
+		const float listH = std::min(420.0f, ImGui::GetIO().DisplaySize.y * 0.5f);
+		ImGui::BeginChild("##complist", ImVec2(240.0f, listH), false);
+		nuke::TypeInfo* first = nullptr;
+		for (nuke::TypeInfo* ti : comps)
+		{
+			if (!matches(ti)) continue;
+			if (!first) first = ti;
+			if (ImGui::Selectable(ti->name.c_str())) picked = ti;
+		}
+		if (!picked && first && ImGui::IsKeyPressed(ImGuiKey_Enter)) picked = first;
+		ImGui::EndChild();
+	}
+	else
+	{
+		// browsing: CASCADING category submenus ("Other" always last), like the "+" menu
+		ImGui::Separator();
+		std::vector<std::string> cats;
+		for (nuke::TypeInfo* ti : comps)
+		{
+			std::string c = ti->category.empty() ? "Other" : ti->category;
+			if (std::find(cats.begin(), cats.end(), c) == cats.end()) cats.push_back(c);
+		}
+		std::sort(cats.begin(), cats.end());
+		auto other = std::find(cats.begin(), cats.end(), "Other");
+		if (other != cats.end()) { cats.erase(other); cats.push_back("Other"); }
+		for (const std::string& cat : cats)
+		{
+			if (!ImGui::BeginMenu(cat.c_str())) continue;
+			for (nuke::TypeInfo* ti : comps)
+				if ((ti->category.empty() ? std::string("Other") : ti->category) == cat)
+					if (ImGui::MenuItem(ti->name.c_str())) picked = ti;
+			ImGui::EndMenu();
+		}
+	}
+	return picked;
+}
+
 // Fills inspectorOverrides: extra type-specific UI drawn on top of the generic reflected fields.
 void EditorUI::RegisterInspectorOverrides()
 {
@@ -2189,63 +2254,7 @@ void EditorUI::winInspector()
 			ImGui::OpenPopup("addcomp");
 		if (ImGui::BeginPopup("addcomp"))
 		{
-			static char compSearch[64] = "";
-			if (ImGui::IsWindowAppearing()) { compSearch[0] = 0; ImGui::SetKeyboardFocusHere(); }
-			ImGui::SetNextItemWidth(240.0f);
-			ImGui::InputTextWithHint("##compsearch", "Search components...", compSearch, sizeof(compSearch));
-
-			std::vector<nuke::TypeInfo*> comps;
-			for (nuke::TypeInfo* ti : nuke::Registry_All())
-			{
-				if (!ti->create || !nuke::Registry_IsComponentType(ti)) continue;
-				// PostProcess is a per-camera effect — only offer it on an atom that has a Camera.
-				if (ti->name == "PostProcess" && !sltd->GetComponent<nuke::Camera>()) continue;
-				comps.push_back(ti);
-			}
-			std::sort(comps.begin(), comps.end(),
-			          [](nuke::TypeInfo* a, nuke::TypeInfo* b) { return a->name < b->name; });
-			auto lc = [](std::string s) { for (char& c : s) c = (char)std::tolower((unsigned char)c); return s; };
-			const std::string needle = lc(compSearch);
-			auto matches = [&](nuke::TypeInfo* ti) { return needle.empty() || lc(ti->name).find(needle) != std::string::npos; };
-
-			nuke::TypeInfo* picked = nullptr;
-			if (!needle.empty())
-			{
-				// searching: a flat filtered list (height-capped scroll); Enter = first hit
-				const float listH = std::min(420.0f, ImGui::GetIO().DisplaySize.y * 0.5f);
-				ImGui::BeginChild("##complist", ImVec2(240.0f, listH), false);
-				nuke::TypeInfo* first = nullptr;
-				for (nuke::TypeInfo* ti : comps)
-				{
-					if (!matches(ti)) continue;
-					if (!first) first = ti;
-					if (ImGui::Selectable(ti->name.c_str())) picked = ti;
-				}
-				if (!picked && first && ImGui::IsKeyPressed(ImGuiKey_Enter)) picked = first;
-				ImGui::EndChild();
-			}
-			else
-			{
-				// browsing: CASCADING category submenus ("Other" always last), like the "+" menu
-				ImGui::Separator();
-				std::vector<std::string> cats;
-				for (nuke::TypeInfo* ti : comps)
-				{
-					std::string c = ti->category.empty() ? "Other" : ti->category;
-					if (std::find(cats.begin(), cats.end(), c) == cats.end()) cats.push_back(c);
-				}
-				std::sort(cats.begin(), cats.end());
-				auto other = std::find(cats.begin(), cats.end(), "Other");
-				if (other != cats.end()) { cats.erase(other); cats.push_back("Other"); }
-				for (const std::string& cat : cats)
-				{
-					if (!ImGui::BeginMenu(cat.c_str())) continue;
-					for (nuke::TypeInfo* ti : comps)
-						if ((ti->category.empty() ? std::string("Other") : ti->category) == cat)
-							if (ImGui::MenuItem(ti->name.c_str())) picked = ti;
-					ImGui::EndMenu();
-				}
-			}
+			nuke::TypeInfo* picked = DrawAddComponentMenu(sltd);
 			if (picked)
 			{
 				sltd->AddComponent((nuke::Component*)picked->create());
