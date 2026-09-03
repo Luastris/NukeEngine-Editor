@@ -151,10 +151,7 @@ Atom* EditorUI::SpawnPrefab(const std::string& path)
 {
 	if (Atom* a = nuke::LoadPrefab(path))
 	{
-		AppInstance* app = AppInstance::GetSingleton();
-		app->currentWorld->Add(a);
-		app->selectedInHieararchy = a;
-		RecordAdd(a);
+		PlaceSpawned(a);   // the live world, or the prefab editor's world (a NESTED prefab)
 		cout << "[editor]\tinstantiated prefab " << path << endl;
 		return a;
 	}
@@ -779,7 +776,7 @@ Atom* EditorUI::DropAsset(const std::string& path)
 	std::string ext = bfs::path(path).extension().string();
 	if      (ext == ".nuprefab") return SpawnPrefab(path);
 	else if (ext == ".numesh")   return SpawnMeshAsset(path);
-	else if (ext == ".nuworld")  { OpenWorldFromBrowser(path); return nullptr; }
+	else if (ext == ".nuworld")  { if (!editTarget.world) OpenWorldFromBrowser(path); return nullptr; }   // never into a prefab
 	return nullptr;
 }
 
@@ -839,6 +836,12 @@ void EditorUI::DropAssetOnAtom(Atom* a, const std::string& path)
 	}
 
 	if (!changed) return;
+	if (AssetEditorWin* w = editTarget.win)   // prefab editor: its snapshot undo owns the edit
+	{
+		w->prefabSelId = (long)a->id.id;
+		w->dirty = true; w->editedNow = true;
+		return;
+	}
 	AppInstance::GetSingleton()->selectedInHieararchy = a;
 	std::string after = nuke::SaveAtomToString(a);
 	World* w = AppInstance::GetSingleton()->currentWorld;
@@ -860,10 +863,7 @@ Atom* EditorUI::SpawnMeshAsset(const std::string& path)
 	MeshRenderer* mr = new MeshRenderer();
 	atom->AddComponent(mr);
 	mr->meshGuid = m->guid; mr->mesh = m;
-	AppInstance::GetSingleton()->currentWorld->Add(atom);
-	AppInstance::GetSingleton()->selectedInHieararchy = atom;
-	RecordAdd(atom);
-	return atom;
+	return PlaceSpawned(atom);
 }
 
 void EditorUI::CreateFolderAsset(const std::string& folder)

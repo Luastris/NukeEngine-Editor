@@ -9,6 +9,7 @@
 #include <API/Model/Canvas.h>
 #include <API/Model/Decal.h>
 #include <API/Model/Jobs.h>
+#include <API/Model/Prefab.h>          // CloneAtomFromString (paste into the edit target)
 #include <interface/AtomCreators.h>   // registered atom templates for the "+" menu
 #include <reflect/Reflect.h>          // Registry_All: creator components by type name
 #include <interface/EditorHooks.h>    // module-registered view toggles in the snap popup
@@ -64,12 +65,119 @@ Vector3 EditorUI::SpawnPos()
 }
 Atom* EditorUI::FinishSpawn(Atom* atom)
 {
+	// Inside a prefab the new atom sits at its parent's origin; the live world spawns ahead of the camera.
+	atom->GetTransform().position = editTarget.world ? Vector3(0, 0, 0) : SpawnPos();
+	return PlaceSpawned(atom);
+}
+
+World* EditorUI::TargetWorld()
+{
+	return editTarget.world ? editTarget.world : AppInstance::GetSingleton()->currentWorld;
+}
+
+Atom* EditorUI::PlaceSpawned(Atom* atom)
+{
+	if (!atom) return nullptr;
+	if (editTarget.world)
+	{
+		editTarget.world->Add(atom);
+		if (editTarget.parent) editTarget.world->Reparent(atom, editTarget.parent);
+		if (AssetEditorWin* w = editTarget.win)
+		{
+			w->prefabSelId = (long)atom->id.id;
+			w->dirty = true; w->editedNow = true;   // the window's snapshot undo picks it up
+		}
+		return atom;
+	}
 	AppInstance* app = AppInstance::GetSingleton();
-	atom->GetTransform().position = SpawnPos();
 	app->currentWorld->Add(atom);
 	app->selectedInHieararchy = atom;
 	RecordAdd(atom);
 	return atom;
+}
+
+void EditorUI::PasteToTarget()
+{
+	const char* clip = ImGui::GetClipboardText();
+	if (!clip || !strstr(clip, "\"nukeClipboard\"")) return;
+	json j = json::parse(clip, nullptr, false);
+	if (j.is_discarded()) return;
+	const std::string kind = j.value("nukeClipboard", std::string());
+	if (kind == "atom" && j.contains("atom"))
+		PlaceSpawned(CloneAtomFromString(j["atom"].dump()));
+	else if (kind == "atoms" && j.contains("atoms"))
+		for (const auto& item : j["atoms"]) PlaceSpawned(CloneAtomFromString(item.dump()));
+}
+
+// One registered atom template -> a new atom with its components created by type name.
+static void SpawnFromCreator(EditorUI* ui, const nuke::AtomCreator& ac)
+{
+	Atom* a = new Atom(ac.label.c_str());
+	for (const std::string& tn : ac.components)
+	{
+		bool found = false;
+		for (nuke::TypeInfo* ti : nuke::Registry_All())
+			if (ti->name == tn && ti->create && nuke::Registry_IsComponentType(ti))
+			{ a->AddComponent((nuke::Component*)ti->create()); found = true; break; }
+		if (!found)
+			std::cout << "[editor]		atom creator '" << ac.label << "': component type '"
+			          << tn << "' is not registered (module not loaded?)" << std::endl;
+	}
+	ui->FinishSpawn(a);
+}
+
+// The Create menu body, shared by the toolbar "+" and the prefab editor. The chosen item
+// comes back as an action so callers can run it now (toolbar) or defer it past a tree walk.
+std::function<void()> EditorUI::CreateMenuItems()
+{
+	std::function<void()> act;
+	if (ImGui::MenuItem(ICON_LC_SQUARE_DASHED " Empty"))  act = [this]{ SpawnEmpty(); };
+	if (ImGui::MenuItem(ICON_LC_FOLDER " Folder"))
+		act = [this]{ if (editTarget.world) { Atom* f = new Atom("Folder"); f->folder = true; FinishSpawn(f); } else CreateFolderAtom(nullptr); };
+	if (ImGui::MenuItem(ICON_LC_BOX    " Cube"))   act = [this]{ SpawnPrimitive("Cube",   "builtin:cube"); };
+	if (ImGui::MenuItem(ICON_LC_CIRCLE " Sphere")) act = [this]{ SpawnPrimitive("Sphere", "builtin:sphere"); };
+	if (ImGui::MenuItem(ICON_LC_SQUARE " Plane"))  act = [this]{ SpawnPrimitive("Plane",  "builtin:plane"); };
+	if (ImGui::MenuItem(ICON_LC_CYLINDER " Cylinder")) act = [this]{ SpawnPrimitive("Cylinder", "builtin:cylinder"); };
+	if (ImGui::MenuItem(ICON_LC_PILL     " Capsule"))  act = [this]{ SpawnPrimitive("Capsule",  "builtin:capsule"); };
+	if (ImGui::MenuItem(ICON_LC_IMAGE    " Sprite"))
+		act = [this]{ Atom* atom = new Atom("Sprite"); atom->AddComponent(new Sprite()); FinishSpawn(atom); };
+	if (ImGui::MenuItem(ICON_LC_FRAME    " Canvas"))
+		act = [this]{ Atom* atom = new Atom("Canvas"); atom->AddComponent(new Canvas()); FinishSpawn(atom); };
+	if (ImGui::MenuItem(ICON_LC_STICKER  " Decal"))
+		act = [this]{ Atom* atom = new Atom("Decal"); atom->AddComponent(new Decal()); FinishSpawn(atom); };
+	if (ImGui::MenuItem(ICON_LC_VIDEO  " Camera")) act = [this]{ SpawnCamera(); };
+	if (ImGui::BeginMenu(ICON_LC_LIGHTBULB " Light"))
+	{
+		if (ImGui::MenuItem(ICON_LC_SUN       " Directional")) act = [this]{ SpawnLight(0, "Directional Light"); };
+		if (ImGui::MenuItem(ICON_LC_LIGHTBULB " Point"))       act = [this]{ SpawnLight(1, "Point Light"); };
+		if (ImGui::MenuItem(ICON_LC_SPOTLIGHT " Spot"))        act = [this]{ SpawnLight(2, "Spot Light"); };
+		ImGui::EndMenu();
+	}
+	if (ImGui::MenuItem(ICON_LC_CLOUD_SUN " Environment")) act = [this]{ SpawnEnvironment(); };
+	if (ImGui::MenuItem(ICON_LC_GLOBE " Reflection Probe")) act = [this]{ SpawnReflectionProbe(); };
+
+	// Registered atom templates (AtomCreators): components created via reflection by
+	// type name, grouped by category and appended after the built-ins.
+	std::vector<std::string> cats;
+	for (const nuke::AtomCreator& ac : nuke::AtomCreators())
+		if (std::find(cats.begin(), cats.end(), ac.category) == cats.end()) cats.push_back(ac.category);
+	for (const std::string& cat : cats)
+	{
+		if (cat.empty())
+		{
+			for (const nuke::AtomCreator& ac : nuke::AtomCreators())
+				if (ac.category.empty() && ImGui::MenuItem((ac.icon + (ac.icon.empty() ? "" : " ") + ac.label).c_str()))
+					act = [this, ac]{ SpawnFromCreator(this, ac); };
+		}
+		else if (ImGui::BeginMenu(cat.c_str()))
+		{
+			for (const nuke::AtomCreator& ac : nuke::AtomCreators())
+				if (ac.category == cat && ImGui::MenuItem((ac.icon + (ac.icon.empty() ? "" : " ") + ac.label).c_str()))
+					act = [this, ac]{ SpawnFromCreator(this, ac); };
+			ImGui::EndMenu();
+		}
+	}
+	return act;
 }
 
 void EditorUI::SpawnEmpty()
@@ -147,80 +255,7 @@ void EditorUI::Toolbar()
 		if (ToolBtn(ICON_LC_PLUS,          "Create", false,                       bw)) ImGui::OpenPopup("##nuke-create");
 		if (ImGui::BeginPopup("##nuke-create"))
 		{
-			if (ImGui::MenuItem(ICON_LC_SQUARE_DASHED " Empty"))  SpawnEmpty();
-			if (ImGui::MenuItem(ICON_LC_FOLDER " Folder"))        CreateFolderAtom(nullptr);
-			if (ImGui::MenuItem(ICON_LC_BOX    " Cube"))   SpawnPrimitive("Cube",   "builtin:cube");
-			if (ImGui::MenuItem(ICON_LC_CIRCLE " Sphere")) SpawnPrimitive("Sphere", "builtin:sphere");
-			if (ImGui::MenuItem(ICON_LC_SQUARE " Plane"))  SpawnPrimitive("Plane",  "builtin:plane");
-			if (ImGui::MenuItem(ICON_LC_CYLINDER " Cylinder")) SpawnPrimitive("Cylinder", "builtin:cylinder");
-			if (ImGui::MenuItem(ICON_LC_PILL     " Capsule"))  SpawnPrimitive("Capsule",  "builtin:capsule");
-			if (ImGui::MenuItem(ICON_LC_IMAGE    " Sprite"))
-			{
-				Atom* atom = new Atom("Sprite");
-				atom->AddComponent(new Sprite());
-				FinishSpawn(atom);
-			}
-			if (ImGui::MenuItem(ICON_LC_FRAME    " Canvas"))
-			{
-				Atom* atom = new Atom("Canvas");
-				atom->AddComponent(new Canvas());
-				FinishSpawn(atom);
-			}
-			if (ImGui::MenuItem(ICON_LC_STICKER  " Decal"))
-			{
-				Atom* atom = new Atom("Decal");
-				atom->AddComponent(new Decal());
-				FinishSpawn(atom);
-			}
-			if (ImGui::MenuItem(ICON_LC_VIDEO  " Camera")) SpawnCamera();
-			if (ImGui::BeginMenu(ICON_LC_LIGHTBULB " Light"))
-			{
-				if (ImGui::MenuItem(ICON_LC_SUN       " Directional")) SpawnLight(0, "Directional Light");
-				if (ImGui::MenuItem(ICON_LC_LIGHTBULB " Point"))       SpawnLight(1, "Point Light");
-				if (ImGui::MenuItem(ICON_LC_SPOTLIGHT " Spot"))        SpawnLight(2, "Spot Light");
-				ImGui::EndMenu();
-			}
-			if (ImGui::MenuItem(ICON_LC_CLOUD_SUN " Environment")) SpawnEnvironment();
-			if (ImGui::MenuItem(ICON_LC_GLOBE " Reflection Probe")) SpawnReflectionProbe();
-
-			// Registered atom templates (AtomCreators): components created via reflection by
-			// type name, grouped by category and appended after the built-ins.
-			{
-				std::vector<std::string> cats;
-				for (const nuke::AtomCreator& ac : nuke::AtomCreators())
-					if (std::find(cats.begin(), cats.end(), ac.category) == cats.end()) cats.push_back(ac.category);
-				auto spawnFromCreator = [&](const nuke::AtomCreator& ac)
-				{
-					Atom* a = new Atom(ac.label.c_str());
-					for (const std::string& tn : ac.components)
-					{
-						bool found = false;
-						for (nuke::TypeInfo* ti : nuke::Registry_All())
-							if (ti->name == tn && ti->create && nuke::Registry_IsComponentType(ti))
-							{ a->AddComponent((nuke::Component*)ti->create()); found = true; break; }
-						if (!found)
-							std::cout << "[editor]\t\tatom creator '" << ac.label << "': component type '"
-							          << tn << "' is not registered (module not loaded?)" << std::endl;
-					}
-					FinishSpawn(a);
-				};
-				for (const std::string& cat : cats)
-				{
-					if (cat.empty())
-					{
-						for (const nuke::AtomCreator& ac : nuke::AtomCreators())
-							if (ac.category.empty() && ImGui::MenuItem((ac.icon + (ac.icon.empty() ? "" : " ") + ac.label).c_str()))
-								spawnFromCreator(ac);
-					}
-					else if (ImGui::BeginMenu(cat.c_str()))
-					{
-						for (const nuke::AtomCreator& ac : nuke::AtomCreators())
-							if (ac.category == cat && ImGui::MenuItem((ac.icon + (ac.icon.empty() ? "" : " ") + ac.label).c_str()))
-								spawnFromCreator(ac);
-						ImGui::EndMenu();
-					}
-				}
-			}
+			if (std::function<void()> act = CreateMenuItems()) act();
 			ImGui::EndPopup();
 		}
 		// World/Local space toggle for the gizmo (also hotkey X).
@@ -617,22 +652,35 @@ void EditorUI::Draw()
 				}
 		// NUKE_ASSET_SHOT=<asset path>|<png>: open the asset's editor window, let it settle,
 		// screenshot the editor (probe runs: verify skeleton/ragdoll/mesh previews visually).
-		static int ashotDelay = -2, ashotWait = 0;
+		// TIME-based delays: frame counts melt away on a fast editor (500 fps = the window
+		// never even opened before the shot).
+		static int ashotState = -2;   // -2 unresolved, -1 off, 0 waiting-to-open, 1 waiting-to-shoot, 2 done
+		static double ashotAt = 0.0;
 		static std::string ashotPath, ashotPng;
-		if (ashotDelay == -2)
+		if (ashotState == -2)
 		{
 			const char* e = std::getenv("NUKE_ASSET_SHOT");
-			ashotDelay = (e && e[0]) ? 200 : -1;
-			if (ashotDelay > 0)
+			ashotState = (e && e[0]) ? 0 : -1;
+			if (ashotState == 0)
 			{
 				std::string s = e;
 				const size_t bar = s.find('|');
 				ashotPath = s.substr(0, bar == std::string::npos ? s.size() : bar);
 				ashotPng = bar == std::string::npos ? "asset_shot.png" : s.substr(bar + 1);
+				ashotAt = nuke::Time::getSingleton()->elapsed + 3.0;
 			}
 		}
-		if (ashotDelay > 0 && --ashotDelay == 0) { OpenAssetEditor(ashotPath); ashotWait = 180; }
-		if (ashotWait > 0 && --ashotWait == 0)
+		if (ashotState == 0 && nuke::Time::getSingleton()->elapsed >= ashotAt)
+		{
+			// Docked, not detached: a native asset-editor window never lands in the screenshot.
+			const bool wasDetach = detachAssetEditors;
+			detachAssetEditors = false;
+			OpenAssetEditor(ashotPath);
+			detachAssetEditors = wasDetach;
+			ashotState = 1;
+			ashotAt = nuke::Time::getSingleton()->elapsed + 8.0;   // preview load + settle
+		}
+		if (ashotState == 1 && nuke::Time::getSingleton()->elapsed >= ashotAt && (ashotState = 2) == 2)
 		{
 			nuke::Game::Screenshot(ashotPng);
 			std::cout << "[AssetShot]\twrote " << ashotPng << std::endl;

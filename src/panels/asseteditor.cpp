@@ -649,21 +649,6 @@ static bool SubtreeHasAnimator(nuke::Atom* a)
 	return false;
 }
 
-static void TickAnimators(nuke::Atom* a)
-{
-	if (!a) return;
-	if (nuke::Animator* an = a->GetComponent<nuke::Animator>())
-		if (an->enabled) an->Update();
-	// Spring chains are physics and self-drive from their own Update (an idle Animator
-	// commits nothing) — the mini-PIE must tick them like the world would. Cloth writes its
-	// render sheet from Update (interpolated between fixed steps): without this tick the sim
-	// runs but the skirt renders frozen in bind pose.
-	for (nuke::Component* c : a->components)
-		if (c && c->enabled && (std::strcmp(c->name, "SpringBones") == 0
-		                     || std::strcmp(c->name, "Cloth") == 0)) c->Update();
-	for (nuke::Atom* ch : a->children) TickAnimators(ch);
-}
-
 void EditorUI::TickAnimPreview(AssetEditorWin& w)
 {
 	if (!w.prefabRoot) return;
@@ -671,8 +656,15 @@ void EditorUI::TickAnimPreview(AssetEditorWin& w)
 	const auto t0 = boost::chrono::steady_clock::now();
 	double animMs = 0.0, physMs = 0.0;
 	int steps = 0;
+	// SANDBOX: the preview world steps through the real per-world tick (every component,
+	// the late passes, deferred destruction) as the CURRENT world — whatever works in a
+	// world works in the prefab. App globals (input, time, events) stay with the game.
 	nuke::PhysicsSceneScope ps(w.pv ? w.pv->phys : nullptr);
-	TickAnimators(w.prefabRoot);
+	if (w.pv && w.pv->world)
+	{
+		nuke::WorldScope ws(w.pv->world);
+		w.pv->world->Tick();
+	}
 	if (prfDbg) animMs = boost::chrono::duration_cast<boost::chrono::duration<double, boost::milli>>(
 		boost::chrono::steady_clock::now() - t0).count();
 	// Physics rides the same play toggle, stepping the window's PRIVATE sandbox at the
@@ -2048,6 +2040,58 @@ void EditorUI::DrawSpriteSlicer(AssetEditorWin& w)
 	ImGui::EndChild();
 }
 
+// Ray from the preview camera through a screen point -> the prefab atom under it (null when
+// nothing of THIS prefab is hit; the pick can return scene furniture).
+static nuke::Atom* PrefabPickAt(EditorUI::AssetEditorWin& w, ImVec2 mp)
+{
+	if (!w.pv || !w.pv->cam || !w.pv->cam->transform || !w.pv->world) return nullptr;
+	const ImVec2 rmin = w.pv->rectMin, rsz = w.pv->rectSize;
+	if (rsz.x <= 1.0f || rsz.y <= 1.0f) return nullptr;
+	nuke::Transform* ct = w.pv->cam->transform;
+	const float ndcx = ((mp.x - rmin.x) / rsz.x) * 2.0f - 1.0f;
+	const float ndcy = 1.0f - ((mp.y - rmin.y) / rsz.y) * 2.0f;
+	nuke::Vector3 o = ct->globalPosition();
+	nuke::Vector3 f = ct->direction(), rr = ct->right(), uu = ct->up();
+	const float aspect = rsz.x / rsz.y;
+	const float thf = tanf((float)w.pv->cam->fov * 0.5f * 0.01745329252f);
+	nuke::Vector3 dir(f.x + ndcx * thf * aspect * rr.x + ndcy * thf * uu.x,
+	                  f.y + ndcx * thf * aspect * rr.y + ndcy * thf * uu.y,
+	                  f.z + ndcx * thf * aspect * rr.z + ndcy * thf * uu.z);
+	nuke::Atom* hit = w.pv->world->Pick(o, dir);
+	return (hit && FindInSubtree(w.prefabRoot, (long)hit->id.id)) ? hit : nullptr;
+}
+
+// Browser asset dropped on the prefab's 3D view: material/texture onto the atom under the
+// cursor, a prefab/mesh spawned under the root AT the aimed point (same rules as the main
+// viewport). Call right after the preview image was submitted (it is the drop item).
+void EditorUI::PrefabViewDrop(AssetEditorWin& w)
+{
+	if (!ImGui::BeginDragDropTarget()) return;
+	if (const ImGuiPayload* dp = ImGui::AcceptDragDropPayload("NUKE_ASSET"))
+	{
+		std::string dpath((const char*)dp->Data), dext;
+		const size_t dot = dpath.find_last_of('.');
+		if (dot != std::string::npos) dext = dpath.substr(dot);
+		std::transform(dext.begin(), dext.end(), dext.begin(), ::tolower);
+		const ImVec2 mp = ImGui::GetMousePos();
+		if (dext == ".numat" || dext == ".nutex")
+		{
+			if (Atom* hit = PrefabPickAt(w, mp))
+			{
+				w.pendingAssetDrop = dpath; w.pendingAssetParentId = (long)hit->id.id; w.pendingAssetHasPos = false;
+			}
+		}
+		else if (dext == ".nuprefab" || dext == ".numesh")
+		{
+			w.pendingAssetDrop = dpath;
+			w.pendingAssetParentId = (long)w.prefabRoot->id.id;
+			w.pendingAssetHasPos = true;
+			w.pendingAssetPos = DropPointIn(w.pv->world, w.pv->cam, w.pv->rectMin, w.pv->rectSize, mp);
+		}
+	}
+	ImGui::EndDragDropTarget();
+}
+
 void EditorUI::DrawPrefabTree(AssetEditorWin& w, Atom* a)
 {
 	if (!a) return;
@@ -2086,14 +2130,66 @@ void EditorUI::DrawPrefabTree(AssetEditorWin& w, Atom* a)
 				w.dirty = true; w.editedNow = true;
 			}
 		}
+		// Browser asset onto a row: prefab/mesh become a CHILD (a nested prefab), material/
+		// texture apply to the atom. Deferred past the walk like every structural op.
+		if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("NUKE_ASSET"))
+		{
+			w.pendingAssetDrop = std::string((const char*)p->Data);
+			w.pendingAssetParentId = (long)a->id.id;
+			w.pendingAssetHasPos = false;
+		}
 		ImGui::EndDragDropTarget();
 	}
 
-	// Structure ops are deferred: mutating the atom lists mid-walk corrupts them.
+	// Structure ops are deferred: mutating the atom lists mid-walk corrupts them. Same menu
+	// as the world hierarchy — a prefab is a reusable mini-world, not a read-only rig.
 	if (ImGui::BeginPopupContextItem("##atomctx"))
 	{
-		if (ImGui::MenuItem(ICON_LC_PLUS " Add Child")) w.pendingAddParentId = (long)a->id.id;
-		if (a != w.prefabRoot && ImGui::MenuItem(ICON_LC_TRASH_2 " Delete")) w.pendingDeleteId = (long)a->id.id;
+		const long pid = (long)a->id.id;
+		const bool isRoot = (a == w.prefabRoot);
+		if (ImGui::BeginMenu(ICON_LC_PLUS " Create"))
+		{
+			if (std::function<void()> act = CreateMenuItems())
+				w.pendingOps.push_back([this, pid, act](AssetEditorWin& ww)
+				{
+					EditTargetScope scope(this, { ww.pv->world, FindInSubtree(ww.prefabRoot, pid), &ww });
+					act();
+				});
+			ImGui::EndMenu();
+		}
+		ImGui::Separator();
+		if (ImGui::MenuItem(ICON_LC_COPY " Copy"))
+			ImGui::SetClipboardText((std::string("{\"nukeClipboard\":\"atom\",\"atom\":") + nuke::SaveAtomToString(a) + "}").c_str());
+		if (ImGui::MenuItem(ICON_LC_SCISSORS " Cut", nullptr, false, !isRoot))
+		{
+			ImGui::SetClipboardText((std::string("{\"nukeClipboard\":\"atom\",\"atom\":") + nuke::SaveAtomToString(a) + "}").c_str());
+			w.pendingDeleteId = pid;
+		}
+		if (ImGui::MenuItem(ICON_LC_CLIPBOARD_PASTE " Paste", nullptr, false, AtomClipboardAvailable()))
+			w.pendingOps.push_back([this, pid](AssetEditorWin& ww)
+			{
+				EditTargetScope scope(this, { ww.pv->world, FindInSubtree(ww.prefabRoot, pid), &ww });
+				PasteToTarget();
+			});
+		if (ImGui::MenuItem(ICON_LC_COPY_PLUS " Duplicate", nullptr, false, !isRoot))
+			w.pendingOps.push_back([this, pid](AssetEditorWin& ww)
+			{
+				Atom* src = FindInSubtree(ww.prefabRoot, pid);
+				if (!src || !src->parent) return;
+				EditTargetScope scope(this, { ww.pv->world, src->parent, &ww });
+				PlaceSpawned(nuke::CloneAtomFromString(nuke::SaveAtomToString(src)));
+			});
+		ImGui::Separator();
+		if (ImGui::MenuItem(ICON_LC_FOLDER_PLUS " New Folder"))
+			w.pendingOps.push_back([this, pid](AssetEditorWin& ww)
+			{
+				EditTargetScope scope(this, { ww.pv->world, FindInSubtree(ww.prefabRoot, pid), &ww });
+				Atom* f = new Atom("Folder"); f->folder = true; FinishSpawn(f);
+			});
+		ImGui::Separator();
+		if (ImGui::MenuItem("Enabled", nullptr, a->enabled)) { a->enabled = !a->enabled; w.dirty = true; w.editedNow = true; }
+		ImGui::Separator();
+		if (ImGui::MenuItem(ICON_LC_TRASH_2 " Delete", nullptr, false, !isRoot)) w.pendingDeleteId = pid;
 		ImGui::EndPopup();
 	}
 
@@ -2118,6 +2214,8 @@ static nuke::Atom* FindInSubtree(nuke::Atom* a, long id)
 bool EditorUI::DrawPrefabAtomEditor(AssetEditorWin& w, Atom* a)
 {
 	bool edited = false;
+	// World-bound widgets inside (AtomRef pickers, drops) must see THIS window's preview world.
+	EditTargetScope scope(this, { w.pv ? w.pv->world : nullptr, nullptr, &w });
 	Transform& t = a->GetTransform();
 
 	char nameBuf[128];
@@ -2222,6 +2320,30 @@ void EditorUI::winAssetEditors()
 					{
 						ToggleAnimPreview(w);
 						std::cout << "[AssetEditor]\tNUKE_AE_PLAY: preview started for " << w.path << std::endl;
+						break;
+					}
+		}
+	}
+
+	// NUKE_AE_STOP=<frames>: stop a running prefab preview after N frames of play (the stop
+	// path — snapshot restore, subtree teardown — is where sandbox lifetime bugs surface).
+	{
+		static int aeStopDelay = -2;
+		if (aeStopDelay == -2)
+		{
+			const char* e = std::getenv("NUKE_AE_STOP");
+			aeStopDelay = e ? std::atoi(e) : -1;
+		}
+		if (aeStopDelay > 0)
+		{
+			bool playing = false;
+			for (AssetEditorWin& w : assetEds) if (w.ext == ".nuprefab" && w.animPlay) { playing = true; break; }
+			if (playing && --aeStopDelay == 0)
+				for (AssetEditorWin& w : assetEds)
+					if (w.ext == ".nuprefab" && w.animPlay)
+					{
+						ToggleAnimPreview(w);
+						std::cout << "[AssetEditor]	NUKE_AE_STOP: preview stopped for " << w.path << std::endl;
 						break;
 					}
 		}
@@ -2748,11 +2870,72 @@ void EditorUI::DrawAssetEditorBody(int i)
 					}
 					w.pendingDeleteId = 0;
 				}
+				if (!w.pendingOps.empty())
+				{
+					std::vector<std::function<void(AssetEditorWin&)>> ops;
+					ops.swap(w.pendingOps);
+					nuke::PhysicsSceneScope ps(w.pv ? w.pv->phys : nullptr);   // new colliders join the sandbox
+					for (auto& op : ops) op(w);
+				}
+				if (!w.pendingAssetDrop.empty())
+				{
+					// Browser asset: material/texture onto the target atom, anything else spawns
+					// under it (a prefab dropped here is a NESTED prefab), at the aimed point.
+					Atom* target = FindInSubtree(w.prefabRoot, w.pendingAssetParentId);
+					if (!target) target = w.prefabRoot;
+					std::string dext = bfs::path(w.pendingAssetDrop).extension().string();
+					std::transform(dext.begin(), dext.end(), dext.begin(), ::tolower);
+					nuke::PhysicsSceneScope ps(w.pv ? w.pv->phys : nullptr);
+					EditTargetScope scope(this, { w.pv->world, target, &w });
+					if (dext == ".numat" || dext == ".nutex") DropAssetOnAtom(target, w.pendingAssetDrop);
+					else if (Atom* spawned = DropAsset(w.pendingAssetDrop))
+					{
+						if (w.pendingAssetHasPos)
+						{
+							Transform& st = spawned->GetTransform();
+							st.SetGlobal(w.pendingAssetPos, st.globalRotation(), st.globalScale());
+						}
+					}
+					w.pendingAssetDrop.clear(); w.pendingAssetParentId = 0; w.pendingAssetHasPos = false;
+				}
 
 				// Left: hierarchy tree. Right: gizmo toolbar + 3D view, atom editor below.
 				ImGui::BeginChild("##ptree", ImVec2(240, 0), ImGuiChildFlags_ResizeX | ImGuiChildFlags_Borders,
 				                  ImGuiWindowFlags_HorizontalScrollbar);   // deep rigs overflow to the right
 				DrawPrefabTree(w, w.prefabRoot);
+				// Empty area below the tree = drop target for the prefab root (reparent to the
+				// root, or a browser asset as a root child).
+				{
+					ImVec2 rest = ImGui::GetContentRegionAvail();
+					if (rest.y < 24.0f) rest.y = 24.0f;
+					ImGui::InvisibleButton("##proot", rest);
+					if (ImGui::BeginDragDropTarget())
+					{
+						if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("NUKE_PREFAB_ATOM"))
+						{
+							Atom* dragged = FindInSubtree(w.prefabRoot, *(const long*)p->Data);
+							if (dragged && dragged != w.prefabRoot && dragged->parent != w.prefabRoot)
+							{
+								Transform& mt = dragged->GetTransform();
+								Vector3 wp = mt.globalPosition(); Quaternion wr = mt.globalRotation(); Vector3 ws = mt.globalScale();
+								w.pv->world->Reparent(dragged, w.prefabRoot);
+								mt.SetGlobal(wp, wr, ws);
+								w.dirty = true; w.editedNow = true;
+							}
+						}
+						if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("NUKE_ASSET"))
+						{
+							w.pendingAssetDrop = std::string((const char*)p->Data);
+							w.pendingAssetParentId = (long)w.prefabRoot->id.id;
+							w.pendingAssetHasPos = false;
+						}
+						ImGui::EndDragDropTarget();
+					}
+					// Delete key on the focused tree removes the selected atom (never the root).
+					if (ImGui::IsWindowFocused() && !ImGui::GetIO().WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Delete)
+					    && w.prefabSelId && w.prefabSelId != (long)w.prefabRoot->id.id)
+						w.pendingDeleteId = w.prefabSelId;
+				}
 				ImGui::EndChild();
 				ImGui::SameLine();
 				ImGui::BeginChild("##pright", ImVec2(0, 0), ImGuiChildFlags_None,
@@ -2764,6 +2947,23 @@ void EditorUI::DrawAssetEditorBody(int i)
 					for (const char* ic : { ICON_LC_MOUSE_POINTER, ICON_LC_MOVE, ICON_LC_ROTATE_3D,
 					                        ICON_LC_SCALING, ICON_LC_GLOBE, ICON_LC_AXIS_3D, ICON_LC_PLAY })
 						tbw = std::max(tbw, ImGui::CalcTextSize(ic).x + ImGui::GetStyle().FramePadding.x * 2.0f + 2.0f);
+					// Create: same menu as the main toolbar, landing under the selected atom (or the root).
+					if (ToolBtn(ICON_LC_PLUS, "Create (under the selected atom)", false, tbw)) ImGui::OpenPopup("##pf-create");
+					if (ImGui::BeginPopup("##pf-create"))
+					{
+						if (std::function<void()> act = CreateMenuItems())
+						{
+							const long pid = w.prefabSelId ? w.prefabSelId : (long)w.prefabRoot->id.id;
+							w.pendingOps.push_back([this, pid, act](AssetEditorWin& ww)
+							{
+								Atom* par = FindInSubtree(ww.prefabRoot, pid);
+								EditTargetScope scope(this, { ww.pv->world, par ? par : ww.prefabRoot, &ww });
+								act();
+							});
+						}
+						ImGui::EndPopup();
+					}
+					ImGui::SameLine();
 					if (ToolBtn(ICON_LC_MOUSE_POINTER, "Select (Q)", w.gizmoOp == 0, tbw)) w.gizmoOp = 0; ImGui::SameLine();
 					if (ToolBtn(ICON_LC_MOVE,          "Move (W)",   w.gizmoOp == 1, tbw)) w.gizmoOp = 1; ImGui::SameLine();
 					if (ToolBtn(ICON_LC_ROTATE_3D,     "Rotate (E)", w.gizmoOp == 2, tbw)) w.gizmoOp = 2; ImGui::SameLine();
@@ -2773,7 +2973,7 @@ void EditorUI::DrawAssetEditorBody(int i)
 						w.gizmoWorld = !w.gizmoWorld;
 
 					// Animation preview: play ticks the subtree's Animators, stop restores the snapshot.
-					if (SubtreeHasAnimator(w.prefabRoot))
+					if (true)   // the sandbox simulates any prefab: animators, cloth, springs, pose cloning, physics
 					{
 						ImGui::SameLine();
 						if (ToolBtn(w.animPlay ? ICON_LC_SQUARE : ICON_LC_PLAY,
@@ -2827,10 +3027,9 @@ void EditorUI::DrawAssetEditorBody(int i)
 					if (av.y - edH < 160.0f) edH = std::max(120.0f, av.y * 0.45f);
 					float edW = w.prefabEdW;                              // right-column variant
 					if (av.x - edW < 260.0f) edW = std::max(220.0f, av.x * 0.45f);
-					if (w.prefabEdRight)
-						DrawPreviewImage(*w.pv, ImVec2(av.x - edW - 14.0f, av.y));
-					else
-						DrawPreviewImage(*w.pv, ImVec2(av.x, av.y - edH - 14.0f));
+					if (w.prefabEdRight) DrawPreviewImage(*w.pv, ImVec2(av.x - edW - 14.0f, av.y));
+					else                 DrawPreviewImage(*w.pv, ImVec2(av.x, av.y - edH - 14.0f));
+					PrefabViewDrop(w);   // the image is the drop item: browser assets land in the view
 
 					// Transform gizmo over the 3D view.
 					Atom* sel = FindInSubtree(w.prefabRoot, w.prefabSelId);

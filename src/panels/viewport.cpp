@@ -65,7 +65,7 @@ static bool s_riverGizmoHot = false;
 // The world point under the cursor: the first surface the ray meets, else the ground plane at
 // the camera's focus height. This is where a dropped asset belongs — the drop position IS the
 // user's intent, and "spawn at the origin, then hunt for it" is not a workflow.
-static nuke::Vector3 DropPointAt(nuke::Camera* cam, ImVec2 rmin, ImVec2 sz, ImVec2 mp)
+static nuke::Vector3 DropPointAt(nuke::Camera* cam, ImVec2 rmin, ImVec2 sz, ImVec2 mp, nuke::World* world = nullptr)
 {
 	nuke::Vector3 out(0, 0, 0);
 	if (!cam || !cam->transform || sz.x <= 0.0f || sz.y <= 0.0f) return out;
@@ -94,7 +94,8 @@ static nuke::Vector3 DropPointAt(nuke::Camera* cam, ImVec2 rmin, ImVec2 sz, ImVe
 	if (dl > 1e-9) { dir.x /= dl; dir.y /= dl; dir.z /= dl; }
 
 	float dist = 0.0f;
-	if (nuke::AppInstance::GetSingleton()->currentWorld->PickDist(o, dir, dist) && dist > 0.0f)
+	if (!world) world = nuke::AppInstance::GetSingleton()->currentWorld;
+	if (world->PickDist(o, dir, dist) && dist > 0.0f)
 		return nuke::Vector3(o.x + dir.x * dist, o.y + dir.y * dist, o.z + dir.z * dist);
 	// Nothing under the cursor: fall to y = 0, or 10 m ahead when the ray never gets there.
 	if (std::fabs(dir.y) > 1e-4 && (-o.y / dir.y) > 0.0)
@@ -103,6 +104,11 @@ static nuke::Vector3 DropPointAt(nuke::Camera* cam, ImVec2 rmin, ImVec2 sz, ImVe
 		return nuke::Vector3(o.x + dir.x * t0, 0.0, o.z + dir.z * t0);
 	}
 	return nuke::Vector3(o.x + dir.x * 10.0, o.y + dir.y * 10.0, o.z + dir.z * 10.0);
+}
+
+nuke::Vector3 EditorUI::DropPointIn(World* world, Camera* cam, ImVec2 rmin, ImVec2 sz, ImVec2 mp)
+{
+	return DropPointAt(cam, rmin, sz, mp, world);
 }
 
 // Landing marker drawn while the payload hovers: a ground cross + a small box, so the drop is

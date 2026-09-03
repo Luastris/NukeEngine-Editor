@@ -717,6 +717,13 @@ public:
 		float prSpeed = 1.0f;
 		Atom*     prefabRoot = nullptr;     // .nuprefab: loaded subtree (lives in pv->world)
 		long      prefabSelId = 0;          // selected atom in the prefab tree (stable id)
+		// Deferred structural ops (Create/paste/duplicate/folder): the tree walk must finish
+		// before the atom lists mutate. Asset drops (rows, root area, 3D view) queue here too.
+		std::vector<std::function<void(AssetEditorWin&)>> pendingOps;
+		std::string pendingAssetDrop;       // browser asset path to instantiate / apply
+		long        pendingAssetParentId = 0;
+		bool        pendingAssetHasPos = false;
+		Vector3     pendingAssetPos;
 		float     prefabEdH = 320.0f;       // atom-editor strip height (drag the edge above it)
 		bool      prefabEdRight = true;     // atom editor as a RIGHT column (else the bottom strip)
 		float     prefabEdW = 380.0f;       // right-column width (drag the edge)
@@ -883,6 +890,24 @@ public:
 	bool SearchMatch(const std::string& name);
 	void BrowserTree(const std::string& dir);
 	Atom* SpawnPrefab(const std::string& path);
+	// EDIT TARGET: where creation, paste and asset drops land. Default (null world) = the live
+	// world with the global undo stack; the prefab editor scopes its Create menu, drops and
+	// paste to its preview world, so every spawn path (built-ins, AtomCreators, browser
+	// assets) works inside a prefab as-is and lands in that window's snapshot undo.
+	struct EditTarget { World* world = nullptr; Atom* parent = nullptr; AssetEditorWin* win = nullptr; };
+	EditTarget editTarget;
+	struct EditTargetScope
+	{
+		EditorUI* ui; EditTarget saved;
+		EditTargetScope(EditorUI* u, const EditTarget& t) : ui(u), saved(u->editTarget) { u->editTarget = t; }
+		~EditTargetScope() { ui->editTarget = saved; }
+	};
+	World* TargetWorld();
+	Atom*  PlaceSpawned(Atom* atom);               // add to the target (+parent), select, record / mark dirty
+	std::function<void()> CreateMenuItems();       // the Create menu body; returns the picked action (empty = none)
+	void   PasteToTarget();                        // clipboard envelope (atom / atoms) into the edit target
+	Vector3 DropPointIn(World* world, Camera* cam, ImVec2 rmin, ImVec2 sz, ImVec2 mp);   // drop landing point
+	void   PrefabViewDrop(AssetEditorWin& w);      // browser asset dropped on the prefab 3D view
 	void StartRename(const std::string& path);
 	void EntryContextMenu(const std::string& path, bool isDir);
 	void DrawRenamePopup();

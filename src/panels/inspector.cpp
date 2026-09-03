@@ -1647,13 +1647,18 @@ bool EditorUI::DrawFields(void* obj, nuke::TypeInfo* ti)
 		}
 		case nuke::FT::AtomRef:
 		{
-			// The prop's asset= hint filters the picker (and drops) to atoms carrying that component.
+			// The prop's asset= hint filters the picker (and drops) to atoms carrying that component;
+			// widget="foreign" also drops the owning atom and its ancestors (a self-reference cycle).
 			Atom** slot = (Atom**)a;
+			Atom* owner = (f.widget == "foreign" && nuke::Registry_IsComponentType(ti)) ? ((nuke::Component*)obj)->atom : nullptr;
 			auto passes = [&](Atom* at) -> bool
 			{
-				if (f.asset.empty() || !at) return at != nullptr;
+				if (!at) return false;
+				if (owner)
+					for (Atom* p = owner; p; p = p->parent) if (p == at) return false;
+				if (f.asset.empty()) return true;
 				for (nuke::Component* c : at->components)
-					if (c) if (nuke::TypeInfo* ti = c->GetType()) if (ti->name == f.asset) return true;
+					if (c) if (nuke::TypeInfo* ti2 = c->GetType()) if (ti2->name == f.asset) return true;
 				return false;
 			};
 			const char* cur = *slot ? (*slot)->name.c_str() : "<none>";
@@ -1674,14 +1679,21 @@ bool EditorUI::DrawFields(void* obj, nuke::TypeInfo* ti)
 						walk(at->children);
 					}
 				};
-				walk(AppInstance::GetSingleton()->currentWorld->GetHierarchy());
+				// The EDIT TARGET world: the live world, or the preview world of the prefab
+				// editor this inspector is drawn in (its atoms are the only valid targets there).
+				walk(TargetWorld()->GetHierarchy());
 				ImGui::EndCombo();
 			}
-			if (ImGui::BeginDragDropTarget())   // drop an atom from the hierarchy panel
+			if (ImGui::BeginDragDropTarget())   // drop an atom from the hierarchy panel / the prefab tree
 			{
 				if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("NUKE_ATOM"))
 				{
 					Atom* dropped = *(Atom**)p->Data;
+					if (passes(dropped)) { *slot = dropped; changed = true; }
+				}
+				if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("NUKE_PREFAB_ATOM"))
+				{
+					Atom* dropped = TargetWorld()->GetById(*(const long*)p->Data);
 					if (passes(dropped)) { *slot = dropped; changed = true; }
 				}
 				ImGui::EndDragDropTarget();
