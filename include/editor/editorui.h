@@ -219,6 +219,7 @@ private:
 	// Profiler window (Window menu / clicking the status-bar timings).
 	bool profilerOpen = false, profilerFocus = false, profilerFrozen = false;
 	bool meshCostView = false;   // profiler's mesh-cost overlay (iRender::setDebugView)
+	bool aoView = false;         // viewport AO view (toolbar, next to Wireframe; iRender::setDebugView 2)
 	bool perfOverlay = false;    // frame-time curves drawn over the viewport
 	void ProfilerHistoryTick();  // record this frame's curve samples (call once per frame)
 	void DrawPerfGraph(float x, float y, float w, float h);   // curves + legend at screen pos
@@ -264,6 +265,8 @@ private:
 	// Decode the best image of an .ico into RGBA8 (PNG-compressed and 32-bpp DIB entries).
 	// Public: the Linux AppDir icon stamp (a free function in packaging.cpp) reuses it.
 public:
+	// Renderer debug view the main viewport wants this frame: 0 off, 1 mesh cost, 2 AO (one at a time).
+	int DebugViewMode() const { return aoView ? 2 : (meshCostView ? 1 : 0); }
 	static bool DecodeIcoRGBA(const std::string& path, std::vector<unsigned char>& rgba, int& w, int& h);
 private:
 	// New Project modal state; on OK the project is scaffolded and the editor relaunches on it.

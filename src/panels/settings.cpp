@@ -987,6 +987,7 @@ void EditorUI::winWorldSettings()
 			return a.shadowRes == b.shadowRes && a.shadowDistance == b.shadowDistance && a.shadowDepthBias == b.shadowDepthBias
 			    && a.shadowNormalBias == b.shadowNormalBias && a.shadowSoftness == b.shadowSoftness && a.frustumCull == b.frustumCull
 			    && a.occlusionCull == b.occlusionCull
+			    && a.aoQuality == b.aoQuality && a.aoRadius == b.aoRadius && a.aoIntensity == b.aoIntensity && a.aoPower == b.aoPower
 			    && a.gravity[0] == b.gravity[0] && a.gravity[1] == b.gravity[1] && a.gravity[2] == b.gravity[2]
 			    && a.fixedDt == b.fixedDt;
 		};
@@ -1012,6 +1013,25 @@ void EditorUI::winWorldSettings()
 		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Skip drawing objects outside the camera frustum (perf).\nTurn off if off-screen geometry must still render (e.g. reflections).");
 		changed |= ImGui::Checkbox(LProp("Occlusion Culling (Hi-Z)").c_str(), &s.occlusionCull);
 		if (ImGui::IsItemHovered()) ImGui::SetTooltip("GPU depth-pyramid occlusion over meshes and instanced chunks:\nobjects fully hidden behind others are not drawn. Toolbar: Freeze Culling shows what it removes.");
+		}
+		ImGui::SeparatorText("Ambient Occlusion");
+		{
+		const char* aoLabels[] = { "Off", "SSAO", "HBAO", "GTAO", "VBAO", "RT-AO" };
+		int ai = (s.aoQuality < 0) ? 0 : (s.aoQuality > 5 ? 5 : s.aoQuality);
+		if (ImGui::Combo(LProp("Method").c_str(), &ai, aoLabels, IM_ARRAYSIZE(aoLabels))) { s.aoQuality = ai; changed = true; }
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Screen-space ambient occlusion on the ambient/IBL term (direct light untouched), cheapest to best:\n"
+		                                              "SSAO = hemisphere point samples; HBAO = screen-space horizons; GTAO = analytic horizon integral;\n"
+		                                              "VBAO = visibility bitmask with occluder thickness (thin objects stop over-darkening);\n"
+		                                              "RT-AO = DXR rays against the scene (off-screen occluders too; D3D12 ray-tracing GPUs, elsewhere GTAO).\n"
+		                                              "Half resolution + temporal accumulation. Uses the depth prepass. Profiler > AO view shows the raw result.");
+		if (s.aoQuality > 0)
+		{
+			changed |= ImGui::SliderFloat(LProp("Radius").c_str(), &s.aoRadius, 0.1f, 5.0f, "%.2f m");
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("How far around a point occluders are searched (world units).");
+			changed |= ImGui::SliderFloat(LProp("Intensity").c_str(), &s.aoIntensity, 0.0f, 2.0f, "%.2f");
+			changed |= ImGui::SliderFloat(LProp("Power").c_str(), &s.aoPower, 0.5f, 4.0f, "%.2f");
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Contrast: higher = darker creases, cleaner open areas.");
+		}
 		}
 		ImGui::SeparatorText("Physics");
 		{

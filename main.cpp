@@ -419,8 +419,10 @@ iRender* PreInitRender(){
         // Must be first: tearing the world down mid-command-list breaks D3D12.
         EditorUI::getSingleton()->ApplyPendingWorldOpen();
         r->setWireframe(false);   // previews always render solid, whatever the toolbar says
+        r->setDebugView(0);
         EditorUI::getSingleton()->RenderAssetPreview(r);
         r->setWireframe(AppInstance::GetSingleton()->wireframe);
+        r->setDebugView(EditorUI::getSingleton()->DebugViewMode());
         AppInstance::GetSingleton()->currentWorld->Render(r);
     });
 

@@ -344,8 +344,8 @@ void EditorUI::Toolbar()
 			pieUseEditorCam = !pieUseEditorCam;
 		ImGui::EndDisabled();   // boot-load PIE lock
 
-		// RIGHT — camera projection (Perspective / Orthographic) + viewport draw mode (Solid / Wireframe)
-		float rightW = bw * 4 + st.ItemSpacing.x * 3;
+		// RIGHT — camera projection (Perspective / Orthographic) + viewport draw mode (Solid / Wireframe / AO view)
+		float rightW = bw * 5 + st.ItemSpacing.x * 4;   // freeze, projection, solid, wireframe, AO view
 		ImGui::SameLine();
 		ImGui::SetCursorPosX(winW - rightW - 8.0f);
 		// Freeze culling (debug view): frustum + occlusion verdicts stay put while the camera
@@ -359,8 +359,11 @@ void EditorUI::Toolbar()
 		            ortho ? "Orthographic (click: Perspective)" : "Perspective (click: Orthographic)", ortho, bw))
 			if (editorCam) editorCam->projection = ortho ? nuke::Projection::Perspective : nuke::Projection::Orthographic;
 		ImGui::SameLine();
-		if (ToolBtn(ICON_LC_BOX,      "Solid",     !app->wireframe, bw)) app->wireframe = false; ImGui::SameLine();
-		if (ToolBtn(ICON_LC_GRID_3X3, "Wireframe",  app->wireframe, bw)) app->wireframe = true;
+		// One draw mode at a time: Solid / Wireframe / AO view (the profiler's mesh-cost view yields too).
+		if (ToolBtn(ICON_LC_BOX,      "Solid",     !app->wireframe && !aoView, bw)) { app->wireframe = false; aoView = false; } ImGui::SameLine();
+		if (ToolBtn(ICON_LC_GRID_3X3, "Wireframe",  app->wireframe && !aoView, bw)) { app->wireframe = true;  aoView = false; } ImGui::SameLine();
+		if (ToolBtn(ICON_LC_ECLIPSE,  "Ambient Occlusion view (World Settings > Ambient Occlusion must be on)", aoView, bw))
+			{ aoView = true; app->wireframe = false; meshCostView = false; }
 	}
 	ImGui::End();
 	ImGui::PopStyleVar();

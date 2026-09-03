@@ -119,7 +119,7 @@ void EditorUI::winProfiler()
 		if (on) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
 		if (ImGui::Button(ICON_LC_BOXES " Mesh cost"))
 		{
-			meshCostView = !meshCostView;
+			meshCostView = !meshCostView; if (meshCostView) aoView = false;   // one debug view at a time
 			if (nuke::AppInstance::GetSingleton()->render)
 				nuke::AppInstance::GetSingleton()->render->setDebugView(meshCostView ? 1 : 0);
 		}
