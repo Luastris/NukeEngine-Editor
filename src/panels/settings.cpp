@@ -988,6 +988,10 @@ void EditorUI::winWorldSettings()
 			    && a.shadowNormalBias == b.shadowNormalBias && a.shadowSoftness == b.shadowSoftness && a.frustumCull == b.frustumCull
 			    && a.occlusionCull == b.occlusionCull
 			    && a.aoQuality == b.aoQuality && a.aoRadius == b.aoRadius && a.aoIntensity == b.aoIntensity && a.aoPower == b.aoPower
+			    && a.giEnabled == b.giEnabled && a.giSpacing == b.giSpacing && a.giCountX == b.giCountX && a.giCountY == b.giCountY && a.giCountZ == b.giCountZ
+			    && a.giRays == b.giRays && a.giHysteresis == b.giHysteresis && a.giNormalBias == b.giNormalBias && a.giViewBias == b.giViewBias
+			    && a.giIntensity == b.giIntensity && a.giMaxDistance == b.giMaxDistance && a.giDebugProbes == b.giDebugProbes
+			    && a.ssgiQuality == b.ssgiQuality && a.ssgiRadius == b.ssgiRadius && a.ssgiIntensity == b.ssgiIntensity
 			    && a.gravity[0] == b.gravity[0] && a.gravity[1] == b.gravity[1] && a.gravity[2] == b.gravity[2]
 			    && a.fixedDt == b.fixedDt;
 		};
@@ -1031,6 +1035,39 @@ void EditorUI::winWorldSettings()
 			changed |= ImGui::SliderFloat(LProp("Intensity").c_str(), &s.aoIntensity, 0.0f, 2.0f, "%.2f");
 			changed |= ImGui::SliderFloat(LProp("Power").c_str(), &s.aoPower, 0.5f, 4.0f, "%.2f");
 			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Contrast: higher = darker creases, cleaner open areas.");
+		}
+		}
+		ImGui::SeparatorText("Global Illumination");
+		{
+		changed |= ImGui::Checkbox(LProp("Dynamic GI (DDGI)").c_str(), &s.giEnabled);
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("A global grid of light probes centred on the view and scrolling with it. Every frame the probes\n"
+		                                              "trace the scene (ray tracing; cube captures elsewhere) and the ambient term takes their bounced light\n"
+		                                              "instead of the sky irradiance. Direct light and reflections are untouched.");
+		if (s.giEnabled)
+		{
+			changed |= ImGui::DragFloat(LProp("Probe Spacing").c_str(), &s.giSpacing, 0.05f, 0.1f, 100.0f, "%.2f m");
+			int cnt[3] = { s.giCountX, s.giCountY, s.giCountZ };
+			if (ImGui::DragInt3(LProp("Probes X/Y/Z").c_str(), cnt, 0.2f, 2, 64)) { s.giCountX = cnt[0]; s.giCountY = cnt[1]; s.giCountZ = cnt[2]; changed = true; }
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Grid size in probes; covered range = (count - 1) x spacing around the view.");
+			changed |= ImGui::SliderInt(LProp("Rays Per Probe").c_str(), &s.giRays, 16, 512);
+			changed |= ImGui::SliderFloat(LProp("Hysteresis").c_str(), &s.giHysteresis, 0.5f, 0.995f, "%.3f");
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Temporal blend toward the new rays: 0.97 settles in ~30 frames; lower reacts faster, flickers more.");
+			changed |= ImGui::SliderFloat(LProp("Intensity").c_str(), &s.giIntensity, 0.0f, 8.0f, "%.2f");
+			changed |= ImGui::SliderFloat(LProp("Normal Bias").c_str(), &s.giNormalBias, 0.0f, 2.0f, "%.2f");
+			changed |= ImGui::SliderFloat(LProp("View Bias").c_str(), &s.giViewBias, 0.0f, 2.0f, "%.2f");
+			changed |= ImGui::DragFloat(LProp("Max Ray Distance").c_str(), &s.giMaxDistance, 0.5f, 1.0f, 10000.0f, "%.0f m");
+			changed |= ImGui::Checkbox(LProp("Debug Probes").c_str(), &s.giDebugProbes);
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Draw every probe as a small sphere lit by its own irradiance.");
+		}
+		const char* sgLabels[] = { "Off", "Low", "Medium", "High" };
+		int si = (s.ssgiQuality < 0) ? 0 : (s.ssgiQuality > 3 ? 3 : s.ssgiQuality);
+		if (ImGui::Combo(LProp("Screen-Space GI").c_str(), &si, sgLabels, IM_ARRAYSIZE(sgLabels))) { s.ssgiQuality = si; changed = true; }
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Contact-scale diffuse bounce read from last frame's lit scene (screen space), layered on the probes.\n"
+		                                              "Low/Medium/High = 2/4/8 rays at half resolution; temporal accumulation. Uses the depth prepass.");
+		if (s.ssgiQuality > 0)
+		{
+			changed |= ImGui::SliderFloat(LProp("SSGI Radius").c_str(), &s.ssgiRadius, 0.1f, 10.0f, "%.2f m");
+			changed |= ImGui::SliderFloat(LProp("SSGI Intensity").c_str(), &s.ssgiIntensity, 0.0f, 4.0f, "%.2f");
 		}
 		}
 		ImGui::SeparatorText("Physics");
