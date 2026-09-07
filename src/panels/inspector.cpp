@@ -526,6 +526,22 @@ void EditorUI::RegisterInspectorOverrides()
 			ImGui::TextDisabled("LMB in the viewport: %s", maskBrush == 1 ? "paint the condition" : "erase");
 		}
 	};
+	inspectorOverrides["FogVolume"] = inspectorOverrides["ScatterVolume"] = [this](nuke::Component*) {
+		World* w = AppInstance::GetSingleton()->currentWorld;
+		if (!w || w->settings.volQuality > 0) return;
+		ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), ICON_LC_TRIANGLE_ALERT " World Settings > Volumetrics is Off: this volume renders nothing.");
+		if (ImGui::Button("Turn Volumetrics On (Medium)", ImVec2(-FLT_MIN, 0)))
+		{
+			World::Settings before = w->settings, after = w->settings; after.volQuality = 2;
+			auto set = [](const World::Settings& st) {
+				World* ww = AppInstance::GetSingleton()->currentWorld; if (!ww) return;
+				ww->settings = st;
+			};
+			set(after); worldDirty = true; UpdateWindowTitle();
+			PushUndo("Volumetrics on", [set, before]{ set(before); }, [set, after]{ set(after); });
+		}
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Enables the volumetric grid (the global fog stays at its density - 0 by default - so only the lights' scattering and the volumes show).");
+	};
 	inspectorOverrides["Foliage"] = [this](nuke::Component* c) {
 		auto* fol = static_cast<nuke::Foliage*>(c);
 		const float half = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;

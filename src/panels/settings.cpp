@@ -983,18 +983,10 @@ void EditorUI::winWorldSettings()
 				r->setShadowSettings(st.shadowRes, st.shadowDistance, st.shadowDepthBias, st.shadowNormalBias, st.shadowSoftness);
 			worldDirty = true; UpdateWindowTitle();
 		};
-		auto same = [](const World::Settings& a, const World::Settings& b) {
-			return a.shadowRes == b.shadowRes && a.shadowDistance == b.shadowDistance && a.shadowDepthBias == b.shadowDepthBias
-			    && a.shadowNormalBias == b.shadowNormalBias && a.shadowSoftness == b.shadowSoftness && a.frustumCull == b.frustumCull
-			    && a.occlusionCull == b.occlusionCull
-			    && a.aoQuality == b.aoQuality && a.aoRadius == b.aoRadius && a.aoIntensity == b.aoIntensity && a.aoPower == b.aoPower
-			    && a.giEnabled == b.giEnabled && a.giSpacing == b.giSpacing && a.giCountX == b.giCountX && a.giCountY == b.giCountY && a.giCountZ == b.giCountZ
-			    && a.giRays == b.giRays && a.giHysteresis == b.giHysteresis && a.giNormalBias == b.giNormalBias && a.giViewBias == b.giViewBias
-			    && a.giIntensity == b.giIntensity && a.giMaxDistance == b.giMaxDistance && a.giDebugProbes == b.giDebugProbes
-			    && a.ssgiQuality == b.ssgiQuality && a.ssgiRadius == b.ssgiRadius && a.ssgiIntensity == b.ssgiIntensity
-			    && a.gravity[0] == b.gravity[0] && a.gravity[1] == b.gravity[1] && a.gravity[2] == b.gravity[2]
-			    && a.fixedDt == b.fixedDt;
-		};
+		// Equality is the Settings' own (its serialisation): a hand-kept field list here silently
+		// dropped every newer section (fog, streaming) out of undo - their edits pushed nothing,
+		// and the next Ctrl+Z restored an older whole-settings snapshot over them.
+		auto same = [](const World::Settings& a, const World::Settings& b) { return a == b; };
 
 		// Inspector-style: a flat label-first prop list — four small sections never needed
 		// the category-sidebar chrome the bigger settings windows use.
@@ -1069,6 +1061,49 @@ void EditorUI::winWorldSettings()
 			changed |= ImGui::SliderFloat(LProp("SSGI Radius").c_str(), &s.ssgiRadius, 0.1f, 10.0f, "%.2f m");
 			changed |= ImGui::SliderFloat(LProp("SSGI Intensity").c_str(), &s.ssgiIntensity, 0.0f, 4.0f, "%.2f");
 		}
+		}
+		ImGui::SeparatorText("Volumetrics");
+		{
+		const char* vqLabels[] = { "Off", "Low", "Medium", "High" };
+		int vq = (s.volQuality < 0) ? 0 : (s.volQuality > 3 ? 3 : s.volQuality);
+		if (ImGui::Combo(LProp("Volumetrics").c_str(), &vq, vqLabels, IM_ARRAYSIZE(vqLabels))) { s.volQuality = vq; changed = true; }
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Volumetric lighting: the medium scatters every light through its shadows - the sun's rays, a spot's\n"
+		                                              "cone, a lamp's glow. The medium is global (below) or local (Scatter Volume / Fog Volume atoms); the\n"
+		                                              "optional fog adds extinction. Low/Medium/High = 16/8/6 px froxels with 32/64/96 depth slices.");
+		if (s.volQuality <= 0)
+			ImGui::TextDisabled("Off: no volumetric lighting, no Fog Volume atoms, no fog.");
+		if (s.volQuality > 0)
+		{
+			changed |= ImGui::SliderFloat(LProp("Light Scattering").c_str(), &s.volShaftDensity, 0.0f, 1.0f, "%.4f /m", ImGuiSliderFlags_Logarithmic);
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("The GLOBAL medium: how much the clear air everywhere scatters the lights toward the eye - the sun's rays\n"
+			                                              "through the shadows, spot cones, lamp glow. Nothing dims, no haze, no sky glow. 0.003 = a subtle sun\n"
+			                                              "over a whole city (more is a veil: every lit metre adds up); strong beams belong in a local volume.");
+			ImGui::TextDisabled("Local: Create > Effects > Scatter Volume (rays, cones) / Fog Volume (fog).");
+			ImGui::Spacing();
+			ImGui::TextDisabled("Global fog (optional)");
+			changed |= ImGui::SliderFloat(LProp("Fog Density").c_str(), &s.volDensity, 0.0f, 0.5f, "%.3f /m", ImGuiSliderFlags_Logarithmic);
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Height fog over the whole world: extinction per metre at the base height (0 = none; 0.02 = light haze,\n"
+			                                              "0.2 = thick fog). Lit by the lights and the sky, dims everything behind it.");
+			changed |= ImGui::DragFloat(LProp("Fog Height").c_str(), &s.volHeightBase, 0.1f, -10000.0f, 10000.0f, "%.1f m");
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("World height of full density; the fog (and the light scattering) thins exponentially above it.");
+			changed |= ImGui::SliderFloat(LProp("Height Falloff").c_str(), &s.volHeightFalloff, 0.0f, 2.0f, "%.3f /m", ImGuiSliderFlags_Logarithmic);
+			changed |= ImGui::ColorEdit3(LProp("Fog Albedo").c_str(), s.volAlbedo);
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Colour of the light the fog scatters (white = clean mist, tinted = dust / smoke).");
+			changed |= ImGui::SliderFloat(LProp("Anisotropy").c_str(), &s.volAnisotropy, -0.9f, 0.9f, "%.2f");
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Henyey-Greenstein g for the fog and the light scattering: 0 = even glow, > 0 = light scatters forward\n"
+			                                              "(brighter looking toward the light, dimmer from the side).");
+			changed |= ImGui::SliderFloat(LProp("Range").c_str(), &s.volMaxDistance, 10.0f, 2000.0f, "%.0f m", ImGuiSliderFlags_Logarithmic);
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Far edge of the volumetric grid.");
+			changed |= ImGui::SliderFloat(LProp("Scatter Gain").c_str(), &s.volLightIntensity, 0.0f, 16.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Gain on all light scattering (rays, cones, the fog's lit part); 1 = physical.");
+			changed |= ImGui::SliderFloat(LProp("Ambient Scatter").c_str(), &s.volAmbientIntensity, 0.0f, 4.0f, "%.2f");
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Sky / probe light scattered by the FOG (its even haze in the shadows); the light scattering never uses it.");
+		}
+		changed |= ImGui::SliderFloat(LProp("Sun Shafts (screen)").c_str(), &s.sunShaftIntensity, 0.0f, 4.0f, "%.2f");
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Screen-space crepuscular rays: the sky around the sun, blurred toward it past the occluders -\n"
+		                                              "the rays of a clear day between trees and buildings. Needs no grid; the sun has to be on or\n"
+		                                              "just off the screen, partly hidden by something.");
+		if (s.sunShaftIntensity > 0.0f) changed |= ImGui::SliderFloat(LProp("Shaft Length").c_str(), &s.sunShaftLength, 0.1f, 1.0f, "%.2f");
 		}
 		ImGui::SeparatorText("Physics");
 		{
