@@ -746,13 +746,10 @@ int main(int argc, char** argv)
 
 	// Engine atom templates for the "+" create menu; modules register their own from OnLoad.
 	nuke::RegisterAtomCreator({ "Effects", "Wind Zone", "\xee\x86\xb0" /* ICON_LC_WIND */, { "WindZone" } });
-	nuke::RegisterAtomCreator({ "Effects", "Scatter Volume", "\xee\x85\xb8" /* ICON_LC_SUN */, { "ScatterVolume" } });   // clear air that scatters the lights (rays / cones)
-	nuke::RegisterAtomCreator({ "Effects", "Fog Volume", "\xee\x88\x94" /* ICON_LC_CLOUD_FOG */, { "FogVolume" } });
+	nuke::RegisterAtomCreator({ "Effects", "Force Field", "\xee\x8a\xb5" /* ICON_LC_MAGNET */, { "ForceField" } });      // attract / repel / vortex / turbulence: particles, fluid fog, foliage
 	// Engine component icons for the viewport overlay.
 	nuke::RegisterComponentIcon({ "WindZone", "\xee\x86\xb0" /* ICON_LC_WIND */, { 0.63f, 0.9f, 0.78f, 0.92f } });
-	nuke::RegisterComponentIcon({ "FogVolume", "\xee\x88\x94" /* ICON_LC_CLOUD_FOG */, { 0.78f, 0.82f, 0.9f, 0.92f } });
-	nuke::RegisterComponentIcon({ "ScatterVolume", "\xee\x85\xb8" /* ICON_LC_SUN */, { 0.95f, 0.9f, 0.7f, 0.92f } });
-	nuke::RegisterComponentIcon({ "FogDisplacer", "\xee\x86\xb0" /* ICON_LC_WIND */, { 0.8f, 0.85f, 0.95f, 0.92f } });
+	nuke::RegisterComponentIcon({ "ForceField", "\xee\x8a\xb5" /* ICON_LC_MAGNET */, { 0.55f, 0.82f, 1.0f, 0.92f } });
 	nuke::RegisterComponentIcon({ "HingeJoint",    "\xee\x8b\xaa" /* ICON_LC_ROTATE_3D */, { 0.5f, 0.8f, 1.0f, 0.92f } });
 	nuke::RegisterComponentIcon({ "SliderJoint",   "\xee\x90\xbe" /* ICON_LC_UNFOLD_VERTICAL */, { 0.5f, 0.8f, 1.0f, 0.92f } });
 	nuke::RegisterComponentIcon({ "DistanceJoint", "\xee\x84\x82" /* ICON_LC_LINK */, { 0.5f, 0.8f, 1.0f, 0.92f } });
