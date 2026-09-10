@@ -992,6 +992,7 @@ void EditorUI::winWorldSettings()
 		// the category-sidebar chrome the bigger settings windows use.
 		bool changed = false;
 		ImGui::SeparatorText("Shadows (global)");
+		ImGui::PushID("Shadows (global)");   // sections repeat labels (Intensity, Normal Bias): each its own id scope
 		{
 		ImGui::TextDisabled("Which lights cast is per-Light; these tune all shadow maps.");
 		const char* resLabels[] = { "1024", "2048", "4096" };
@@ -1003,14 +1004,18 @@ void EditorUI::winWorldSettings()
 		changed |= ImGui::SliderFloat(LProp("Normal Bias").c_str(), &s.shadowNormalBias, 0.0f, 0.5f, "%.3f");
 		changed |= ImGui::SliderFloat(LProp("Softness (PCF)").c_str(), &s.shadowSoftness, 0.0f, 4.0f, "%.2f");
 		}
+		ImGui::PopID();
 		ImGui::SeparatorText("Culling");
+		ImGui::PushID("Culling");   // sections repeat labels (Intensity, Normal Bias): each its own id scope
 		{
 		changed |= ImGui::Checkbox(LProp("Frustum Culling").c_str(), &s.frustumCull);
 		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Skip drawing objects outside the camera frustum (perf).\nTurn off if off-screen geometry must still render (e.g. reflections).");
 		changed |= ImGui::Checkbox(LProp("Occlusion Culling (Hi-Z)").c_str(), &s.occlusionCull);
 		if (ImGui::IsItemHovered()) ImGui::SetTooltip("GPU depth-pyramid occlusion over meshes and instanced chunks:\nobjects fully hidden behind others are not drawn. Toolbar: Freeze Culling shows what it removes.");
 		}
+		ImGui::PopID();
 		ImGui::SeparatorText("Ambient Occlusion");
+		ImGui::PushID("Ambient Occlusion");   // sections repeat labels (Intensity, Normal Bias): each its own id scope
 		{
 		const char* aoLabels[] = { "Off", "SSAO", "HBAO", "GTAO", "VBAO", "RT-AO" };
 		int ai = (s.aoQuality < 0) ? 0 : (s.aoQuality > 5 ? 5 : s.aoQuality);
@@ -1029,7 +1034,9 @@ void EditorUI::winWorldSettings()
 			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Contrast: higher = darker creases, cleaner open areas.");
 		}
 		}
+		ImGui::PopID();
 		ImGui::SeparatorText("Global Illumination");
+		ImGui::PushID("Global Illumination");   // sections repeat labels (Intensity, Normal Bias): each its own id scope
 		{
 		changed |= ImGui::Checkbox(LProp("Dynamic GI (DDGI)").c_str(), &s.giEnabled);
 		if (ImGui::IsItemHovered()) ImGui::SetTooltip("A global grid of light probes centred on the view and scrolling with it. Every frame the probes\n"
@@ -1062,7 +1069,9 @@ void EditorUI::winWorldSettings()
 			changed |= ImGui::SliderFloat(LProp("SSGI Intensity").c_str(), &s.ssgiIntensity, 0.0f, 4.0f, "%.2f");
 		}
 		}
+		ImGui::PopID();
 		ImGui::SeparatorText("Volumetrics");
+		ImGui::PushID("Volumetrics");   // sections repeat labels (Intensity, Normal Bias): each its own id scope
 		{
 		const char* vqLabels[] = { "Off", "Low", "Medium", "High" };
 		int vq = (s.volQuality < 0) ? 0 : (s.volQuality > 3 ? 3 : s.volQuality);
@@ -1105,14 +1114,18 @@ void EditorUI::winWorldSettings()
 		                                              "just off the screen, partly hidden by something.");
 		if (s.sunShaftIntensity > 0.0f) changed |= ImGui::SliderFloat(LProp("Shaft Length").c_str(), &s.sunShaftLength, 0.1f, 1.0f, "%.2f");
 		}
+		ImGui::PopID();
 		ImGui::SeparatorText("Physics");
+		ImGui::PushID("Physics");   // sections repeat labels (Intensity, Normal Bias): each its own id scope
 		{
 		changed |= ImGui::DragFloat3(LProp("Gravity").c_str(), s.gravity, 0.05f);
 		if (ImGui::IsItemHovered()) ImGui::SetTooltip("World gravity (m/s^2), pushed to the physics service each step.");
 		changed |= ImGui::DragFloat(LProp("Fixed Timestep").c_str(), &s.fixedDt, 0.0005f, 0.001f, 0.1f, "%.4f s");
 		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Fixed simulation step (seconds). 1/60 by default;\nsmaller = more precise, more CPU.");
 		}
+		ImGui::PopID();
 		ImGui::SeparatorText("Streaming (World Partition)");
+		ImGui::PushID("Streaming (World Partition)");   // sections repeat labels (Intensity, Normal Bias): each its own id scope
 		{
 		changed |= ImGui::Checkbox(LProp("Enabled").c_str(), &s.streamEnabled);
 		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Save splits spatial atoms into per-cell files; play streams cells\nby camera distance with baked HLOD proxies for far cells.\nThe editor always loads the whole world. Takes effect on Save.");
@@ -1130,7 +1143,9 @@ void EditorUI::winWorldSettings()
 		if (changed) apply(s);   // live apply + mark dirty
 
 		// The world's global wind field; local volumes are WindZone components on atoms.
+		ImGui::PopID();
 		ImGui::SeparatorText("Wind");
+		ImGui::PushID("Wind");   // sections repeat labels (Intensity, Normal Bias): each its own id scope
 		{
 			bool wch = false;
 			nuke::Vector3 d = nuke::Wind::Direction();
@@ -1159,7 +1174,9 @@ void EditorUI::winWorldSettings()
 		}
 
 		// Global surface conditions (LiveMaterial): named 0..1 values live materials respond to.
+		ImGui::PopID();
 		ImGui::SeparatorText("Surface Conditions");
+		ImGui::PushID("Surface Conditions");   // sections repeat labels (Intensity, Normal Bias): each its own id scope
 		{
 			bool sch = false;
 			std::string killState;
@@ -1195,6 +1212,7 @@ void EditorUI::winWorldSettings()
 			if (sch) { worldDirty = true; UpdateWindowTitle(); }   // conditions save with the world
 		}
 
+		ImGui::PopID();
 		// Undo: snapshot while idle, push one command when an edit settles.
 		bool active = ImGui::IsAnyItemActive();
 		if (active) wsEditing = true;
