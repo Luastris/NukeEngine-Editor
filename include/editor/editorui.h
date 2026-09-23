@@ -13,6 +13,7 @@
 #include "interface/Modular.h"
 #include "API/Model/MeshRenderer.h"
 #include "API/Model/PostProcess.h"
+#include "API/Model/PostFXVolume.h"
 #include "API/Model/UnknownComponent.h"
 #include "API/Model/resdb.h"
 #include "API/Model/SequencePlayer.h"
@@ -538,6 +539,8 @@ public:
 	void RegisterInspectorOverrides();
 	void DrawMeshRendererInspector(nuke::MeshRenderer* mr);
 	void DrawPostProcessInspector(nuke::PostProcess* pp);
+	void DrawPostFXVolumeInspector(nuke::PostFXVolume* pv);   // E2: the volume's effect overrides
+	void DrawPostEffectChain(std::vector<nuke::PostEffect>& effects, nuke::Atom* ownerAtom, const std::function<void()>& commit, const char* title);
 	void DrawAnimatorInspector(nuke::Animator* an);   // serialized state machine
 	void winWorldSettings();   // World Settings window (global shadow settings, saved in the .nuworld)
 	bool worldSettingsOpen = false;

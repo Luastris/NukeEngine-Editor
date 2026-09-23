@@ -3,6 +3,7 @@
 #include "editor/animshared.h"
 #include "nukeui.h"   // DocPanel: detachable panels
 #include <API/Model/Camera.h>
+#include <API/Model/PostFXVolume.h>   // the volume's effect overrides share the post-chain editor
 #include <API/Model/CharacterController.h>
 #include <API/Model/VariantSet.h>   // custom variant-switch body (combos over child prefixes)
 #include <API/Model/Foliage.h>
@@ -482,6 +483,9 @@ void EditorUI::RegisterInspectorOverrides()
 	inspectorOverrides["MeshRenderer"] = [this](nuke::Component* c) {
 		DrawMeshRendererInspector(static_cast<nuke::MeshRenderer*>(c));
 	};
+	inspectorOverrides["PostFXVolume"] = [this](nuke::Component* c) {
+		DrawPostFXVolumeInspector(static_cast<nuke::PostFXVolume*>(c));
+	};
 	inspectorOverrides["PostProcess"] = [this](nuke::Component* c) {
 		DrawPostProcessInspector(static_cast<nuke::PostProcess*>(c));
 	};
@@ -667,11 +671,10 @@ void EditorUI::DrawAnimatorInspector(nuke::Animator* an)
 
 // Ordered chain of post-effect shaders: pick, params, reorder, add/remove. Commit()s back to the
 // serialized field.
-void EditorUI::DrawPostProcessInspector(nuke::PostProcess* pp)
+void EditorUI::DrawPostEffectChain(std::vector<nuke::PostEffect>& effects, nuke::Atom* ownerAtom, const std::function<void()>& commit, const char* title)
 {
 	ResDB* db = ResDB::getSingleton();
-	pp->EnsureParsed();
-	ImGui::SeparatorText("Post Effects (run in order — drag to reorder)");
+	ImGui::SeparatorText(title);
 
 	int removeAt = -1, dragFrom = -1, dragTo = -1;
 	const ImGuiPayload* dpl = ImGui::GetDragDropPayload();
@@ -691,12 +694,12 @@ void EditorUI::DrawPostProcessInspector(nuke::PostProcess* pp)
 		}
 		ImGui::SetCursorScreenPos(saved);
 	};
-	for (size_t i = 0; i < pp->effects.size(); ++i)
+	for (size_t i = 0; i < effects.size(); ++i)
 	{
-		nuke::PostEffect& e = pp->effects[i];
+		nuke::PostEffect& e = effects[i];
 		ImGui::PushID((int)i);
 		bool en = e.enabled;
-		if (ImGui::Checkbox("##en", &en)) { e.enabled = en; pp->Commit(); }
+		if (ImGui::Checkbox("##en", &en)) { e.enabled = en; commit(); }
 		ImGui::SameLine();
 		nuke::Shader* sh = db->GetShader(e.shaderGuid);
 		std::string title = sh ? sh->name : (e.shaderGuid.empty() ? std::string("(pick a shader)") : e.shaderGuid);
@@ -714,7 +717,7 @@ void EditorUI::DrawPostProcessInspector(nuke::PostProcess* pp)
 		gapZone((int)i, hmn, hmx);   // drop here = insert BEFORE effect i
 		if (open)
 		{
-			if (AssetPicker("Shader", e.shaderGuid, "postshader")) { e.props.clear(); pp->Commit(); }
+			if (AssetPicker("Shader", e.shaderGuid, "postshader")) { e.props.clear(); commit(); }
 			sh = db->GetShader(e.shaderGuid);
 			if (sh)
 				for (const nuke::ShaderProp& sp : sh->props)
@@ -731,14 +734,14 @@ void EditorUI::DrawPostProcessInspector(nuke::PostProcess* pp)
 					else if (sp.components == 2) ch = ImGui::DragFloat2(sp.name.c_str(), val.data(), 0.01f);
 					else if (sp.components == 3) ch = ImGui::DragFloat3(sp.name.c_str(), val.data(), 0.01f);
 					else                         ch = ImGui::DragFloat4(sp.name.c_str(), val.data(), 0.01f);
-					if (ch) { e.props[sp.name] = val; pp->Commit(); }
+					if (ch) { e.props[sp.name] = val; commit(); }
 				}
 			if (!sh) ImGui::TextDisabled("Pick a post shader (a *.post.hlsl asset).");
 		}
 		ImGui::PopID();
 	}
 	// Tail zone: a drop below the last effect moves to the END of the chain.
-	if (dndActive && !pp->effects.empty())
+	if (dndActive && !effects.empty())
 	{
 		ImVec2 mn = ImGui::GetCursorScreenPos();
 		float w = ImGui::GetContentRegionAvail().x;
@@ -746,13 +749,13 @@ void EditorUI::DrawPostProcessInspector(nuke::PostProcess* pp)
 		if (ImGui::BeginDragDropTarget())
 		{
 			ImGui::GetWindowDrawList()->AddLine(ImVec2(mn.x, mn.y + 1), ImVec2(mn.x + w, mn.y + 1), IM_COL32(255, 160, 30, 255), 2.0f);
-			if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("PP_FX")) { dragFrom = *(const int*)p->Data; dragTo = (int)pp->effects.size(); }
+			if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("PP_FX")) { dragFrom = *(const int*)p->Data; dragTo = (int)effects.size(); }
 			ImGui::EndDragDropTarget();
 		}
 	}
 	// Add/remove/reorder are undoable as one atom-subtree delta: the active-widget edit detector
 	// cannot see button/DnD clicks (it already covers the param drags).
-	nuke::Atom* owner = pp->atom;
+	nuke::Atom* owner = ownerAtom;
 	World* w = AppInstance::GetSingleton()->currentWorld;
 	auto recordStructural = [&](const char* label, const std::function<void()>& mutate)
 	{
@@ -770,23 +773,34 @@ void EditorUI::DrawPostProcessInspector(nuke::PostProcess* pp)
 	};
 
 	if (removeAt >= 0)
-		recordStructural("Remove effect", [&] { pp->effects.erase(pp->effects.begin() + removeAt); pp->Commit(); });
+		recordStructural("Remove effect", [&] { effects.erase(effects.begin() + removeAt); commit(); });
 	else if (dragFrom >= 0 && dragTo >= 0 && dragFrom != dragTo
-	         && dragFrom < (int)pp->effects.size() && dragTo <= (int)pp->effects.size())
+	         && dragFrom < (int)effects.size() && dragTo <= (int)effects.size())
 		recordStructural("Reorder effect", [&] {
-			nuke::PostEffect moved = pp->effects[dragFrom];
-			pp->effects.erase(pp->effects.begin() + dragFrom);
+			nuke::PostEffect moved = effects[dragFrom];
+			effects.erase(effects.begin() + dragFrom);
 			int dst = (dragTo > dragFrom) ? dragTo - 1 : dragTo;   // index shifts after the erase
-			if (dst < 0) dst = 0; if (dst > (int)pp->effects.size()) dst = (int)pp->effects.size();
-			pp->effects.insert(pp->effects.begin() + dst, moved);
-			pp->Commit();
+			if (dst < 0) dst = 0; if (dst > (int)effects.size()) dst = (int)effects.size();
+			effects.insert(effects.begin() + dst, moved);
+			commit();
 		});
 
 	ImGui::Separator();
 	if (ImGui::Button(ICON_LC_PLUS " Add Effect", ImVec2(-FLT_MIN, 0)))
-		recordStructural("Add effect", [&] { pp->effects.push_back(nuke::PostEffect{}); pp->Commit(); });
+		recordStructural("Add effect", [&] { effects.push_back(nuke::PostEffect{}); commit(); });
 }
 
+// The per-camera chain (PostProcess) and a PostFX volume's overrides share the chain editor.
+void EditorUI::DrawPostProcessInspector(nuke::PostProcess* pp)
+{
+	pp->EnsureParsed();
+	DrawPostEffectChain(pp->effects, pp->atom, [pp] { pp->Commit(); }, "Post Effects (run in order — drag to reorder)");
+}
+void EditorUI::DrawPostFXVolumeInspector(nuke::PostFXVolume* pv)
+{
+	pv->EnsureParsed();
+	DrawPostEffectChain(pv->effects, pv->atom, [pv] { pv->Commit(); }, "Effect Overrides (blended toward these inside the volume; the camera must run the effect)");
+}
 // Draws the selected material's sub-properties (shader/color/textures); the mesh/material GUID
 // fields themselves come from reflection.
 void EditorUI::DrawMeshRendererInspector(nuke::MeshRenderer* mr)
