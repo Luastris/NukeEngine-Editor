@@ -14,6 +14,7 @@
 #include <interface/AppInstance.h>
 #include <import/assimporter.h>
 #include <API/Model/Jobs.h>
+#include <API/Model/FileIndex.h>   // the watcher thread stops before the pool
 #include <API/Model/CrashReport.h>   // crash bundles (config/crash) written from the filters below
 #else
 #include <interface/AppInstance.h>
@@ -776,6 +777,7 @@ int main(int argc, char** argv)
     cout << "[main]\t\t\t" << "shit down..." << endl;
     EditorUI::getSingleton()->SaveEditorState();   // first: any later teardown step may wedge or die
     AppInstance::GetSingleton()->StopFixedThread();
+    nuke::FileIndex::Get().Shutdown();   // its handlers run through Jobs: before the pool goes
     nuke::Jobs::Shutdown();
     Unload();   // runtime plugins first, then the render provider
     return 0;

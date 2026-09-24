@@ -81,41 +81,51 @@ bool EditorUI::SearchMatch(const std::string& name)
 	return s.find(q) != std::string::npos;
 }
 
-// Recursive folder tree (Tree view), rooted at `dir`.
+// Recursive folder tree (Tree view), rooted at `dir` (a folder under the current browse root).
+// Rows come from the index snapshot: no disk access per frame.
 void EditorUI::BrowserTree(const std::string& dir)
 {
-	boost::system::error_code ec;
 	std::set<std::string> shown;   // lowercase names at this level (disk wins over pak)
 	auto lowName = [](std::string s) { for (char& c : s) c = (char)tolower((unsigned char)c); return s; };
-	for (auto& de : bfs::directory_iterator(bfs::path(dir), ec))
+	const bfs::path rootP = (browserRoot == 1) ? bfs::path(projectDir) / "source" : bfs::path(contentDir);
+	std::string relDir;
 	{
-		std::string name = de.path().filename().string();
-		shown.insert(lowName(name));
-		if (bfs::is_directory(de.path()))
+		bfs::path r2 = bfs::path(dir).lexically_relative(rootP);
+		std::string rs = r2.generic_string();
+		if (!rs.empty() && rs != "." && rs.compare(0, 2, "..") != 0) relDir = rs;
+	}
+	if (auto snap = nuke::FileIndex::Get().Get(browserRoot == 1 ? "source" : "content"))
+	{
+		std::vector<const nuke::FileIndex::Entry*> kids;
+		snap->Children(relDir, kids);
+		for (const nuke::FileIndex::Entry* e : kids)
 		{
-			if (IsCellsInternal(name)) continue;
-			if (ImGui::TreeNode((std::string(ICON_LC_FOLDER) + " " + name).c_str()))
+			std::string name = e->rel.substr(e->rel.rfind('/') == std::string::npos ? 0 : e->rel.rfind('/') + 1);
+			shown.insert(lowName(name));
+			if (e->isDir)
 			{
-				BrowserTree(de.path().string());
-				ImGui::TreePop();
+				if (IsCellsInternal(name)) continue;
+				if (ImGui::TreeNode((std::string(ICON_LC_FOLDER) + " " + name).c_str()))
+				{
+					BrowserTree((bfs::path(dir) / name).string());
+					ImGui::TreePop();
+				}
 			}
-		}
-		else
-		{
-			std::string ext = de.path().extension().string();
-			for (char& c : ext) c = (char)tolower((unsigned char)c);
-			if (ExtVisible(ext) && SearchMatch(name))
-				ImGui::BulletText("%s %s", ExtIcon(ext), name.c_str());
+			else
+			{
+				std::string ext = bfs::path(name).extension().string();
+				for (char& c : ext) c = (char)tolower((unsigned char)c);
+				if (ExtVisible(ext) && SearchMatch(name))
+					ImGui::BulletText("%s %s", ExtIcon(ext), name.c_str());
+			}
 		}
 	}
 	// Mounted pak stack: this level's packed children too (read-only, content root only).
 	if (browserRoot == 0 && nuke::Package::MountedCount() > 0)
 	{
-		std::string relDir = "content";
-		bfs::path r2 = bfs::path(dir).lexically_relative(bfs::path(contentDir));
-		std::string rs = r2.generic_string();
-		if (!rs.empty() && rs != "." && rs.compare(0, 2, "..") != 0) relDir += "/" + rs;
-		const std::string pfx = relDir + "/";
+		std::string relPak = "content";
+		if (!relDir.empty()) relPak += "/" + relDir;
+		const std::string pfx = relPak + "/";
 		std::set<std::string> pakDirs;
 		for (const std::string& r : nuke::Package::List(pfx))
 		{
@@ -1036,8 +1046,9 @@ void EditorUI::winBrowser()
 
 	// Browse root: content, or the project's C++ sources when <project>/source exists.
 	const bfs::path srcRootP = bfs::path(projectDir) / "source";
-	boost::system::error_code srcEc;
-	const bool hasSrc = bfs::exists(srcRootP, srcEc) && bfs::is_directory(srcRootP, srcEc);
+	nuke::FileIndex& fidx = nuke::FileIndex::Get();
+	auto srcSnap = fidx.Get("source");
+	const bool hasSrc = srcSnap && srcSnap->present;   // the index knows whether the folder exists
 	if (!hasSrc) browserRoot = 0;
 
 	// Toolbar: view mode | search | filters.
@@ -1247,89 +1258,103 @@ void EditorUI::winBrowser()
 		return;
 	}
 
-	// Gather the current folder's entries (Tiles / List).
-	struct FEntry { std::string name, path, ext; bool isDir; const char* icon; bool pak = false; };
-	std::vector<FEntry> entries;
-	boost::system::error_code ec;
+	// The current folder's entries (Tiles / List): built from the index snapshot and cached until
+	// the index version, folder, search, filters, root or pak mounts change.
 	const bool searching = (browserSearch[0] != 0);
-	if (searching)
+	const std::string rootName = (browserRoot == 1) ? "source" : "content";
+	auto snap = fidx.Get(rootName);
+	std::string relCwd;
 	{
-		// A search spans the whole subtree under the current folder (files only).
-		for (auto& de : bfs::recursive_directory_iterator(cwd, ec))
+		bfs::path r2 = cwd.lexically_relative(root);   // lexical: pak-only folders have no disk dir
+		std::string rs = r2.generic_string();
+		if (!rs.empty() && rs != "." && rs.compare(0, 2, "..") != 0) relCwd = rs;
+	}
+	{
+		std::string key = rootName + '|' + std::to_string(snap ? snap->version : 0) + '|' + relCwd + '|' + browserSearch + '|'
+		                + (fMesh ? '1' : '0') + (fMat ? '1' : '0') + (fTex ? '1' : '0') + (fPrefab ? '1' : '0') + '|'
+		                + std::to_string(Package::MountedCount());
+		if (key != browserEntriesKey)
 		{
-			if (bfs::is_directory(de.path())) continue;
-			if (PathInCells(de.path())) continue;
-			std::string name = de.path().filename().string();
-			std::string ext  = de.path().extension().string();
-			for (char& c : ext) c = (char)tolower((unsigned char)c);
-			if (!ExtVisible(ext) || !SearchMatch(name)) continue;
-			entries.push_back({ name, de.path().string(), ext, false, ExtIcon(ext) });
+			browserEntriesKey = key;
+			browserEntries.clear();
+			auto leaf = [](const std::string& rel) { size_t s = rel.rfind('/'); return s == std::string::npos ? rel : rel.substr(s + 1); };
+			auto absOf = [&](const nuke::FileIndex::Entry& e) { return (root / bfs::path(e.rel)).make_preferred().string(); };
+			if (snap)
+			{
+				std::vector<const nuke::FileIndex::Entry*> list;
+				if (searching) snap->Under(relCwd, list);      // a search spans the whole subtree (files only)
+				else           snap->Children(relCwd, list);
+				for (const nuke::FileIndex::Entry* e : list)
+				{
+					const std::string name = leaf(e->rel);
+					if (searching)
+					{
+						if (e->isDir || PathInCells(bfs::path(e->rel))) continue;
+						std::string ext = bfs::path(name).extension().string();
+						for (char& c : ext) c = (char)tolower((unsigned char)c);
+						if (!ExtVisible(ext) || !SearchMatch(name)) continue;
+						browserEntries.push_back({ name, absOf(*e), ext, false, ExtIcon(ext) });
+					}
+					else
+					{
+						if (e->isDir && IsCellsInternal(name)) continue;
+						std::string ext = e->isDir ? "" : bfs::path(name).extension().string();
+						for (char& c : ext) c = (char)tolower((unsigned char)c);
+						if (!e->isDir && !ExtVisible(ext)) continue;
+						browserEntries.push_back({ name, absOf(*e), ext, e->isDir, e->isDir ? ICON_LC_FOLDER : ExtIcon(ext) });
+					}
+				}
+			}
+			// Union the mounted pak content with the disk overlay: disk wins name collisions, pak-only
+			// entries are read-only "pak://<rel>" paths. Content root only.
+			if (browserRoot == 0 && Package::MountedCount() > 0)
+			{
+				std::string relDir = "content";
+				if (!relCwd.empty()) relDir += "/" + relCwd;
+				auto lowName = [](std::string s) { for (char& c : s) c = (char)tolower((unsigned char)c); return s; };
+				std::set<std::string> have;
+				for (const FEntry& e : browserEntries) have.insert(lowName(e.name));
+				const std::string pfx = relDir + "/";
+				for (const std::string& r : Package::List(pfx))
+				{
+					if (r.size() <= pfx.size()) continue;
+					std::string tail = r.substr(pfx.size());
+					if (searching)
+					{
+						if (PathInCells(bfs::path(tail))) continue;
+						std::string name = bfs::path(tail).filename().string();
+						std::string ext  = bfs::path(name).extension().string();
+						for (char& c : ext) c = (char)tolower((unsigned char)c);
+						if (!ExtVisible(ext) || !SearchMatch(name) || have.count(lowName(name))) continue;
+						have.insert(lowName(name));
+						browserEntries.push_back({ name, "pak://" + r, ext, false, ExtIcon(ext), true });
+						continue;
+					}
+					size_t sl = tail.find('/');
+					if (sl != std::string::npos)   // a subfolder at this level
+					{
+						std::string name = tail.substr(0, sl);
+						if (IsCellsInternal(name) || have.count(lowName(name))) continue;
+						have.insert(lowName(name));
+						browserEntries.push_back({ name, "pak://" + pfx + name, "", true, ICON_LC_FOLDER, true });
+					}
+					else
+					{
+						std::string ext = bfs::path(tail).extension().string();
+						for (char& c : ext) c = (char)tolower((unsigned char)c);
+						if (!ExtVisible(ext) || have.count(lowName(tail))) continue;
+						have.insert(lowName(tail));
+						browserEntries.push_back({ tail, "pak://" + r, ext, false, ExtIcon(ext), true });
+					}
+				}
+			}
+			std::sort(browserEntries.begin(), browserEntries.end(), [](const FEntry& a, const FEntry& b) {
+				if (a.isDir != b.isDir) return a.isDir > b.isDir;
+				return a.name < b.name;
+			});
 		}
 	}
-	else
-	{
-		for (auto& de : bfs::directory_iterator(cwd, ec))
-		{
-			bool dir = bfs::is_directory(de.path());
-			std::string name = de.path().filename().string();
-			if (dir && IsCellsInternal(name)) continue;
-			std::string ext  = dir ? "" : de.path().extension().string();
-			for (char& c : ext) c = (char)tolower((unsigned char)c);
-			if (!dir && !ExtVisible(ext)) continue;
-			entries.push_back({ name, de.path().string(), ext, dir, dir ? ICON_LC_FOLDER : ExtIcon(ext) });
-		}
-	}
-	// Union the mounted pak content with the disk overlay: disk wins name collisions, pak-only
-	// entries are read-only "pak://<rel>" paths. Content root only.
-	if (browserRoot == 0 && Package::MountedCount() > 0)
-	{
-		std::string relDir = "content";
-		{
-			bfs::path r2 = cwd.lexically_relative(root);   // lexical: pak-only folders have no disk dir
-			std::string rs = r2.generic_string();
-			if (!rs.empty() && rs != "." && rs.compare(0, 2, "..") != 0) relDir += "/" + rs;
-		}
-		auto lowName = [](std::string s) { for (char& c : s) c = (char)tolower((unsigned char)c); return s; };
-		std::set<std::string> have;
-		for (const FEntry& e : entries) have.insert(lowName(e.name));
-		const std::string pfx = relDir + "/";
-		for (const std::string& r : Package::List(pfx))
-		{
-			if (r.size() <= pfx.size()) continue;
-			std::string tail = r.substr(pfx.size());
-			if (searching)
-			{
-				if (PathInCells(bfs::path(tail))) continue;
-				std::string name = bfs::path(tail).filename().string();
-				std::string ext  = bfs::path(name).extension().string();
-				for (char& c : ext) c = (char)tolower((unsigned char)c);
-				if (!ExtVisible(ext) || !SearchMatch(name) || have.count(lowName(name))) continue;
-				have.insert(lowName(name));
-				entries.push_back({ name, "pak://" + r, ext, false, ExtIcon(ext), true });
-				continue;
-			}
-			size_t sl = tail.find('/');
-			if (sl != std::string::npos)   // a subfolder at this level
-			{
-				std::string name = tail.substr(0, sl);
-				if (IsCellsInternal(name) || have.count(lowName(name))) continue;
-				have.insert(lowName(name));
-				entries.push_back({ name, "pak://" + pfx + name, "", true, ICON_LC_FOLDER, true });
-			}
-			else
-			{
-				std::string ext = bfs::path(tail).extension().string();
-				for (char& c : ext) c = (char)tolower((unsigned char)c);
-				if (!ExtVisible(ext) || have.count(lowName(tail))) continue;
-				have.insert(lowName(tail));
-				entries.push_back({ tail, "pak://" + r, ext, false, ExtIcon(ext), true });
-			}
-		}
-	}
-	std::sort(entries.begin(), entries.end(), [](const FEntry& a, const FEntry& b) {
-		if (a.isDir != b.isDir) return a.isDir > b.isDir;
-		return a.name < b.name;
-	});
+	const std::vector<FEntry>& entries = browserEntries;
 
 	// Go-to-file (inspector's locate button): resolve the requested path against the freshly
 	// built entries by FILESYSTEM equivalence — separator/case differences must not break the
@@ -1427,7 +1452,7 @@ void EditorUI::winBrowser()
 			ImGui::PopID();
 			if (++i % per != 0) ImGui::SameLine();
 		}
-		for (FEntry& e : entries)
+		for (const FEntry& e : entries)
 		{
 			ImGui::PushID(i);
 			ImGui::BeginGroup();
@@ -1475,7 +1500,7 @@ void EditorUI::winBrowser()
 			BrowserFolderDropTarget(cwd.parent_path().string());
 			if (upc && ImGui::IsMouseDoubleClicked(0)) BrowserNavigate(cwd.parent_path().string());
 		}
-		for (FEntry& e : entries)
+		for (const FEntry& e : entries)
 		{
 			ImGui::PushID(i++);
 			std::string lbl = std::string(e.icon) + "  " + e.name + (isDirty(e) ? " *" : "") + (e.pak ? "  (pak)" : "");

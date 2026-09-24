@@ -227,6 +227,11 @@ void EditorUI::StartBootLoad()
 	nuke::StatusBar::Set("boot", "Loading content...", nuke::StatusBar::kIndeterminate);
 	const bool mounted = nuke::Package::MountedCount() > 0;
 	const std::string cdir = contentDir;
+	// The content root joins the engine's file index (one scan, then OS change notifications):
+	// the boot scan below reads it, everything after it stays current without walking the disk.
+	ResDB::getSingleton()->WatchContent(cdir, "shaders");
+	// The C++ sources are a browser root too (watched for creation when the folder is missing).
+	nuke::FileIndex::Get().Watch("source", (bfs::path(projectDir) / "source").string());
 	nuke::Jobs::Schedule([this, mounted, cdir]()
 	{
 		// Disk + CPU only. Jobs::Shutdown JOINS this job, hence the Stopping() checkpoints.

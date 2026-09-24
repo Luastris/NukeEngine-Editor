@@ -218,6 +218,7 @@ Atom* EditorUI::CreateFolderAtom(Atom* parent)
 	Atom* f = new Atom("Folder");
 	f->folder = true;
 	w->InsertAtom(f, parent ? (long)parent->id.id : 0, -1);
+	World::BumpHierarchy();
 	RecordAdd(f);
 	HierSelect(f);
 	return f;
@@ -247,6 +248,7 @@ void EditorUI::GroupSelection(bool asFolder)
 	Atom* g = new Atom(asFolder ? "Folder" : "Group");
 	g->folder = asFolder;
 	w->InsertAtom(g, commonParent ? (long)commonParent->id.id : 0, -1);
+	World::BumpHierarchy();
 	if (!asFolder) g->GetTransform().SetGlobal(center, Quaternion(0, 0, 0, 1), Vector3(1, 1, 1));
 	const AtomPlace gPlace = PlaceOf(this, g);   // captured EMPTY: redo recreates the shell first
 

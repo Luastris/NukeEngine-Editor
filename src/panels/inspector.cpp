@@ -381,18 +381,16 @@ bool EditorUI::AssetPicker(const char* label, std::string& guid, const std::stri
 				return kind == "script" ? (e == ".lua") : IsAudioExt(e);
 			};
 			std::set<std::string> seen;   // lowercase rel — the disk copy wins over pak layers
-			boost::system::error_code ec;
-			bfs::path croot(contentDir);
-			if (bfs::exists(croot, ec))
-				for (bfs::recursive_directory_iterator it(croot, ec), end; it != end; it.increment(ec))
+			if (auto snap = nuke::FileIndex::Get().Get("content"))   // from the index, no disk walk
+				for (const nuke::FileIndex::Entry& e : snap->entries)
 				{
-					if (ec) break;
-					if (bfs::is_directory(it->path())) continue;
-					if (!matches(it->path().extension().string())) continue;
-					std::string rel = bfs::relative(it->path(), croot, ec).generic_string();
-					std::string low = rel; for (char& c : low) c = (char)tolower((unsigned char)c);
+					if (e.isDir) continue;
+					size_t dot = e.rel.rfind('.'), sl = e.rel.rfind('/');
+					if (dot == std::string::npos || (sl != std::string::npos && dot < sl)) continue;
+					if (!matches(e.rel.substr(dot))) continue;
+					std::string low = e.rel; for (char& c : low) c = (char)tolower((unsigned char)c);
 					seen.insert(low);
-					item(rel, bfs::path(rel).stem().string());
+					item(e.rel, bfs::path(e.rel).stem().string());
 				}
 			// Packed session: content files live in mounted paks, not on disk (dedup vs the disk scan).
 			if (nuke::Package::MountedCount() > 0)
@@ -1949,6 +1947,7 @@ void EditorUI::RemoveComponent(Atom* a, Component* c)
 	std::string before = nuke::SaveAtomToString(a);
 	a->components.remove(c);   // edit-time removal: NOT Destroy() — that's the runtime/teardown hook
 	delete c;
+	World::BumpHierarchy();
 	std::string after = nuke::SaveAtomToString(a);
 	editing = false; editAtomId = 0;   // suppress the auto edit-detector (this is its own command)
 	PushUndo("Remove component",
@@ -1999,6 +1998,7 @@ void EditorUI::winInspector()
 	NukeUI::DocPanel("panel:inspector", "Inspector", &win->inspector, window_flags, 380, 700, [this]()
 	{
 	if (bootLoading) { ImGui::TextDisabled("Loading project..."); return; }   // half-deserialized selection
+	WorldLock gameGuard(AppInstance::GetSingleton()->currentWorld);   // reads atoms/components the fixed thread may edit
 	if (auto sltd = AppInstance::GetSingleton()->selectedInHieararchy)
 	{
 		// Multi-selection banner: edits below flow to every selected atom where it makes sense

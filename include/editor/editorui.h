@@ -39,6 +39,8 @@
 #include <cstdio>
 #include <algorithm>
 #include <boost/filesystem.hpp>
+#include <unordered_map>
+#include <API/Model/FileIndex.h>   // file lists come from the engine's index, never from disk walks
 #include <cmath>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -127,6 +129,16 @@ inline std::string LProp(const char* label, float col = 13.0f)
 	return std::string("##") + label;
 }
 
+// Holds a world's game lock for a scope: panels that walk the hierarchy take it so the fixed-update
+// thread (scripts creating / reparenting / destroying atoms) can't mutate the lists under them.
+struct WorldLock
+{
+	World* w;
+	explicit WorldLock(World* world) : w(world) { if (w) w->LockGame(); }
+	~WorldLock() { if (w) w->UnlockGame(); }
+	WorldLock(const WorldLock&) = delete; WorldLock& operator=(const WorldLock&) = delete;
+};
+
 class EditorUI
 {
 private:
@@ -152,6 +164,11 @@ private:
 	bool fMesh = true, fMat = true, fTex = true, fPrefab = true;   // browser type filters
 	std::string contentDir = "project/content";   // project content root (imported assets live here)
 	std::string browserCwd;                        // current folder shown in the browser
+	// The browser's row list, built from a FileIndex snapshot and kept until the index version,
+	// folder, search, filters or pak mounts change (browserEntriesKey).
+	struct FEntry { std::string name, path, ext; bool isDir = false; const char* icon = nullptr; bool pak = false; };
+	std::vector<FEntry> browserEntries;
+	std::string         browserEntriesKey;
 	std::string browserSel;                        // primary selected entry (full path; "" = none)
 	std::string browserLocate;                     // go-to-file: path to resolve+scroll to on the next browser draw
 	std::set<std::string> browserMSel;             // multi-selection (ctrl/shift); superset incl. browserSel
@@ -192,7 +209,6 @@ private:
 	char        renameBuf[256] = "";               // edited NAME (without extension)
 	std::string renameExt;                         // locked extension (kept as-is; "" for folders)
 	bool        openRenamePopup = false;           // request to open the rename modal next frame
-	int         hotReloadTick = 0;                  // throttles shader hot-reload checks
 	std::map<std::string, std::function<void(nuke::Component*)>> inspectorOverrides;  // per-type custom inspector drawing
 	char        assetFilter[128] = "";             // filter text in the asset-picker popup
 	char        hierSearch[128] = "";              // hierarchy search (atom name / component type)
@@ -213,6 +229,15 @@ private:
 	// LAST drawn frame (shift ranges resolve against it, browser-style).
 	long hierAnchorId = 0;
 	std::vector<Atom*> hierRows, hierRowsPrev;
+	// Per-atom row data (icon, label, dimmed, search match + subtree match) computed ONCE per
+	// hierarchy change (World::HierarchyVersion) or query change, not per frame per row.
+	struct HierRow { const char* icon = nullptr; std::string label; bool dim = false; bool match = true; bool deep = true; };
+	std::unordered_map<Atom*, HierRow> hierCache;
+	uint64_t    hierCacheVersion = 0;
+	std::string hierCacheQuery;
+	World*      hierCacheWorld = nullptr;
+	Atom*       hierCacheCam = nullptr;               // the pinned editor camera row
+	void RebuildHierCache(World* w);
 	std::vector<long>  pendingDeleteIds;   // deferred multi-delete (applied after the walk)
 	// Structural ops (group/ungroup/duplicate/paste/new-folder) requested from the context
 	// menu run AFTER the tree walk — reparenting removes list nodes the walk stands on.
@@ -313,6 +338,8 @@ private:
 	bool gbWinSet = false;                         // dialog confirmed: worker overrides the window block
 	nuke::NukeWindow gbWin{};                      // dialog model (game window settings for the dist)
 	bool gbLog   = false;                          // dist logToConsole
+	bool gbUpDLSS = true, gbUpFSR = true, gbUpXeSS = true;   // 4.2: which vendor upscaler runtimes (separate DLLs) ship in modules/
+	int  gbTechMode = 0;                                     // Vendor Tech: 0 All, 1 None, 2 Custom (the three above)
 	bool gbDebug = false;                          // dist gpuValidation (debug layer)
 	bool gbConsole = false;                        // dist devConsole (the in-game ~ console; ships the GUI backend)
 	int  gbBuildCfg = 0;                           // dist binaries: 0 = Release (ship), 1 = Debug (dev)
@@ -358,6 +385,11 @@ private:
 	};
 	std::vector<ModRow> modsUi;
 	int  modsUiTick = -1;                          // frame-count throttle for rescans
+	// Project Settings: the content scans behind the World / Input lists, cached and refreshed
+	// every ~2 s while the panel is open (a recursive scan + bfs::relative per file, per frame,
+	// cost more than the frame itself).
+	std::vector<std::string> psWorlds, psInputMaps;   // from the content index; rebuilt on its version
+	uint64_t psIndexVersion = 0; bool psIndexInit = false;
 	void ScanModsUi();                             // rebuild modsUi (config + mods/ dir + manifests)
 	void SaveModsUi();                             // write enabled rows (in order) to config/mods.json
 	// Persist the EDITOR's own mod selection (config/mods.json is the PLAYER's list) and
@@ -512,7 +544,6 @@ public:
 	void DrawAtomNode(Atom* atom);                 // one tree row + DnD (recurses children)
 	void HierGap(Atom* before);  // thin insertion zone overlaid on a row's top edge (only while dragging an atom)
 	bool HierMatch(Atom* atom);                    // search: atom name OR a component type matches
-	bool HierMatchDeep(Atom* atom);                // this atom or any descendant matches
 	const char* AtomIcon(Atom* atom);              // icon by the atom's components
 	void FocusSelected();                        // frame the selected atom with the editor camera
 	// inspector

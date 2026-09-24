@@ -3,6 +3,7 @@
 #include "nukeui.h"   // DocPanel: detachable panels
 #include <API/Model/Light.h>
 #include <cmath>
+#include <functional>
 
 static bool hierCI(const std::string& hay, const std::string& needle)
 {
@@ -36,11 +37,34 @@ bool EditorUI::HierMatch(Atom* atom)
 	return false;
 }
 
-bool EditorUI::HierMatchDeep(Atom* atom)
+// One walk per hierarchy / query change: icon, label, dimming and the search matches (own +
+// subtree) of every atom. DrawAtomNode then only reads.
+void EditorUI::RebuildHierCache(World* w)
 {
-	if (HierMatch(atom)) return true;
-	for (Atom* ch : atom->children) if (ch && HierMatchDeep(ch)) return true;
-	return false;
+	hierCache.clear();
+	hierCacheCam = nullptr;
+	if (!w) return;
+	const bool searching = (hierSearch[0] != 0);
+	std::function<bool(Atom*, bool)> walk = [&](Atom* a, bool parentDim) -> bool
+	{
+		HierRow row;
+		row.icon  = AtomIcon(a);
+		row.label = std::string(row.icon) + " " + a->GetName();
+		if (!a->modOrigin.empty()) row.label += "  [" + a->modOrigin + "]";
+		row.dim   = parentDim || !a->enabled;
+		row.match = !searching || HierMatch(a);
+		bool deep = row.match;
+		for (Atom* ch : a->children) if (ch && walk(ch, row.dim)) deep = true;
+		row.deep = deep;
+		hierCache[a] = std::move(row);   // after the recursion: the map may rehash while it grows
+		return deep;
+	};
+	for (Atom* atom : w->GetHierarchy())
+	{
+		if (!atom) continue;
+		if (atom->GetName() == "Editor Camera") { hierCacheCam = atom; continue; }
+		walk(atom, false);
+	}
 }
 
 void EditorUI::FocusSelected()
@@ -85,7 +109,10 @@ void EditorUI::DrawAtomNode(Atom* atom)
 	if (!atom) return;
 	AppInstance* app = AppInstance::GetSingleton();
 	bool searching = (hierSearch[0] != 0);
-	if (searching && !HierMatchDeep(atom)) return;   // hide non-matching subtrees while searching
+	auto rowIt = hierCache.find(atom);
+	if (rowIt == hierCache.end()) return;            // not in this frame's cache (appeared mid-draw)
+	const HierRow& row = rowIt->second;
+	if (searching && !row.deep) return;              // hide non-matching subtrees while searching
 
 	ImGui::PushID(atom);
 	hierRows.push_back(atom);   // visible-row order: shift ranges resolve against last frame's list
@@ -103,12 +130,9 @@ void EditorUI::DrawAtomNode(Atom* atom)
 		if (isAncestor) ImGui::SetNextItemOpen(true);
 	}
 
-	std::string rowLabel = std::string(AtomIcon(atom)) + " " + atom->GetName();
-	if (!atom->modOrigin.empty()) rowLabel += "  [" + atom->modOrigin + "]";
-	bool dim = !atom->enabled;
-	for (Atom* p = atom->parent; !dim && p; p = p->parent) dim = !p->enabled;
+	const bool dim = row.dim;
 	if (dim) ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-	bool open = ImGui::TreeNodeEx(rowLabel.c_str(), fl);
+	bool open = ImGui::TreeNodeEx(row.label.c_str(), fl);
 	if (dim) ImGui::PopStyleColor();
 	if (hierRevealPending && app->selectedInHieararchy == atom)
 	{
@@ -210,13 +234,27 @@ void EditorUI::winHierarchy()
 	{
 	if (bootLoading) { ImGui::TextDisabled("Loading project..."); return; }   // world still streaming in
 	AppInstance* app = AppInstance::GetSingleton();
+	World* world = app->currentWorld;
+	// The whole panel walks the lists: the fixed-update thread (scripts creating / reparenting /
+	// destroying atoms) waits on this lock instead of mutating them under the walk.
+	WorldLock gameGuard(world);
 
 	ImGui::SetNextItemWidth(-1);
 	ImGui::InputTextWithHint("##hsearch", ICON_LC_SEARCH " Search (atom or component)", hierSearch, sizeof(hierSearch));
 	ImGui::Separator();
 
+	// Row data is cached per atom; rebuilt only when the hierarchy version or the query changed.
+	{
+		const uint64_t ver = World::HierarchyVersion();
+		if (hierCacheWorld != world || hierCacheVersion != ver || hierCacheQuery != hierSearch)
+		{
+			hierCacheWorld = world; hierCacheVersion = ver; hierCacheQuery = hierSearch;
+			RebuildHierCache(world);
+		}
+	}
+
 	// Editor camera pinned at the top, outside the tree: not draggable/reparentable.
-	if (Atom* cam = app->currentWorld->Get("Editor Camera"))
+	if (Atom* cam = hierCacheCam)
 	{
 		bool sel = (app->selectedInHieararchy == cam);
 		if (ImGui::Selectable((std::string(ICON_LC_VIDEO) + " " + cam->GetName() + "##editorcam").c_str(), sel))

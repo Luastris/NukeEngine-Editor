@@ -17,7 +17,8 @@
 #include <import/assimporter.h>       // NUKE_IMPORT dev hook (probe runs)
 #include <API/Model/Animator.h>       // NUKE_PREFAB_ANIM_TEST dev hook
 #include <API/Model/BoneMap.h>
-#include <API/Model/Game.h>           // NUKE_ASSET_SHOT dev hook (editor screenshot)
+#include <API/Model/Game.h>
+#include <cstdio>   // NUKE_VIEW_SHOT pose parse           // NUKE_ASSET_SHOT dev hook (editor screenshot)
 #include <API/Model/SkinnedMeshRenderer.h>
 #include <API/Model/AnimClip.h>
 #include <API/Model/resdb.h>
@@ -657,6 +658,46 @@ void EditorUI::Draw()
 		// screenshot the editor (probe runs: verify skeleton/ragdoll/mesh previews visually).
 		// TIME-based delays: frame counts melt away on a fast editor (500 fps = the window
 		// never even opened before the shot).
+		// Dev hook: NUKE_VIEW_SHOT=<png>|<seconds>|x,y,z,rx,ry,rz - the editor camera parked at that
+		// pose (position + Euler degrees, the inspector's numbers), the window shot after the delay.
+		static int vshotState = -2; static double vshotAt = 0.0; static std::string vshotPng; static float vpose[6]; static bool vposeSet = false;
+		if (vshotState == -2)
+		{
+			const char* e = std::getenv("NUKE_VIEW_SHOT");
+			vshotState = (e && e[0]) ? 0 : -1;
+			if (vshotState == 0)
+			{
+				std::string s = e; double secs = 10.0;
+				const size_t b1 = s.find('|');
+				vshotPng = s.substr(0, b1);
+				if (b1 != std::string::npos)
+				{
+					const size_t b2 = s.find('|', b1 + 1);
+					secs = atof(s.substr(b1 + 1, b2 == std::string::npos ? std::string::npos : b2 - b1 - 1).c_str());
+					if (b2 != std::string::npos)
+						vposeSet = sscanf(s.c_str() + b2 + 1, "%f,%f,%f,%f,%f,%f", &vpose[0], &vpose[1], &vpose[2], &vpose[3], &vpose[4], &vpose[5]) == 6;
+				}
+				vshotAt = nuke::Time::getSingleton()->elapsed + secs;
+			}
+		}
+		if (vshotState == 0 && vposeSet && editorCam && editorCam->transform)
+		{
+			editorCam->transform->position = nuke::Vector3(vpose[0], vpose[1], vpose[2]);
+			editorCam->transform->setEuler(vpose[3], vpose[4], vpose[5]);
+		}
+		// NUKE_OPEN_SETTINGS=1 opens Project Settings 3 s before the shot (a panel's frame cost, measured below).
+		static double vframeAcc = 0.0; static int vframeN = 0;
+		if (vshotState == 0 && nuke::Time::getSingleton()->elapsed >= vshotAt - 3.0)
+		{
+			if (std::getenv("NUKE_OPEN_SETTINGS")) settingsOpen = true;
+			if (nuke::Time::getSingleton()->elapsed >= vshotAt - 1.0) { vframeAcc += nuke::Time::getSingleton()->delta; ++vframeN; }
+		}
+		if (vshotState == 0 && nuke::Time::getSingleton()->elapsed >= vshotAt)
+		{
+			vshotState = 1;
+			nuke::Game::Screenshot(vshotPng);
+			std::cout << "[ViewShot]	wrote " << vshotPng << " (last second: " << vframeN << " frames, " << (vframeN ? vframeAcc * 1000.0 / vframeN : 0.0) << " ms avg)" << std::endl;
+		}
 		static int ashotState = -2;   // -2 unresolved, -1 off, 0 waiting-to-open, 1 waiting-to-shoot, 2 done
 		static double ashotAt = 0.0;
 		static std::string ashotPath, ashotPng;
@@ -759,13 +800,7 @@ void EditorUI::Draw()
 		return;
 	}
 
-	// Hot-reload shaders + assets edited on disk. Not while booting: the content scan is
-	// still writing ResDB on a worker.
-	if (!bootLoading && (++hotReloadTick % 30) == 0)
-	{
-		ResDB::getSingleton()->HotReloadShaders(AppInstance::GetSingleton()->render);
-		ResDB::getSingleton()->HotReloadAssets(AppInstance::GetSingleton()->render);
-	}
+	// (Shaders and assets edited on disk hot-reload through ResDB's FileIndex subscription: no poll.)
 
 	// PIE: run per-frame game logic while playing. The fixed-step update runs on
 	// AppInstance's fixed-frequency thread, gated on playState internally.
@@ -853,6 +888,7 @@ void EditorUI::PushUndo(const std::string& label, std::function<void()> undoFn, 
 {
 	// Non-world commands inherit the current world serial, so they don't flip the dirty state.
 	const long ws = worldEdit ? ++editSerial : WorldEditSerial();
+	if (worldEdit) World::BumpHierarchy();   // rows may show the edited value (icon, name, enabled)
 	undoStack.push_back({ std::move(undoFn), std::move(redoFn), label, ws });
 	if (undoStack.size() > 200) { undoStack.erase(undoStack.begin()); ++undoTrimmed; }
 	redoStack.clear();

@@ -2284,6 +2284,7 @@ bool EditorUI::DrawPrefabAtomEditor(AssetEditorWin& w, Atom* a)
 		toRemove->Destroy();
 		a->components.remove(toRemove);
 		delete toRemove;
+		World::BumpHierarchy();
 		edited = true;
 	}
 

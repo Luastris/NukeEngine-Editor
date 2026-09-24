@@ -117,14 +117,25 @@ void EditorUI::SaveWorldAsCmd()
 // Recursive folder tree for the save dialog; clicking a folder selects it as the save target.
 void EditorUI::SaveAsFolderTree(const std::string& dir)
 {
-	boost::system::error_code ec;
-	for (auto& de : bfs::directory_iterator(bfs::path(dir), ec))
+	auto snap = nuke::FileIndex::Get().Get("content");   // folders from the index, no disk walk
+	if (!snap) return;
+	std::string relDir;
 	{
-		if (!bfs::is_directory(de.path())) continue;
-		std::string full = de.path().string();
+		bfs::path r2 = bfs::path(dir).lexically_relative(bfs::path(contentDir));
+		std::string rs = r2.generic_string();
+		if (!rs.empty() && rs != "." && rs.compare(0, 2, "..") != 0) relDir = rs;
+	}
+	std::vector<const nuke::FileIndex::Entry*> kids;
+	snap->Children(relDir, kids);
+	for (const nuke::FileIndex::Entry* e : kids)
+	{
+		if (!e->isDir) continue;
+		size_t s = e->rel.rfind('/');
+		std::string name = s == std::string::npos ? e->rel : e->rel.substr(s + 1);
+		std::string full = (bfs::path(dir) / name).string();
 		ImGuiTreeNodeFlags fl = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth;
 		if (full == saveAsDir) fl |= ImGuiTreeNodeFlags_Selected;
-		bool open = ImGui::TreeNodeEx((std::string(ICON_LC_FOLDER) + " " + de.path().filename().string()).c_str(), fl);
+		bool open = ImGui::TreeNodeEx((std::string(ICON_LC_FOLDER) + " " + name).c_str(), fl);
 		if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) saveAsDir = full;
 		if (open) { SaveAsFolderTree(full); ImGui::TreePop(); }
 	}
@@ -316,25 +327,31 @@ void EditorUI::winSettings()
 		const ProjectSettings PSD = defaultPS();   // per-field default source for resetBtn
 
 		static const char* kCats[] = { "World", "Rendering", "Packaging", "Modules", "Mods", "Disk sync", "Layers", "Input" };
+		{   // The World / Input lists come from the content index: rebuilt only when it changes.
+			const uint64_t ver = nuke::FileIndex::Get().Version("content");
+			if (!psIndexInit || ver != psIndexVersion)
+			{
+				psIndexInit = true; psIndexVersion = ver; psWorlds.clear(); psInputMaps.clear();
+				if (auto snap = nuke::FileIndex::Get().Get("content"))
+				{
+					std::vector<const nuke::FileIndex::Entry*> found;
+					snap->WithExtension(".nuinput", found);
+					for (const nuke::FileIndex::Entry* e : found) psInputMaps.push_back(e->rel);
+					found.clear();
+					snap->WithExtension(".nuworld", found);
+					for (const nuke::FileIndex::Entry* e : found)
+					{
+						// Cell files of a split-saved streamed world are internals, not worlds.
+						if (e->rel.find(".cells/") != std::string::npos) continue;
+						psWorlds.push_back(bfs::path(e->rel).make_preferred().string());
+					}
+				}
+			}
+		}
 		shellProj.Begin("projset", kCats, IM_ARRAYSIZE(kCats));
 		if (shellProj.Section("World", "World", "default world startup scene"))
 		{
-		std::vector<std::string> worlds;
-		{
-			boost::system::error_code ec;
-			bfs::path root(contentDir);
-			if (bfs::exists(root, ec))
-				for (bfs::recursive_directory_iterator it(root, ec), end; it != end; it.increment(ec))
-				{
-					if (ec) break;
-					if (bfs::is_directory(it->path())) continue;
-					// Cell files of a split-saved streamed world are internals, not worlds.
-					const std::string rel = bfs::relative(it->path(), root, ec).generic_string();
-					if (rel.find(".cells/") != std::string::npos) continue;
-					if (it->path().extension() == ".nuworld")
-						worlds.push_back(bfs::relative(it->path(), root, ec).string());
-				}
-		}
+		const std::vector<std::string>& worlds = psWorlds;
 		const char* cur = startupWorld.empty() ? "(none)" : startupWorld.c_str();
 		if (ImGui::BeginCombo(LProp("Default World").c_str(), cur))
 		{
@@ -474,20 +491,14 @@ void EditorUI::winSettings()
 				if (ImGui::BeginPopup("##giconpop"))   // every .ico in the project content
 				{
 					if (ImGui::Selectable("(none)", gameIcon.empty())) { gameIcon.clear(); SaveProject(); ImGui::CloseCurrentPopup(); }
-					boost::system::error_code ec;
-					bfs::path croot(contentDir);
-					if (bfs::exists(croot, ec))
-						for (bfs::recursive_directory_iterator dit(croot, ec), dend; dit != dend; dit.increment(ec))
-						{
-							if (ec) break;
-							if (bfs::is_directory(dit->path())) continue;
-							std::string e = dit->path().extension().string();
-							for (char& c : e) c = (char)tolower((unsigned char)c);
-							if (e != ".ico") continue;
-							std::string rel = bfs::relative(dit->path(), croot, ec).generic_string();
-							if (ImGui::Selectable((rel + "##gi").c_str(), rel == gameIcon))
-							{ gameIcon = rel; SaveProject(); ImGui::CloseCurrentPopup(); }
-						}
+					if (auto snap = nuke::FileIndex::Get().Get("content"))   // from the index, no disk walk
+					{
+						std::vector<const nuke::FileIndex::Entry*> icos;
+						snap->WithExtension(".ico", icos);
+						for (const nuke::FileIndex::Entry* e : icos)
+							if (ImGui::Selectable((e->rel + "##gi").c_str(), e->rel == gameIcon))
+							{ gameIcon = e->rel; SaveProject(); ImGui::CloseCurrentPopup(); }
+					}
 					ImGui::EndPopup();
 				}
 				ImGui::SameLine(0, 2);
@@ -864,18 +875,7 @@ void EditorUI::winSettings()
 		{ inputMapsAuto = false; SaveProject(); ApplyInputMaps(); }
 
 		// Discovered maps (content-relative), with enable checkboxes in explicit mode.
-		std::vector<std::string> found;
-		{
-			boost::system::error_code ec;
-			bfs::path root(contentDir);
-			if (bfs::exists(root, ec))
-				for (bfs::recursive_directory_iterator it(root, ec), end; it != end; it.increment(ec))
-					if (!ec && it->path().extension() == ".nuinput")
-					{
-						std::string rel = bfs::relative(it->path(), root, ec).generic_string();
-						if (!ec) found.push_back(rel);
-					}
-		}
+		const std::vector<std::string>& found = psInputMaps;
 		if (found.empty()) ImGui::TextDisabled("No .nuinput files in content.");
 		for (const std::string& rel : found)
 		{

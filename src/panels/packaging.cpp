@@ -1134,6 +1134,8 @@ void EditorUI::PackageProjectNow()
 	const bool gbLogS = gbSet && gbLog;
 	const bool gbDbgS = gbSet && gbDebug;
 	const bool gbConsS = gbSet && gbConsole;   // the in-game dev console (~) in the dist
+	// The vendor upscaler runtimes ship by default (what the renderer can use); the dialog can drop each.
+	const bool upDLSS = !gbSet || gbUpDLSS, upFSR = !gbSet || gbUpFSR, upXeSS = !gbSet || gbUpXeSS;
 	const std::string gameName = projectName.empty() ? std::string("NukeGame") : projectName;
 	const std::string icon = gameIcon.empty() ? std::string()
 	                        : AppInstance::GetSingleton()->ResolveContent(gameIcon);
@@ -1171,7 +1173,7 @@ void EditorUI::PackageProjectNow()
 	StatusBar::Set("package", "Packaging project (" + distCfg + ")...", StatusBar::kIndeterminate);
 	nuke::Jobs::Schedule([this, projDir, projFile, content, gameName, icon, method, level, blockMB, splitMode, splitCapMB,
 	                      pkgMods, distStr, guidFiles, distCfg, quiet,
-	                      gbSet, gbCfg, gbLogS, gbDbgS, gbConsS]()
+	                      gbSet, gbCfg, gbLogS, gbDbgS, gbConsS, upDLSS, upFSR, upXeSS]()
 	{
 		Package::CreateOptions pakOpts; pakOpts.blockBytes = (uint32_t)blockMB << 20;
 		boost::system::error_code ec;
@@ -1616,6 +1618,7 @@ void EditorUI::PackageProjectNow()
 				cj["logToConsole"]  = gbLogS;
 				cj["gpuValidation"] = gbDbgS;
 				cj["devConsole"]    = gbConsS;   // the in-game ~ console (packaged default is OFF)
+				cj["upscalers"]     = nlohmann::json{{"dlss", upDLSS}, {"fsr", upFSR}, {"xess", upXeSS}};   // which vendor runtimes shipped
 				boost::system::error_code cec;
 				bfs::create_directories(dist / "config", cec);   // first package: config/ doesn't exist yet
 				// Fast loading: ship the WARM shader bytecode caches (backend IL — GPU-agnostic) and
@@ -1694,6 +1697,35 @@ void EditorUI::PackageProjectNow()
 				}
 				if (!CopyOne(src, dist / shipDir / shipName))
 					std::cout << "[Package]\tmodule missing, skipped: " << m << std::endl;
+			}
+			// 4.2 vendor upscaler runtimes: separate DLLs the renderer loads by name from modules/
+			// (absent = the upscaler is not offered). Each ships by its own switch of the dialog.
+			if (shipMods.count("NukeRenderDiligent"))
+			{
+				struct { const char* file; bool on; const char* what; } runtimes[] = {
+					{ "nvngx_dlss.dll",                  upDLSS, "DLSS" },
+					// DLSS Frame Generation rides Streamline: the interposer, its plugins and the FG model
+					{ "sl.interposer.dll",               upDLSS, "DLSS-G (Streamline)" },
+					{ "sl.common.dll",                   upDLSS, "DLSS-G (Streamline)" },
+					{ "sl.dlss_g.dll",                   upDLSS, "DLSS-G (Streamline)" },
+					{ "sl.reflex.dll",                   upDLSS, "DLSS-G (Streamline)" },
+					{ "sl.pcl.dll",                      upDLSS, "DLSS-G (Streamline)" },
+					{ "nvngx_dlssg.dll",                 upDLSS, "DLSS-G (Streamline)" },
+					{ "NvLowLatencyVk.dll",              upDLSS, "DLSS-G (Reflex, Vulkan)" },
+					{ "amd_fidelityfx_upscaler_dx12.dll", upFSR,  "FSR" },
+					{ "amd_fidelityfx_framegeneration_dx12.dll", upFSR, "FSR FG" },
+					{ "amd_fidelityfx_vk.dll",           upFSR,  "FSR (Vulkan: upscaler + FG)" },
+					{ "libxess.dll",                     upXeSS, "XeSS" },
+					{ "libxess_fg.dll",                  upXeSS, "XeSS-FG" },
+					{ "libxell.dll",                     upXeSS, "XeSS-FG (XeLL)" } };
+				for (const auto& r : runtimes)
+				{
+					boost::system::error_code rec;
+					const bfs::path src = rt / "modules" / r.file;
+					if (!bfs::exists(src, rec)) continue;   // not in this build tree: nothing to decide
+					if (!r.on) { std::cout << "[Package]\t" << r.what << " runtime left out (dialog)" << std::endl; continue; }
+					if (CopyOne(src, dist / "modules" / r.file)) std::cout << "[Package]\t" << r.what << " runtime shipped: modules/" << r.file << std::endl;
+				}
 			}
 			// Module dist extras: relative sources resolve against the shipped runtime dir,
 			// absolute as-is; directories copy recursively.
@@ -2533,6 +2565,7 @@ void EditorUI::PackageProjectCmd()
 	// Log/debug are GAME defaults (off), not the editor's values.
 	nuke::NukeWindow w = nuke::Config::getSingleton()->window;
 	gbLog = false; gbDebug = false; gbConsole = false;
+	gbUpDLSS = gbUpFSR = gbUpXeSS = true; gbTechMode = 0;
 	{
 		bfs::path dist = distPath.empty() ? (bfs::path(projectDir) / "dist")
 		               : (bfs::path(distPath).is_absolute() ? bfs::path(distPath)
@@ -2549,6 +2582,13 @@ void EditorUI::PackageProjectCmd()
 					gbLog     = p.value("logToConsole",  false);
 					gbDebug   = p.value("gpuValidation", false);
 					gbConsole = p.value("devConsole",    false);
+					if (p.contains("upscalers") && p["upscalers"].is_object())
+					{
+						gbUpDLSS = p["upscalers"].value("dlss", true);
+						gbUpFSR  = p["upscalers"].value("fsr",  true);
+						gbUpXeSS = p["upscalers"].value("xess", true);
+						gbTechMode = (gbUpDLSS && gbUpFSR && gbUpXeSS) ? 0 : (!gbUpDLSS && !gbUpFSR && !gbUpXeSS) ? 1 : 2;
+					}
 				}
 				if (p.is_object() && p.contains("window") && p["window"].is_object())
 				{
@@ -2621,6 +2661,31 @@ void EditorUI::DrawPackageProjectPopup()
 	ImGui::Checkbox("Ray Tracing", &gbWin.rayTracing);
 	ImGui::SameLine(); ImGui::TextDisabled("(?)");
 	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Off = force the raster path (shadow maps/SSR) even on RT-capable GPUs.");
+#ifdef _WIN32
+	{   // 4.2: the vendor upscaler + frame-generation runtimes are separate DLLs. The same switch as
+		// CMake's NUKE_TECH and stage_release's -Tech: All, None, or a custom subset.
+		const char* techModes[] = { "All", "None", "Custom" };
+		ImGui::SetNextItemWidth(110.0f);
+		if (ImGui::Combo("Vendor Tech", &gbTechMode, techModes, IM_ARRAYSIZE(techModes)))
+		{
+			if (gbTechMode == 0) gbUpDLSS = gbUpFSR = gbUpXeSS = true;
+			else if (gbTechMode == 1) gbUpDLSS = gbUpFSR = gbUpXeSS = false;
+		}
+		ImGui::SameLine(); ImGui::TextDisabled("(?)");
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Which vendor upscaler + frame-generation runtimes ship in modules/ (All, None, or Custom):\n"
+		                                              "DLSS = nvngx_dlss.dll ~52 MB + Streamline DLSS-G ~10 MB; FSR = amd_fidelityfx_upscaler_dx12.dll\n"
+		                                              "~27 MB + framegeneration ~38 MB + amd_fidelityfx_vk.dll; XeSS = libxess.dll ~74 MB + libxess_fg.dll ~22 MB + libxell.dll.\n"
+		                                              "The renderer loads them by name: a runtime left out is simply not offered; FSR 1 always is.");
+		if (gbTechMode == 2)
+		{
+			ImGui::Indent();
+			ImGui::Checkbox("DLSS##gb_up", &gbUpDLSS); ImGui::SameLine();
+			ImGui::Checkbox("FSR##gb_up", &gbUpFSR); ImGui::SameLine();
+			ImGui::Checkbox("XeSS##gb_up", &gbUpXeSS);
+			ImGui::Unindent();
+		}
+	}
+#endif
 	{
 		ImGui::SetNextItemWidth(110.0f);
 		ImGui::InputInt("##gb_w", &gbWin.w, 0);
