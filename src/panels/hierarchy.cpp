@@ -145,6 +145,9 @@ void EditorUI::DrawAtomNode(Atom* atom)
 	// drag&drop into another component's field. The expand arrow toggles on PRESS — suppress its release.
 	static bool s_toggleSuppress = false;
 	if (ImGui::IsItemToggledOpen()) s_toggleSuppress = true;
+	// A selection made HERE is already on screen: it must not trigger the reveal scroll below
+	// (that is for selections made elsewhere — viewport, script, undo).
+	auto pickedHere = [&]{ hierLastSel = app->selectedInHieararchy; hierRevealPending = false; };
 	if (ImGui::IsItemHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Left)
 	    && !ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left) && !s_toggleSuppress)
 	{
@@ -152,14 +155,15 @@ void EditorUI::DrawAtomNode(Atom* atom)
 		if (io.KeyShift)     HierRange(atom, io.KeyCtrl);
 		else if (io.KeyCtrl) HierToggle(atom);
 		else                 HierSelect(atom);
+		pickedHere();
 	}
 	if (!ImGui::IsMouseDown(ImGuiMouseButton_Left) && !ImGui::IsMouseReleased(ImGuiMouseButton_Left))
 		s_toggleSuppress = false;   // cleared once the click fully settles
-	if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) { HierSelect(atom); FocusSelected(); }
+	if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) { HierSelect(atom); pickedHere(); FocusSelected(); }
 
 	// Explorer semantics: right-clicking INSIDE the multi-selection keeps it (ops act on all).
 	if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right))
-		if (!app->IsSelected(atom)) HierSelect(atom);
+		if (!app->IsSelected(atom)) { HierSelect(atom); pickedHere(); }
 	if (ImGui::BeginPopupContextItem("##atomctx"))
 	{
 		const int nSel = (int)std::max<size_t>(app->Selection().size(), 1);
@@ -258,10 +262,12 @@ void EditorUI::winHierarchy()
 	{
 		bool sel = (app->selectedInHieararchy == cam);
 		if (ImGui::Selectable((std::string(ICON_LC_VIDEO) + " " + cam->GetName() + "##editorcam").c_str(), sel))
-			app->selectedInHieararchy = cam;
+		{ app->selectedInHieararchy = cam; hierLastSel = cam; hierRevealPending = false; }   // picked here: no reveal scroll
 		ImGui::Separator();
 	}
 
+	// Reveal (open the branch + scroll the row into view) ONLY for a selection made outside this
+	// panel: viewport pick, script, undo/redo, locate. Clicks in the tree mark themselves above.
 	if (app->selectedInHieararchy != hierLastSel)
 	{
 		hierLastSel = app->selectedInHieararchy;
