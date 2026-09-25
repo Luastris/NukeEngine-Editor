@@ -748,9 +748,13 @@ int main(int argc, char** argv)
 	// Engine atom templates for the "+" create menu; modules register their own from OnLoad.
 	nuke::RegisterAtomCreator({ "Effects", "Wind Zone", "\xee\x86\xb0" /* ICON_LC_WIND */, { "WindZone" } });
 	nuke::RegisterAtomCreator({ "Effects", "Force Field", "\xee\x8a\xb5" /* ICON_LC_MAGNET */, { "ForceField" } });      // attract / repel / vortex / turbulence: particles, fluid fog, foliage
+	nuke::RegisterAtomCreator({ "Effects", "Time Volume", "\xee\x87\xa0" /* ICON_LC_TIMER */, { "TimeVolume" } });       // local time scale (slow-mo / freeze / haste zones)
+	nuke::RegisterAtomCreator({ "Effects", "PostFX Volume", "\xee\x90\x92" /* ICON_LC_SPARKLES */, { "PostFXVolume" } }); // local post-chain / exposure overrides
 	// Engine component icons for the viewport overlay.
 	nuke::RegisterComponentIcon({ "WindZone", "\xee\x86\xb0" /* ICON_LC_WIND */, { 0.63f, 0.9f, 0.78f, 0.92f } });
 	nuke::RegisterComponentIcon({ "ForceField", "\xee\x8a\xb5" /* ICON_LC_MAGNET */, { 0.55f, 0.82f, 1.0f, 0.92f } });
+	nuke::RegisterComponentIcon({ "TimeVolume", "\xee\x87\xa0" /* ICON_LC_TIMER */, { 1.0f, 0.8f, 0.2f, 0.92f } });
+	nuke::RegisterComponentIcon({ "PostFXVolume", "\xee\x90\x92" /* ICON_LC_SPARKLES */, { 0.85f, 0.7f, 1.0f, 0.92f } });
 	nuke::RegisterComponentIcon({ "HingeJoint",    "\xee\x8b\xaa" /* ICON_LC_ROTATE_3D */, { 0.5f, 0.8f, 1.0f, 0.92f } });
 	nuke::RegisterComponentIcon({ "SliderJoint",   "\xee\x90\xbe" /* ICON_LC_UNFOLD_VERTICAL */, { 0.5f, 0.8f, 1.0f, 0.92f } });
 	nuke::RegisterComponentIcon({ "DistanceJoint", "\xee\x84\x82" /* ICON_LC_LINK */, { 0.5f, 0.8f, 1.0f, 0.92f } });
