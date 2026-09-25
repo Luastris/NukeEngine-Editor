@@ -439,7 +439,7 @@ private:
 	int         pluginServiceFilter = 0;           // plugin window: 0=All, 1=Utility, 2+=service index
 	float camYaw = 0.0f, camPitch = 0.0f;   // editor camera look angles (radians)
 	float gizmoMatrix[16] = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };   // persistent during a gizmo drag
-	// grid snap: toolbar toggle + increments, persisted in the .nuproj. Ctrl INVERTS the
+	// grid snap: toolbar toggle + increments, persisted in editor_state.json (per-project editor state). Ctrl INVERTS the
 	// toggle while held (temporary snap / temporary free); V holds surface snap while moving.
 	bool  snapEnabled = false;
 	float snapMove = 0.5f, snapRot = 15.0f, snapScale = 0.1f;

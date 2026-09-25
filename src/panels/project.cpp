@@ -75,8 +75,6 @@ void EditorUI::SaveProject()
 	j["services"] = serviceChoices;
 	j["layers"] = nuke::Layers::All();   // render-layer slot names
 	// viewport snap (toggle + increments) — a project convention, not a machine preference.
-	j["snap"] = { {"on", snapEnabled}, {"move", snapMove}, {"rot", snapRot}, {"scale", snapScale},
-	              {"grid", gridVisible} };
 	// input maps: the key is ABSENT in auto mode (every .nuinput loads); present = explicit.
 	if (!inputMapsAuto) j["inputMaps"] = inputMapsList;
 	// Serialize before opening the file: ofstream truncates on open, so a dump() throw would
@@ -120,14 +118,6 @@ void EditorUI::LoadProject()
 	{
 		bfs::ifstream bm{bfs::path(projectDir + "/.nupak_base")};
 		if (bm) std::getline(bm, basePakPath);
-	}
-	if (j.contains("snap") && j["snap"].is_object())
-	{
-		snapEnabled = j["snap"].value("on", false);
-		snapMove    = j["snap"].value("move", 0.5f);
-		snapRot     = j["snap"].value("rot", 15.0f);
-		snapScale   = j["snap"].value("scale", 0.1f);
-		gridVisible = j["snap"].value("grid", true);
 	}
 	inputMapsAuto = true; inputMapsList.clear();
 	if (j.contains("inputMaps") && j["inputMaps"].is_array())
@@ -750,6 +740,9 @@ void EditorUI::SaveEditorState()
 	j["uiOpen"]  = o;
 	j["browser"] = { {"view", browserView}, {"cwd", browserCwd}, {"search", std::string(browserSearch)},
 	                 {"fMesh", fMesh}, {"fMat", fMat}, {"fTex", fTex}, {"fPrefab", fPrefab} };
+	// Grid snap + world grid: how the user works in THIS project's editor — editor state, not game data.
+	j["snap"] = { {"on", snapEnabled}, {"move", snapMove}, {"rot", snapRot}, {"scale", snapScale},
+	              {"grid", gridVisible} };
 	if (win) j["panels"] = { {"hierarchy", win->hierarchy}, {"console", win->console}, {"browser", win->browser},
 	                         {"inspector", win->inspector}, {"render", win->render}, {"plugmgr", win->plugmgr}, {"about", win->about} };
 	nlohmann::json wo = nlohmann::json::object();   // host-owned window open flags
@@ -775,6 +768,14 @@ void EditorUI::LoadEditorState()
 	if (j.contains("selected") && j["selected"].is_number_integer())
 		pendingSelectId = (long)j["selected"].get<long long>();
 	lastWorld = j.value("lastWorld", std::string());
+	if (j.contains("snap") && j["snap"].is_object())
+	{
+		snapEnabled = j["snap"].value("on", false);
+		snapMove    = j["snap"].value("move", 0.5f);
+		snapRot     = j["snap"].value("rot", 15.0f);
+		snapScale   = j["snap"].value("scale", 0.1f);
+		gridVisible = j["snap"].value("grid", true);
+	}
 	if (j.contains("editorCamera") && editorCam && editorCam->transform)
 	{
 		nlohmann::json& jc = j["editorCamera"];

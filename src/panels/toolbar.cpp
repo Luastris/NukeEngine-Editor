@@ -271,7 +271,7 @@ void EditorUI::Toolbar()
 		if (ToolBtn(ICON_LC_MAGNET, snapEnabled ? "Snap ON (Ctrl = free)\nRight-click: increments"
 		                                        : "Snap OFF (Ctrl = snap)\nRight-click: increments",
 		            snapEnabled, bw))
-			snapEnabled = !snapEnabled;
+			snapEnabled = !snapEnabled;   // persisted in editor_state.json with the rest of the editor state
 		if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) ImGui::OpenPopup("##nuke-snap");
 		if (ImGui::BeginPopup("##nuke-snap"))
 		{
