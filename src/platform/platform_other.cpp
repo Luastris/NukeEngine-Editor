@@ -121,10 +121,10 @@ std::string EditorPickIconFile()
 	return RunOpenDialog("Pick the game icon", { "ico", "png", "icns" }, true, false, "Icons");
 }
 
-// Native "pick folder" dialog (build output path).
-std::string EditorPickFolder()
+// Native "pick folder" dialog (build output path, mod project).
+std::string EditorPickFolder(const char* title, const std::string& /*startDir*/)
 {
-	return RunOpenDialog("Pick the build output folder", {}, false, true);
+	return RunOpenDialog(title ? title : "Pick a folder", {}, false, true);
 }
 
 // Native "open file" dialog for projects: raw .nuproj, packed .nupak, mod .numod.

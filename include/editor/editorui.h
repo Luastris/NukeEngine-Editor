@@ -56,7 +56,8 @@ using namespace std;
 // Each returns the picked path, or "" if cancelled.
 std::string EditorPickModelFile();
 std::string EditorPickIconFile();   // .ico picker (game icon)
-std::string EditorPickFolder();     // folder picker (build path)
+std::string EditorPickFolder(const char* title = "Pick the build output folder",
+                             const std::string& startDir = std::string());   // folder picker (build path, mod project)
 std::string EditorPickProjectFile();// .nuproj / .nupak / .numod picker
 std::string EditorPickExeFile();    // .exe picker (custom external editor)
 bool        EditorRelaunch(const std::string& projectPath);   // spawn a new editor on that project
@@ -310,6 +311,7 @@ public:
 private:
 	int  startupProjectMode = 0;                   // pref: 0 = open last project, 1 = always show the hub
 	std::vector<std::string> recentProjects;       // pref: most-recent-first absolute .nuproj paths
+	std::map<std::string, std::string> modProjectDirs;   // pref: archive (.nupak/.numod) -> the work project folder the user picked
 	void PushRecentProject(const std::string& path);   // record an opened project (dedup, cap, persist)
 	void DrawProjectHub();
 	void OpenProjectCmd();                         // File -> Open Project... (raw or packed)

@@ -209,8 +209,8 @@ bool EditorRelaunch(const std::string& projectPath)
 	return true;
 }
 
-// Native "pick folder" dialog (build output path). Returns "" if cancelled.
-std::string EditorPickFolder()
+// Native "pick folder" dialog (build output path, mod project). Returns "" if cancelled.
+std::string EditorPickFolder(const char* title, const std::string& startDir)
 {
 	std::string out;
 	HRESULT ci = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);   // S_FALSE = already up; only uninit on S_OK
@@ -220,7 +220,25 @@ std::string EditorPickFolder()
 		DWORD opts = 0;
 		dlg->GetOptions(&opts);
 		dlg->SetOptions(opts | FOS_PICKFOLDERS | FOS_PATHMUSTEXIST | FOS_NOCHANGEDIR);
-		dlg->SetTitle(L"Pick the build output folder");
+		std::wstring wtitle;
+		{
+			const char* t = title ? title : "Pick a folder";
+			int n = MultiByteToWideChar(CP_UTF8, 0, t, -1, NULL, 0);
+			if (n > 1) { wtitle.resize(n - 1); MultiByteToWideChar(CP_UTF8, 0, t, -1, &wtitle[0], n); }
+		}
+		dlg->SetTitle(wtitle.c_str());
+		if (!startDir.empty())   // open on the suggested folder (the archive's own)
+		{
+			std::wstring wdir;
+			int n = MultiByteToWideChar(CP_UTF8, 0, startDir.c_str(), -1, NULL, 0);
+			if (n > 1) { wdir.resize(n - 1); MultiByteToWideChar(CP_UTF8, 0, startDir.c_str(), -1, &wdir[0], n); }
+			IShellItem* start = nullptr;
+			if (SUCCEEDED(SHCreateItemFromParsingName(wdir.c_str(), NULL, IID_PPV_ARGS(&start))) && start)
+			{
+				dlg->SetFolder(start);
+				start->Release();
+			}
+		}
 		if (SUCCEEDED(dlg->Show(NULL)))
 		{
 			IShellItem* item = nullptr;

@@ -422,6 +422,10 @@ void EditorUI::LoadPreferences()
 			if (j.contains("recentProjects") && j["recentProjects"].is_array())
 				for (auto& r : j["recentProjects"])
 					if (r.is_string()) recentProjects.push_back(r.get<std::string>());
+			modProjectDirs.clear();   // archive -> the work project folder the user picked (open-with .nupak/.numod)
+			if (j.contains("modProjects") && j["modProjects"].is_object())
+				for (auto& kv : j["modProjects"].items())
+					if (kv.value().is_string()) modProjectDirs[kv.key()] = kv.value().get<std::string>();
 		}
 	}
 	// Doc windows must know the default BEFORE their first frame: module draw callbacks can
@@ -455,6 +459,7 @@ void EditorUI::SavePreferences()
 		j["hotkeys"] = hk;
 	}
 	j["recentProjects"]     = recentProjects;       // newest-first absolute .nuproj paths
+	j["modProjects"]        = modProjectDirs;       // archive -> picked work project folder
 	bfs::ofstream f(PreferencesPath(), std::ios::trunc);
 	if (f) f << j.dump(2);
 }

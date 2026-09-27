@@ -2749,9 +2749,46 @@ void EditorUI::DrawPackageProjectPopup()
 	ImGui::EndPopup();
 }
 
+// Where an archive's work project lives: the folder the user picked for it, remembered in
+// preferences.json ("modProjects": archive -> folder). Nothing is ever created beside the
+// archive on its own — a cancelled dialog means no session. The picked folder is used as is
+// when it is empty or already this project; otherwise "<stem><suffix>" goes inside it.
+static bfs::path PreferencesFile() { return nuke::Config::userDataDir() / "NukeEngine" / "preferences.json"; }
+static bfs::path ChooseWorkProjectDir(const bfs::path& pak, const char* suffix, const char* title)
+{
+	boost::system::error_code ec;
+	const std::string key = pak.generic_string();
+	nlohmann::json prefs = nlohmann::json::object();
+	{
+		bfs::ifstream f(PreferencesFile());
+		if (f) { prefs = nlohmann::json::parse(f, nullptr, false); if (prefs.is_discarded() || !prefs.is_object()) prefs = nlohmann::json::object(); }
+	}
+	if (prefs.contains("modProjects") && prefs["modProjects"].is_object())
+	{
+		const std::string remembered = prefs["modProjects"].value(key, std::string());
+		if (!remembered.empty() && bfs::is_directory(remembered, ec)) return bfs::path(remembered);
+	}
+	const std::string picked = EditorPickFolder(title, pak.parent_path().string());
+	if (picked.empty())
+	{
+		std::cout << "[Package]\tno folder chosen for the work project of " << pak.filename().string() << " — nothing created" << std::endl;
+		return bfs::path();
+	}
+	bfs::path work(picked);
+	const bool own = bfs::exists(work / ".nupak_base", ec) || bfs::exists(work / "game.nuproj", ec);
+	if (!own && !bfs::is_empty(work, ec)) work /= pak.stem().string() + suffix;   // a folder with other things in it: our own subfolder
+	bfs::create_directories(work, ec);
+	prefs["modProjects"][key] = work.generic_string();
+	bfs::create_directories(PreferencesFile().parent_path(), ec);
+	bfs::ofstream o(PreferencesFile(), std::ios::trunc);
+	if (o) o << prefs.dump(2);
+	std::cout << "[Package]\twork project for " << pak.filename().string() << ": " << work.string() << " (remembered in preferences)" << std::endl;
+	return work;
+}
+
 // Open-with for a packed project (.nupak): mount it read-only and put the editing session
-// into a "<stem>_mod" overlay beside it (the raw layer wins over mounts), carrying over only
-// the manifest. Returns the work project's .nuproj, "" on failure.
+// into a "<stem>_mod" overlay in the folder the user picks (the raw layer wins over mounts),
+// carrying over only the manifest. Returns the work project's .nuproj, "" on failure / cancel.
 std::string EditorUI::PrepareMountedProject(const std::string& pakAbs)
 {
 	// A DLC pak is a point diff over a base game, never editable as a project.
@@ -2773,7 +2810,8 @@ std::string EditorUI::PrepareMountedProject(const std::string& pakAbs)
 	Package::MountPakParts(pakAbs, 0);
 	boost::system::error_code ec;
 	bfs::path pak(pakAbs);
-	bfs::path work = pak.parent_path() / (pak.stem().string() + "_mod");
+	bfs::path work = ChooseWorkProjectDir(pak, "_mod", "Pick the folder for the mod project");
+	if (work.empty()) return std::string();
 	bfs::create_directories(work / "content", ec);
 	// Base only: config/mods.json is the PLAYER's list, so the session mounts mods only per
 	// the editor's own editor_mods.json.
@@ -2828,7 +2866,8 @@ std::string EditorUI::PrepareArchiveProject(const std::string& pakAbs)
 
 	boost::system::error_code ec;
 	bfs::path pak(pakAbs);
-	bfs::path work = pak.parent_path() / (pak.stem().string() + "_project");
+	bfs::path work = ChooseWorkProjectDir(pak, "_project", "Pick the folder for the mod's project");
+	if (work.empty()) return std::string();
 	std::time_t pakTime = bfs::last_write_time(pak, ec);
 	const bool fresh = !bfs::exists(work / "game.nuproj", ec)
 	                && !bfs::exists(work / ".nupak_base", ec);
