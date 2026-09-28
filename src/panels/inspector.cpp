@@ -1600,9 +1600,11 @@ bool EditorUI::DrawFields(void* obj, nuke::TypeInfo* ti)
 {
 	if (!ti) return false;
 	bool changed = false;
+	const std::string* section = nullptr;   // [[prop(section="...")]]: a titled group opens at that field
 	for (const nuke::Field& f : ti->fields)
 	{
 		if (f.hidden) continue;   // serialized but not shown (e.g. script props JSON)
+		if (!f.section.empty() && (!section || *section != f.section)) { section = &f.section; ImGui::SeparatorText(f.section.c_str()); }
 		void* a = f.addr(obj);
 		const char* n = f.label.empty() ? f.name.c_str() : f.label.c_str();   // metadata display name
 		// Label drawn manually BEFORE the widget; the widget takes a hidden id (ImGui puts labels after).
