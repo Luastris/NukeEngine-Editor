@@ -7,6 +7,8 @@
 #include <API/Model/CharacterController.h>
 #include <API/Model/VariantSet.h>   // custom variant-switch body (combos over child prefixes)
 #include <API/Model/Foliage.h>
+#include <API/Model/Destructible.h>   // P2: bake the pieces into the mesh asset
+#include <API/Model/Fracture.h>
 #include <API/Model/Surface.h>
 #include <API/Model/StatusBar.h>
 #include <API/Model/Package.h>  // pickers list pak/mod content too
@@ -568,6 +570,31 @@ void EditorUI::RegisterInspectorOverrides()
 			if (foliageBrush == 1) ImGui::DragFloat("Brush Density", &foliageBrushDensity, 0.02f, 0.1f, 16.0f, "x%.2f", ImGuiSliderFlags_AlwaysClamp);
 			ImGui::TextDisabled("LMB in the viewport: %s", foliageBrush == 1 ? "paint" : "erase");
 		}
+	};
+	// P2: bake the Voronoi pieces into the mesh asset, so the runtime never cuts.
+	inspectorOverrides["Destructible"] = [this](nuke::Component* c) {
+		auto* d = static_cast<nuke::Destructible*>(c);
+		nuke::MeshRenderer* mr = d->atom ? d->atom->GetComponent<nuke::MeshRenderer>() : nullptr;
+		nuke::Mesh* src = (mr && !mr->meshGuid.empty()) ? ResDB::getSingleton()->GetMesh(mr->meshGuid) : nullptr;
+		if (!src) { ImGui::TextDisabled("Needs a MeshRenderer with a mesh asset."); return; }
+		const bool baked = src->fracturePieces == d->pieces && (unsigned)src->fractureSeed == (unsigned)d->seed && !src->fracture.empty();
+		if (baked) ImGui::TextDisabled("Baked: %d pieces in the mesh", (int)src->fracture.size());
+		else if (!src->fracture.empty()) ImGui::TextDisabled("Baked with other settings (%d pieces, seed %u) - cuts at runtime", src->fracturePieces, src->fractureSeed);
+		else ImGui::TextDisabled("Not baked - cuts once at first use");
+		if (ImGui::Button("Bake pieces into mesh"))
+		{
+			std::vector<nuke::FracturePiece> out;
+			if (nuke::FractureMesh(src, nuke::Vector3(1, 1, 1), d->pieces, (uint32_t)d->seed, out))
+			{
+				src->fracture.swap(out); src->fracturePieces = d->pieces; src->fractureSeed = (unsigned)d->seed;
+				const std::string path = ResDB::getSingleton()->PathForGuid(mr->meshGuid);
+				const bool ok = !path.empty() && src->SaveToFile(path);
+				StatusBar::Set("destruct", ok ? "Destructible: " + std::to_string(src->fracture.size()) + " pieces baked into " + bfs::path(path).filename().string()
+				                              : std::string("Destructible: bake failed (mesh asset not on disk?)"));
+			}
+			else StatusBar::Set("destruct", "Destructible: the mesh can't be fractured");
+		}
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Cut the mesh into Pieces (Seed) now and store them in the .numesh: no cutting at runtime, identical pieces on every machine.");
 	};
 }
 
