@@ -514,10 +514,8 @@ void EditorUI::winRender()
 			sceneRTId = r->createRenderTarget((int)avail.x, (int)avail.y);
 			if (editorCam) editorCam->renderTarget = sceneRTId;
 		}
-		else
-		{
-			r->resizeRenderTarget(sceneRTId, (int)avail.x, (int)avail.y);
-		}
+		// A size change applies AFTER the image below is drawn: this frame shows the old target,
+		// the resized one gets its first world render before it is ever displayed.
 		nuke::Screen::Set((int)avail.x, (int)avail.y);   // the editor's "game screen" = the viewport panel
 
 		// PIE possess: pick the camera driving the viewport RT. Re-resolved EVERY frame from the live
@@ -548,6 +546,7 @@ void EditorUI::winRender()
 		if (tex)
 		{
 			ImGui::Image((ImTextureID)tex, avail);
+			r->resizeRenderTarget(sceneRTId, (int)avail.x, (int)avail.y);   // no-op at the same size
 			// Drop: material/texture applies to the atom under the cursor, anything else spawns
 			// AT THE CURSOR — the drop point is where the object belongs, not the world origin.
 			if (ImGui::BeginDragDropTarget())

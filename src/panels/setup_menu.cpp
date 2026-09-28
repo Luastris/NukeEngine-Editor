@@ -94,6 +94,16 @@ void EditorUI::SetUp()
 	{
 		io.Fonts->AddFontDefault();
 	}
+	// 7.8: the font fallback chain (config window.fontFallbacks) - CJK / Arabic / ... glyphs the
+	// main font lacks come from these, in order. Same chain as the runtime GUI.
+	for (std::string f : win->fontFallbacks)
+	{
+		boost::system::error_code fec;
+		if (bfs::path(f).is_relative() && !bfs::exists(bfs::path(f), fec)) f = (nuke::Config::baseDir() / f).string();   // as mainFont above
+		if (!bfs::exists(bfs::path(f), fec)) { cout << "[editorui]\t\tfallback font not found: " << f << endl; continue; }
+		cout << "[editorui]\t\tfallback font: " << f << endl;
+		NukeUI::MergeFallbackFont(f.c_str(), explicitFont ? 19.0f : 0.0f);
+	}
 	// Lucide glyphs sit high in the line — the 4.0f offset nudges them to centre.
 	// The editor owns the plain source/text files its own text editor opens, so it declares
 	// their icons through the same registry the engine and the modules use.
@@ -522,6 +532,8 @@ void EditorUI::EditorMenu()
 			{ profilerOpen = !profilerOpen; profilerFocus = profilerOpen; }
 			if (ImGui::MenuItem("Edit History", nullptr, historyOpen))
 			{ historyOpen = !historyOpen; historyFocus = historyOpen; }
+			if (ImGui::MenuItem("Localization", nullptr, locOpen))
+			{ locOpen = !locOpen; locFocus = locOpen; }
 			ImGui::MenuItem("About", nullptr, &win->about);
 			ImGui::Separator();
 			ImGui::MenuItem("Project Settings", nullptr, &settingsOpen);

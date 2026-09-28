@@ -47,8 +47,11 @@ void EditorUI::DispatchHotkeys()
 	if (ImGui::GetIO().WantTextInput) return;   // typing in a field
 	if (!rebindId.empty()) return;              // capturing a rebind — swallow input
 	for (const nuke::Hotkey& h : nuke::Hotkeys::Get()->All())
+	{
+		if (locOwnsSave && h.id == "editor.world.save") continue;   // the focused Localization panel saved its tables
 		if (h.bound && h.action && ImGui::IsKeyChordPressed((ImGuiKeyChord)h.chord))
 			h.action();
+	}
 }
 
 // A menu entry whose shortcut text and action come from the pooled hotkey `id`.

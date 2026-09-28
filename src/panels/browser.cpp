@@ -1254,8 +1254,7 @@ void EditorUI::winBrowser()
 		ImGui::BeginChild("##browserfiles");   // only the tree scrolls
 		BrowserTree(root.string());
 		ImGui::EndChild();
-		ImGui::End();
-		return;
+		return;   // the DocPanel ends the window
 	}
 
 	// The current folder's entries (Tiles / List): built from the index snapshot and cached until

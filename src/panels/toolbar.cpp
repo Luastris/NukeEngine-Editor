@@ -831,6 +831,7 @@ void EditorUI::Draw()
 	winPreferences();     // engine-wide Preferences (external editor etc., %APPDATA% scope)
 	winProfiler();        // live CPU/GPU phase breakdown
 	winHistory();         // edit-history timeline (click = jump)
+	winLocalization();    // string tables (content/localization) + missing-key report
 	winTextEditor();      // Text editor: opened from the browser / asset inspector
 	winAssetEditors();    // Asset editors: material / mesh / prefab windows
 	DrawSaveAsPopup();    // "Save World As" modal

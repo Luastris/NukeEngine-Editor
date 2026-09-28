@@ -1597,6 +1597,8 @@ void EditorUI::PackageProjectNow()
 					jw["width"]       = w.w;
 					jw["height"]      = w.h;
 					if (!w.mainFont.empty()) jw["mainFont"] = w.mainFont;
+					if (!w.language.empty()) jw["language"] = w.language;
+					if (!w.fontFallbacks.empty()) jw["fontFallbacks"] = w.fontFallbacks;
 					jw["decorated"]   = w.decorated;
 					jw["resizable"]   = w.resizable;
 					jw["floating"]    = w.floating;
