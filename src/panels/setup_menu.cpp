@@ -534,6 +534,8 @@ void EditorUI::EditorMenu()
 			{ historyOpen = !historyOpen; historyFocus = historyOpen; }
 			if (ImGui::MenuItem("Localization", nullptr, locOpen))
 			{ locOpen = !locOpen; locFocus = locOpen; }
+			if (ImGui::MenuItem("Cvars", nullptr, cvarsOpen))
+			{ cvarsOpen = !cvarsOpen; cvarsFocus = cvarsOpen; }
 			ImGui::MenuItem("About", nullptr, &win->about);
 			ImGui::Separator();
 			ImGui::MenuItem("Project Settings", nullptr, &settingsOpen);

@@ -257,6 +257,7 @@ private:
 	// Localization panel (7.8): the string tables, keys x languages.
 	bool locOpen = false, locFocus = false;
 	bool locOwnsSave = false;   // the panel is focused this frame: Ctrl+S saves the tables, not the world
+	bool cvarsOpen = false, cvarsFocus = false;   // Cvars panel
 	int  undoTrimmed = 0;        // commands dropped by the 200 cap since the last reset
 	// Generic undo/redo stack: each action pushes its own inverse closures (atom edits are
 	// captured as a subtree delta, never the whole world). Push via PushUndo / RecordChange<T>.
@@ -428,6 +429,7 @@ private:
 	void winProfiler();                                           // live phase breakdown (CPU + GPU)
 	void winHistory();                                            // edit-history timeline (click = jump)
 	void winLocalization();                                       // string tables editor + missing-key report
+	void winCvars();                                              // console variables grid
 	// Open file:line in the user's chosen editor (falls back to the built-in text editor).
 	void OpenExternal(const std::string& file, int line);
 	std::string startupWorld = "scene.nuworld";    // from the .nuproj

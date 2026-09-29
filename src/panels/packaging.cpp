@@ -1620,6 +1620,7 @@ void EditorUI::PackageProjectNow()
 				cj["logToConsole"]  = gbLogS;
 				cj["gpuValidation"] = gbDbgS;
 				cj["devConsole"]    = gbConsS;   // the in-game ~ console (packaged default is OFF)
+				if (!nuke::Config::getSingleton()->cvars.empty()) cj["cvars"] = nuke::Config::getSingleton()->cvars;   // archived cvars
 				cj["upscalers"]     = nlohmann::json{{"dlss", upDLSS}, {"fsr", upFSR}, {"xess", upXeSS}};   // which vendor runtimes shipped
 				boost::system::error_code cec;
 				bfs::create_directories(dist / "config", cec);   // first package: config/ doesn't exist yet

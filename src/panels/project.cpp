@@ -750,6 +750,7 @@ void EditorUI::SaveEditorState()
 	j["windowOpen"] = wo;
 	j["worldSettingsOpen"] = worldSettingsOpen;
 	j["locOpen"] = locOpen;
+	j["cvarsOpen"] = cvarsOpen;
 	j["lastWorld"] = AppInstance::GetSingleton()->currentWorldPath;   // reopened next launch; "" = default
 	if (iRender* r = AppInstance::GetSingleton()->render) j["maximized"] = r->isWindowMaximized();
 	bfs::ofstream f{bfs::path(projectDir + "/editor_state.json")};
@@ -827,6 +828,7 @@ void EditorUI::LoadEditorState()
 			AppInstance::GetSingleton()->windowOpen[kv.key()] = kv.value().get<bool>();
 	worldSettingsOpen = j.value("worldSettingsOpen", false);
 	locOpen = j.value("locOpen", false);
+	cvarsOpen = j.value("cvarsOpen", false);
 	if (j.contains("maximized"))
 		if (iRender* r = AppInstance::GetSingleton()->render) r->setWindowMaximized(j["maximized"].get<bool>());
 }
