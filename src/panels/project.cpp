@@ -41,6 +41,7 @@ void EditorUI::SaveProject()
 	nlohmann::json j;
 	j["name"]         = projectName;
 	j["engine"]       = "NukeEngine";
+	j["engineVersion"] = projectEngineVersion.empty() ? std::string(nuke::EngineVersion()) : projectEngineVersion;   // the release that last upgraded it
 	j["content"]      = "content";          // relative to the project dir
 	// Pak compression method: 0 store / 1 zlib / 2 zstd.
 	j["pakMethod"] = pakMethod; j["pakLevel"] = pakLevel; j["pakBlockMB"] = pakBlockMB;
@@ -101,6 +102,8 @@ void EditorUI::LoadProject()
 	nuke::SetProjectManifest(j.dump());   // shared pool: modules read their settings from it
 	startupWorld   = j.value("startupWorld", startupWorld);
 	projectName    = j.value("name", projectName);
+	projectEngineVersion = j.value("engineVersion", std::string());
+	upgradeCheckPending  = projectEngineVersion != nuke::EngineVersion();   // another release wrote it: scan once the content is in
 	unlinkOnDelete = j.value("unlinkOnDelete", false);
 	reloadCleanMode = j.value("reloadCleanMode", 0);
 	conflictMode    = j.value("conflictMode", 0);
@@ -751,6 +754,7 @@ void EditorUI::SaveEditorState()
 	j["worldSettingsOpen"] = worldSettingsOpen;
 	j["locOpen"] = locOpen;
 	j["cvarsOpen"] = cvarsOpen;
+	j["upgradeOpen"] = upgradeOpen;
 	j["lastWorld"] = AppInstance::GetSingleton()->currentWorldPath;   // reopened next launch; "" = default
 	if (iRender* r = AppInstance::GetSingleton()->render) j["maximized"] = r->isWindowMaximized();
 	bfs::ofstream f{bfs::path(projectDir + "/editor_state.json")};
@@ -829,6 +833,7 @@ void EditorUI::LoadEditorState()
 	worldSettingsOpen = j.value("worldSettingsOpen", false);
 	locOpen = j.value("locOpen", false);
 	cvarsOpen = j.value("cvarsOpen", false);
+	upgradeOpen = j.value("upgradeOpen", false);
 	if (j.contains("maximized"))
 		if (iRender* r = AppInstance::GetSingleton()->render) r->setWindowMaximized(j["maximized"].get<bool>());
 }

@@ -21,6 +21,7 @@
 #include "API/Model/Prefab.h"
 #include "reflect/Reflect.h"
 #include "API/Model/Time.h"
+#include "API/Model/Migrations.h"
 #include "API/Model/Log.h"
 #include "editor/exteditor.h"
 #include "input/Hotkeys.h"
@@ -258,6 +259,16 @@ private:
 	bool locOpen = false, locFocus = false;
 	bool locOwnsSave = false;   // the panel is focused this frame: Ctrl+S saves the tables, not the world
 	bool cvarsOpen = false, cvarsFocus = false;   // Cvars panel
+	// Upgrade Project (asset migrations): the report window + the automatic check after boot when
+	// the project was last saved by another engine release (.nuproj "engineVersion").
+	bool upgradeOpen = false, upgradeFocus = false, upgradeCheckPending = false, upgradeHaveReport = false;
+	nuke::Migrations::Report upgradeReport;
+	std::string projectEngineVersion;   // the .nuproj stamp as loaded ("" = never stamped)
+	// The backup taken before an upgrade (default: beside the project folder) and the restore of any.
+	bool upgradeBackupOn = true, upgradeBackupWhole = false, upgradeStatusError = false;
+	std::string upgradeBackupDir, upgradeStatus;
+	std::vector<nuke::Migrations::BackupInfo> upgradeBackups;
+	int upgradeBackupPick = 0;
 	int  undoTrimmed = 0;        // commands dropped by the 200 cap since the last reset
 	// Generic undo/redo stack: each action pushes its own inverse closures (atom edits are
 	// captured as a subtree delta, never the whole world). Push via PushUndo / RecordChange<T>.
@@ -430,6 +441,7 @@ private:
 	void winHistory();                                            // edit-history timeline (click = jump)
 	void winLocalization();                                       // string tables editor + missing-key report
 	void winCvars();                                              // console variables grid
+	void winUpgrade();                                            // asset migration report + apply
 	// Open file:line in the user's chosen editor (falls back to the built-in text editor).
 	void OpenExternal(const std::string& file, int line);
 	std::string startupWorld = "scene.nuworld";    // from the .nuproj

@@ -14,6 +14,7 @@
 #include <interface/AppInstance.h>
 #include <import/assimporter.h>
 #include <API/Model/Jobs.h>
+#include <API/Model/Quality.h>   // PT3 presets: Boot after render init
 #include <API/Model/FileIndex.h>   // the watcher thread stops before the pool
 #include <API/Model/CrashReport.h>   // crash bundles (config/crash) written from the filters below
 #else
@@ -714,6 +715,7 @@ int main(int argc, char** argv)
     LoadBuiltinShaders(render, "shaders");   // engine-side built-in shaders -> renderer
     render->init(wd);
     render->setVSync(config->window.vsync);
+    nuke::Quality::Boot(render);   // PT3 presets: autodetect once, then the live knobs
     cout << "[main]\t\t\t" << "> Render: " << render << endl;
 
 	// Native imgui multi-viewport only on Vulkan; D3D falls back to GDI-hosted windows (DXGI races).

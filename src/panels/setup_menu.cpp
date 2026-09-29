@@ -446,6 +446,7 @@ void EditorUI::EditorMenu()
 			// Open accepts .nuproj, .nupak or .numod; switching relaunches the editor on the picked path.
 			if (ImGui::MenuItem(ICON_LC_FOLDER_PLUS " New Project...")) openNewProjectPopup = true;
 			if (ImGui::MenuItem(ICON_LC_FOLDER_OPEN " Open Project...")) OpenProjectCmd();
+			if (ImGui::MenuItem(ICON_LC_ARROW_UP_CIRCLE " Upgrade Project...")) { upgradeOpen = true; upgradeFocus = true; upgradeHaveReport = false; }
 			ImGui::Separator();
 			MenuHotkeyItem("New World",           "editor.world.new");
 			MenuHotkeyItem("Open Default World",  "editor.world.open");
