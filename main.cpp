@@ -12,7 +12,7 @@
 #include <interface/Modular.h>
 #ifdef EDITOR
 #include <interface/AppInstance.h>
-#include <import/assimporter.h>
+#include <import/Importer.h>
 #include <API/Model/Jobs.h>
 #include <API/Model/Quality.h>   // PT3 presets: Boot after render init
 #include <API/Model/FileIndex.h>   // the watcher thread stops before the pool

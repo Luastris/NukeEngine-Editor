@@ -17,7 +17,7 @@
 #include "API/Model/UnknownComponent.h"
 #include "API/Model/resdb.h"
 #include "API/Model/SequencePlayer.h"
-#include "import/assimporter.h"
+#include "import/Importer.h"
 #include "API/Model/Prefab.h"
 #include "reflect/Reflect.h"
 #include "API/Model/Time.h"
@@ -60,6 +60,9 @@ std::string EditorPickIconFile();   // .ico picker (game icon)
 std::string EditorPickFolder(const char* title = "Pick the build output folder",
                              const std::string& startDir = std::string());   // folder picker (build path, mod project)
 std::string EditorPickProjectFile();// .nuproj / .nupak / .numod picker
+// Native "save file" dialog: `extensions` = ";"-joined with the dot (".glb;.fbx"), the first one is
+// the default; `defaultName` seeds the file name. "" if cancelled.
+std::string EditorPickSaveFile(const char* title, const std::string& extensions, const std::string& defaultName);
 std::string EditorPickExeFile();    // .exe picker (custom external editor)
 bool        EditorRelaunch(const std::string& projectPath);   // spawn a new editor on that project
 

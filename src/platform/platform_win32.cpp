@@ -10,7 +10,10 @@
 #include <shobjidl.h>   // IFileOpenDialog (folder picker)
 #include <string>
 #include <cstring>
-#include <interface/Importers.h>   // plugin importer extensions -> dialog filter
+#include <interface/Importers.h>
+#include <import/Importer.h>   // the exchange service's model extensions
+#include <boost/filesystem.hpp>
+namespace bfs = boost::filesystem;   // plugin importer extensions -> dialog filter
 #pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "ole32.lib")
 
@@ -23,20 +26,28 @@ std::string EditorPickModelFile()
 
 	// Built at runtime to include plugin importers. OPENFILENAME wants a double-null-terminated
 	// "label\0pattern\0..." block, hence the embedded NULs.
-	const char* kModels = "*.obj;*.fbx;*.dae;*.gltf;*.glb;*.3ds;*.ply;*.stl";
-	const char* kImages = "*.png;*.jpg;*.jpeg;*.tga;*.bmp;*.hdr;*.psd;*.gif";
+	// Models: whatever the exchange service (NukeExchange) reads; none when the module is off.
+	std::string modelPats;
+	for (const std::string& e : nuke::Importer::ModelExtensions()) { modelPats += "*"; modelPats += e; modelPats += ";"; }
+	if (!modelPats.empty()) modelPats.pop_back();
+	std::string imagePats;
+	for (const std::string& e : nuke::Importer::ImageExtensions()) { imagePats += "*"; imagePats += e; imagePats += ";"; }
+	if (!imagePats.empty()) imagePats.pop_back();
+	const char* kModels = modelPats.c_str();
+	const char* kImages = imagePats.c_str();
 	std::string pluginPats;
 	for (const nuke::AssetImporter& imp : nuke::AssetImporters())
 		for (const std::string& e : imp.exts) { pluginPats += "*"; pluginPats += e; pluginPats += ";"; }
 	if (!pluginPats.empty()) pluginPats.pop_back();   // trailing ';'
 
-	std::string allPats = std::string(kModels) + ";" + kImages;
+	std::string allPats = kImages;
+	if (!modelPats.empty()) allPats = modelPats + ";" + allPats;
 	if (!pluginPats.empty()) allPats += ";" + pluginPats;
 
 	std::string filt;
 	auto add = [&](const std::string& label, const std::string& pat) { filt += label; filt.push_back('\0'); filt += pat; filt.push_back('\0'); };
 	add("All supported", allPats);
-	add(std::string("Models (") + kModels + ")", kModels);
+	if (!modelPats.empty()) add(std::string("Models (") + kModels + ")", kModels);
 	add(std::string("Images (") + kImages + ")", kImages);
 	if (!pluginPats.empty()) add(std::string("Plugin formats (") + pluginPats + ")", pluginPats);
 	add("All files (*.*)", "*.*");
@@ -49,6 +60,44 @@ std::string EditorPickModelFile()
 	ofn.Flags       = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
 	if (GetOpenFileNameA(&ofn)) return std::string(file);
 	return std::string();
+}
+
+// Native "save file" dialog (Export...): one filter per extension, the first is the default.
+std::string EditorPickSaveFile(const char* title, const std::string& extensions, const std::string& defaultName)
+{
+	char file[1024] = "";
+	strncpy(file, defaultName.c_str(), sizeof(file) - 1);
+	std::vector<std::string> exts;
+	{
+		std::string cur;
+		for (char c : extensions) { if (c == ';') { if (!cur.empty()) exts.push_back(cur); cur.clear(); } else cur += c; }
+		if (!cur.empty()) exts.push_back(cur);
+	}
+	std::string filt;
+	auto add = [&](const std::string& label, const std::string& pat) { filt += label; filt.push_back('\0'); filt += pat; filt.push_back('\0'); };
+	for (const std::string& e : exts) add(e.substr(e[0] == '.' ? 1 : 0) + " (*" + e + ")", "*" + e);
+	add("All files (*.*)", "*.*");
+	filt.push_back('\0');
+	OPENFILENAMEA ofn = {};
+	ofn.lStructSize = sizeof(ofn);
+	ofn.lpstrFilter = filt.c_str();
+	ofn.lpstrFile   = file;
+	ofn.nMaxFile    = sizeof(file);
+	ofn.lpstrTitle  = title ? title : "Save";
+	ofn.Flags       = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+	// The picked filter decides the extension when the name carries none.
+	const std::string defExt = exts.empty() ? std::string() : exts[0].substr(exts[0][0] == '.' ? 1 : 0);
+	ofn.lpstrDefExt = defExt.empty() ? nullptr : defExt.c_str();
+	if (!GetSaveFileNameA(&ofn)) return std::string();
+	std::string out = file;
+	if (ofn.nFilterIndex >= 1 && ofn.nFilterIndex <= exts.size())
+	{
+		const std::string want = exts[ofn.nFilterIndex - 1];
+		std::string have = bfs::path(out).extension().string();
+		for (char& c : have) c = (char)tolower((unsigned char)c);
+		if (have != want) out = bfs::path(out).replace_extension(want).string();
+	}
+	return out;
 }
 
 // Native "open file" dialog for the game icon (Project Settings -> Packaging).

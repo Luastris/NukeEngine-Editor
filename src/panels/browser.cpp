@@ -1,5 +1,6 @@
 // browser panel — EditorUI method definitions (translation unit).
 #include <editor/editorui.h>
+#include <API/Model/Exchange.h>   // Export... (the exchange service)
 #include "nukeui.h"
 #include "API/Model/Material.h"
 #include "API/Model/Mesh.h"
@@ -226,6 +227,20 @@ void EditorUI::EntryContextMenu(const std::string& path, bool isDir)
 			{
 				if (ImGui::MenuItem(ICON_LC_PENCIL_RULER " Open in Editor")) OpenAssetEditor(path);
 				if (cext == ".nuprefab" && ImGui::MenuItem(ICON_LC_PACKAGE_PLUS " Instantiate")) SpawnPrefab(path);
+				// Export through the exchange service (NukeExchange): the format follows the picked extension.
+				if ((cext == ".numesh" || cext == ".nuprefab" || cext == ".nuanim") && nuke::Exchange::Available()
+				    && ImGui::MenuItem(ICON_LC_UPLOAD " Export..."))
+				{
+					const std::string kind = cext == ".numesh" ? "mesh" : cext == ".nuprefab" ? "prefab" : "clip";
+					const std::string id = kind == "prefab" ? path : ResDB::getSingleton()->GuidForPath(path);
+					const std::string dst = EditorPickSaveFile("Export", nuke::Exchange::ExportExtensions(), bfs::path(path).stem().string() + ".glb");
+					if (!dst.empty())
+					{
+						if (id.empty()) nuke::Log::Write(LOG_WARN, "Export", "asset not registered: " + path);
+						else if (nuke::Exchange::Export(kind, id, dst)) nuke::Log::Write(LOG_INFO, "Export", "queued " + dst + " (the worker writes it; the log says when)");
+						else nuke::Log::Write(LOG_WARN, "Export", "could not queue: " + dst);
+					}
+				}
 				if (cext == ".nuinput" && ImGui::MenuItem(ICON_LC_FILE_PEN " Edit as text")) OpenExternal(path, 0);
 				ImGui::Separator();
 			}
@@ -1070,7 +1085,7 @@ void EditorUI::winBrowser()
 		if (!src.empty())
 		{
 			std::string dest = browserCwd.empty() ? contentDir : browserCwd;
-			AssImporter::getSingleton()->ImportAnyAsync(src, dest, [src, dest](bool ok) {
+			Importer::getSingleton()->ImportAnyAsync(src, dest, [src, dest](bool ok) {
 				cout << "[editor]\timport " << (ok ? "ok" : "FAILED") << ": " << src << " -> " << dest << endl;
 			});
 		}

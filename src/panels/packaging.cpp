@@ -359,7 +359,7 @@ static std::set<std::string> ComputeShipModules(
 		// Exclusive non-gui services are the runtime's core (render/physics/audio): the chosen
 		// provider ships; with no recorded choice the enabled one does. The "gui" service and
 		// shared services (scripting backends) stay content-driven below.
-		if (!pm.provides.empty() && pm.provides != "gui" && !pm.shared)
+		if (!pm.provides.empty() && pm.provides != "gui" && pm.provides != "exchange" && !pm.shared)
 		{
 			if (!pm.service.empty())
 				add(kv.first, "the project's '" + pm.service + "' provider");
@@ -386,6 +386,8 @@ static std::set<std::string> ComputeShipModules(
 			{ add(kv.first, "registers no reflected types (usage is undetectable) — shipped as enabled"); continue; }
 		if (pm.provides == "gui" && !consoleOn)
 			{ say("module '" + pm.name + "': the 'gui' provider ships only with the dev console (or via the manifest's shipModules when the game draws runtime GUI) — not shipped"); continue; }
+		if (pm.provides == "exchange")
+			{ say("module '" + pm.name + "': the model importer ships only via the manifest's shipModules (games that let modders drop raw models in) — not shipped"); continue; }
 		dropped.push_back(pm.name);
 	}
 	for (const std::string& m : manifestShip)

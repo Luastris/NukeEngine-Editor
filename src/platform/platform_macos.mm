@@ -347,3 +347,20 @@ std::vector<ExtEditor> EditorDetectExternalEditors()
 }
 
 #endif // __APPLE__
+
+// Native "save file" panel (Export...): the first offered extension is the default.
+std::string EditorPickSaveFile(const char* title, const std::string& extensions, const std::string& defaultName)
+{
+	@autoreleasepool
+	{
+		NSSavePanel* panel = [NSSavePanel savePanel];
+		if (title) [panel setTitle:[NSString stringWithUTF8String:title]];
+		[panel setNameFieldStringValue:[NSString stringWithUTF8String:defaultName.c_str()]];
+		if ([panel runModal] != NSModalResponseOK) return std::string();
+		std::string out = [[[panel URL] path] UTF8String];
+		const size_t semi = extensions.find(';');
+		const std::string first = extensions.substr(0, semi);
+		if (!first.empty() && out.find('.') == std::string::npos) out += first;
+		return out;
+	}
+}

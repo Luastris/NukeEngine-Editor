@@ -14,7 +14,7 @@
 #include <reflect/Reflect.h>          // Registry_All: creator components by type name
 #include <interface/EditorHooks.h>    // module-registered view toggles in the snap popup
 #include <config.h>                   // packaging dev hooks mirror the Game Build dialog
-#include <import/assimporter.h>       // NUKE_IMPORT dev hook (probe runs)
+#include <import/Importer.h>          // NUKE_IMPORT dev hook (probe runs)
 #include <API/Model/Animator.h>       // NUKE_PREFAB_ANIM_TEST dev hook
 #include <API/Model/BoneMap.h>
 #include <API/Model/Game.h>
@@ -471,10 +471,11 @@ void EditorUI::Draw()
 				std::string src = impList.substr(p, sc - p);
 				p = sc + 1;
 				if (src.empty()) continue;
-				const bool ok = nuke::AssImporter::getSingleton()->ImportAny(src.c_str(), dest.string().c_str());
-				std::cout << "[Import]\thook " << (ok ? "ok " : "FAILED ") << src << std::endl;
+				// The worker path, like the browser button: nothing heavy runs on the game thread.
+				nuke::Importer::getSingleton()->ImportAnyAsync(src, dest.string(), [src](bool ok)
+				{ std::cout << "[Import]\thook " << (ok ? "ok " : "FAILED ") << src << std::endl; });
 			}
-			std::cout << "[Import]\thook done" << std::endl;
+			std::cout << "[Import]\thook queued" << std::endl;
 		}
 		// NUKE_GM_NEW=<Name>: scaffold a C++ game module; NUKE_GM_BUILD=1: Build & Reload Game Modules.
 		static int gmNewDelay = -2;

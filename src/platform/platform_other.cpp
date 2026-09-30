@@ -14,7 +14,8 @@
 #include <unistd.h>
 #include <boost/filesystem.hpp>
 #include <boost/filesystem/fstream.hpp>
-#include <interface/Importers.h>   // plugin importer extensions -> dialog filter
+#include <interface/Importers.h>
+#include <import/Importer.h>   // plugin importer extensions -> dialog filter
 #include <editor/exteditor.h>
 
 extern char** environ;
@@ -105,14 +106,26 @@ static std::string RunOpenDialog(const char* title, const std::vector<std::strin
 // Native "open file" dialog for asset import (models + images + plugin importer formats).
 std::string EditorPickModelFile()
 {
-	std::vector<std::string> exts = {
-		"obj", "fbx", "dae", "gltf", "glb", "3ds", "ply", "stl",          // models
-		"png", "jpg", "jpeg", "tga", "bmp", "hdr", "psd", "gif",          // images
-	};
+	std::vector<std::string> exts;
+	for (const std::string& e : nuke::Importer::ModelExtensions()) exts.push_back(e.size() && e[0] == '.' ? e.substr(1) : e);   // the exchange service
+	for (const std::string& e : nuke::Importer::ImageExtensions()) exts.push_back(e.size() && e[0] == '.' ? e.substr(1) : e);
 	for (const nuke::AssetImporter& imp : nuke::AssetImporters())
 		for (const std::string& e : imp.exts)
 			exts.push_back(e.size() && e[0] == '.' ? e.substr(1) : e);
 	return RunOpenDialog("Import asset", exts, true, false, "Assets");
+}
+
+// Native "save file" dialog (Export...): zenity/kdialog have no typed save filters here - the
+// picked name decides; a missing extension gets the first offered one.
+std::string EditorPickSaveFile(const char* title, const std::string& extensions, const std::string& defaultName)
+{
+	(void)defaultName;
+	std::string out = RunOpenDialog(title ? title : "Save", {}, true, false, "");
+	if (out.empty()) return out;
+	const size_t semi = extensions.find(';');
+	const std::string first = extensions.substr(0, semi);
+	if (!first.empty() && out.find('.') == std::string::npos) out += first;
+	return out;
 }
 
 // Native "open file" dialog for the game icon (Project Settings -> Packaging).

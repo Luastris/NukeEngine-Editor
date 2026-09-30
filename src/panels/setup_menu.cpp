@@ -1,6 +1,6 @@
 // EditorUI setup, boot loading, style and main menu bar.
 #include <editor/editorui.h>
-#include <import/assimporter.h>
+#include <import/Importer.h>
 #include <interface/Modular.h>   // RunRoot: absolute fonts/ path (installed .app CWD is elsewhere)
 #include <boost/dll/runtime_symbol_info.hpp>   // program_location: per-app session-state dir
 #include <API/Model/Package.h>
@@ -221,7 +221,7 @@ void EditorUI::SetUp()
 	AppInstance::GetSingleton()->render->setOnFileDrop([this](const char* p) {
 		std::string dest = browserCwd.empty() ? contentDir : browserCwd;
 		std::string src = p;
-		AssImporter::getSingleton()->ImportAnyAsync(src, dest, [src, dest](bool ok) {
+		Importer::getSingleton()->ImportAnyAsync(src, dest, [src, dest](bool ok) {
 			std::cout << "[editor]\tdrop-import " << (ok ? "ok" : "FAILED") << ": " << src << " -> " << dest << std::endl;
 		});
 	});

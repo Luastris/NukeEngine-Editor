@@ -83,16 +83,13 @@ target_include_directories(NukeEngine-Editor PRIVATE
     ${NUKE_ROOT}/NukeImGui/src
     ${NUKE_ROOT}/NukeImGui/imguizmo)
 
-# Engine target carries boost/glm/nlohmann PUBLIC; assimp + stb are direct editor uses
-# (model preview import, icon/screenshot IO).
-find_package(assimp CONFIG REQUIRED)
+# Engine target carries boost/glm/nlohmann PUBLIC; stb is a direct editor use (icon/screenshot IO).
 find_path(STB_INCLUDE_DIRS "stb_image.h" REQUIRED)
 target_include_directories(NukeEngine-Editor PRIVATE ${STB_INCLUDE_DIRS})
 
 target_link_libraries(NukeEngine-Editor PRIVATE
     NukeEngine
-    NukeImGui
-    assimp::assimp)
+    NukeImGui)
 
 if(NOT MSVC)
     target_compile_options(NukeEngine-Editor PRIVATE -Wno-c++11-narrowing -Wno-unknown-attributes)
