@@ -246,6 +246,7 @@ void EditorUI::StartBootLoad()
 	{
 		// Disk + CPU only. Jobs::Shutdown JOINS this job, hence the Stopping() checkpoints.
 		ResDB::getSingleton()->LoadContentDir(cdir);
+		ResDB::getSingleton()->LoadContentDir("fonts");   // engine fonts into the DB (runtime text, NukeGUI), as the Player does
 		if (nuke::Jobs::Stopping()) return;
 		if (mounted)
 		{

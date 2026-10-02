@@ -178,6 +178,7 @@ static std::string FileKindExt(const std::string& kind)
 static std::string KindExt(const std::string& kind)
 {
 	if (IsFileKind(kind))   return FileKindExt(kind);
+	if (kind == "font")     return ".ttf";
 	if (kind == "mesh")     return ".numesh";
 	if (kind == "material") return ".numat";
 	if (kind == "texture")  return ".nutex";
@@ -201,6 +202,7 @@ static bool KindMatchesFile(const std::string& kind, const std::string& path)
 	std::string e = bfs::path(path).extension().string();
 	for (char& c : e) c = (char)tolower((unsigned char)c);
 	if (IsFileKind(kind)) return e == FileKindExt(kind);
+	if (kind == "font")     return e == ".ttf" || e == ".otf" || e == ".ttc";
 	if (kind == "mesh")     return e == ".numesh";
 	if (kind == "material") return e == ".numat";
 	if (kind == "texture")  return e == ".nutex";
@@ -233,7 +235,7 @@ bool EditorUI::AssetPicker(const char* label, std::string& guid, const std::stri
 	// Display name = the asset's FILE name so it tracks renames; internal name for file-less built-ins.
 	auto disp = [&](const std::string& g) -> std::string {
 		if (g.empty()) return "(none)";
-		if (kind == "script" || kind == "audio" || IsFileKind(kind)) return bfs::path(g).stem().string();   // value is a content-relative path
+		if (kind == "script" || kind == "audio" || kind == "font" || IsFileKind(kind)) return bfs::path(g).stem().string();   // value is a content-relative path (fonts: run-root-relative)
 		if (kind == "shader" || kind == "postshader") { Shader* s = db->GetShader(g); return s ? s->name : g; }
 		std::string p = db->PathForGuid(g);
 		if (!p.empty()) return bfs::path(p).stem().string();
@@ -271,7 +273,8 @@ bool EditorUI::AssetPicker(const char* label, std::string& guid, const std::stri
 			if (KindMatchesFile(kind, path))
 			{
 				std::string g;
-				if      (kind == "script" || kind == "audio" || IsFileKind(kind)) { boost::system::error_code ec; g = bfs::relative(bfs::path(path), bfs::path(contentDir), ec).generic_string(); }
+				if      (kind == "font") { boost::system::error_code ec; g = bfs::relative(bfs::path(path), nuke::Config::baseDir(), ec).generic_string(); }
+				else if (kind == "script" || kind == "audio" || IsFileKind(kind)) { boost::system::error_code ec; g = bfs::relative(bfs::path(path), bfs::path(contentDir), ec).generic_string(); }
 				else if (kind == "shader") g = ShaderGuidFromPath(path);
 				else                       g = db->GuidForPath(path);
 				if (!g.empty()) { guid = g; changed = true; }
@@ -284,7 +287,8 @@ bool EditorUI::AssetPicker(const char* label, std::string& guid, const std::stri
 	if (ImGui::Button(ICON_LC_FOLDER_SEARCH "##loc"))   // locate the original file in the browser
 	{
 		std::string path;
-		if      (kind == "script" || kind == "audio" || IsFileKind(kind)) { if (!guid.empty()) path = (bfs::path(contentDir) / guid).string(); }
+		if      (kind == "font") { if (!guid.empty()) path = (nuke::Config::baseDir() / guid).string(); }
+		else if (kind == "script" || kind == "audio" || IsFileKind(kind)) { if (!guid.empty()) path = (bfs::path(contentDir) / guid).string(); }
 		else if (kind == "shader" && db->GetShader(guid)) path = db->GetShader(guid)->vsPath;
 		else                       path = db->PathForGuid(guid);
 		if (!path.empty())
@@ -374,6 +378,10 @@ bool EditorUI::AssetPicker(const char* label, std::string& guid, const std::stri
 				break;
 			}
 			if (!any) ImGui::TextDisabled("no C# classes loaded\n(add a .cs deriving from Electron;\nif the project HAS scripts, check the\nConsole for 'C# build FAILED')");
+		}
+		else if (kind == "font")   // the fonts ResDB registered: fonts/ beside the exe (watched) + pak fonts
+		{
+			for (const std::string& f : db->FontList()) item(f, bfs::path(f).stem().string());
 		}
 		else if (kind == "script" || kind == "audio" || IsFileKind(kind))   // scan the project content (value = content-relative path)
 		{
