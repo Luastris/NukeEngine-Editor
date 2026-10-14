@@ -746,6 +746,7 @@ void EditorUI::SaveEditorState()
 	// Grid snap + world grid: how the user works in THIS project's editor — editor state, not game data.
 	j["snap"] = { {"on", snapEnabled}, {"move", snapMove}, {"rot", snapRot}, {"scale", snapScale},
 	              {"grid", gridVisible} };
+	j["multiEditAbsolute"] = multiEditAbsolute;
 	if (win) j["panels"] = { {"hierarchy", win->hierarchy}, {"console", win->console}, {"browser", win->browser},
 	                         {"inspector", win->inspector}, {"render", win->render}, {"plugmgr", win->plugmgr}, {"about", win->about} };
 	nlohmann::json wo = nlohmann::json::object();   // host-owned window open flags
@@ -776,6 +777,7 @@ void EditorUI::LoadEditorState()
 	lastWorld = j.value("lastWorld", std::string());
 	if (j.contains("snap") && j["snap"].is_object())
 	{
+		multiEditAbsolute = j.value("multiEditAbsolute", true);
 		snapEnabled = j["snap"].value("on", false);
 		snapMove    = j["snap"].value("move", 0.5f);
 		snapRot     = j["snap"].value("rot", 15.0f);

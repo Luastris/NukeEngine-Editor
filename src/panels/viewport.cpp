@@ -14,19 +14,13 @@ static bool  s_marqueeArm = false, s_marqueeLive = false;
 static ImVec2 s_marqueeStart;
 static ImVec2 s_lookPressPos;           // cursor restore point for the look wrap
 #include "nukeui.h"
-#include <GLFW/glfw3.h>   // look wrap: move the OS cursor of the current imgui viewport
 
 // Move the OS cursor to `to` (imgui screen coords) inside the CURRENT imgui viewport's window
-// and tell imgui, skipping the resulting delta. No-op where the panel has no GLFW window
-// (GDI-blit fallback hosts).
+// (NukeUI owns the window layer), skipping the resulting delta. No-op where the panel has no
+// platform window (GDI-blit fallback hosts).
 static void WarpMouse(const ImVec2& to)
 {
-	ImGuiViewport* vp = ImGui::GetWindowViewport();
-	GLFWwindow* wnd = vp ? (GLFWwindow*)vp->PlatformHandle : nullptr;
-	if (!wnd) return;
-	glfwSetCursorPos(wnd, to.x - vp->Pos.x, to.y - vp->Pos.y);
-	ImGui::GetIO().AddMousePosEvent(to.x, to.y);
-	s_lookWarpSkip = true;
+	if (NukeUI::WarpCursor(ImGui::GetWindowViewport(), to.x, to.y)) s_lookWarpSkip = true;
 }
 #include <interface/EditorHooks.h>   // module-registered viewport overlays
 #include "API/Model/Math.h"
@@ -460,6 +454,48 @@ void EditorUI::DrawStreamCells(ImVec2 rmin, ImVec2 sz)
 	}
 }
 
+// The guides SnapWidgetMove left for the running drag, in the view that ran the gizmo: hairlines
+// with end ticks for shared edges / centres, a measured bar with its value for matched spacings.
+void EditorUI::DrawSnapGuides(const float* view, const float* proj, ImVec2 rmin, ImVec2 rsz)
+{
+	if (snapGuides.empty()) return;
+	const glm::mat4 vp = glm::make_mat4(proj) * glm::make_mat4(view);
+	auto toScr = [&](const Vector3& w, ImVec2& o) -> bool
+	{
+		glm::vec4 cl = vp * glm::vec4((float)w.x, (float)w.y, (float)w.z, 1.0f);
+		if (cl.w <= 1e-4f) return false;
+		o = ImVec2(std::floor(rmin.x + (cl.x / cl.w * 0.5f + 0.5f) * rsz.x) + 0.5f,
+		           std::floor(rmin.y + (0.5f - cl.y / cl.w * 0.5f) * rsz.y) + 0.5f);
+		return true;
+	};
+	ImDrawList* dl = ImGui::GetWindowDrawList();
+	const ImU32 col = IM_COL32(255, 64, 150, 255), colTxt = IM_COL32(255, 255, 255, 255);
+	for (const SnapGuide& g : snapGuides)
+	{
+		ImVec2 a, b;
+		if (!toScr(g.a, a) || !toScr(g.b, b)) continue;
+		ImVec2 d(b.x - a.x, b.y - a.y);
+		const float len = std::sqrt(d.x * d.x + d.y * d.y);
+		if (len < 0.5f) continue;
+		d.x /= len; d.y /= len;
+		const ImVec2 n(-d.y, d.x);
+		const float tick = g.measure ? 4.0f : 3.0f;
+		dl->AddLine(a, b, col, 1.0f);
+		dl->AddLine(ImVec2(a.x - n.x * tick, a.y - n.y * tick), ImVec2(a.x + n.x * tick, a.y + n.y * tick), col, 1.0f);
+		dl->AddLine(ImVec2(b.x - n.x * tick, b.y - n.y * tick), ImVec2(b.x + n.x * tick, b.y + n.y * tick), col, 1.0f);
+		if (g.measure)
+		{
+			char txt[32]; snprintf(txt, sizeof(txt), g.world ? "%.2f" : "%.0f", g.value);
+			const ImVec2 ts = ImGui::CalcTextSize(txt);
+			const ImVec2 m((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f);
+			dl->AddRectFilled(ImVec2(m.x - ts.x * 0.5f - 4.0f, m.y - ts.y * 0.5f - 1.0f),
+			                  ImVec2(m.x + ts.x * 0.5f + 4.0f, m.y + ts.y * 0.5f + 1.0f), col, 3.0f);
+			dl->AddText(ImVec2(m.x - ts.x * 0.5f, m.y - ts.y * 0.5f), colTxt, txt);
+		}
+	}
+	snapGuides.clear();
+}
+
 void EditorUI::winRender()
 {
 	if (!win->render) return;
@@ -561,7 +597,7 @@ void EditorUI::winRender()
 					size_t dot = dpath.find_last_of('.');
 					if (dot != std::string::npos) dext = dpath.substr(dot);
 					std::transform(dext.begin(), dext.end(), dext.begin(), ::tolower);
-					const bool onAtom = (dext == ".numat" || dext == ".nutex");
+					const bool onAtom = (dext == ".numat" || dext == ".nutex") || AssetAttaches(dpath);   // scripts attach to the hit atom
 					nuke::Vector3 dropPos;
 					const bool spawnable = !onAtom && (dext == ".nuprefab" || dext == ".numesh");
 					if (spawnable) dropPos = DropPointAt(driveCam, dropMin, dropSz, ImGui::GetMousePos());
@@ -1177,6 +1213,19 @@ void EditorUI::winRender()
 								gizmoMatrix[12] = nT.x; gizmoMatrix[13] = nT.y; gizmoMatrix[14] = nT.z;
 								nm[3][0] = nT.x; nm[3][1] = nT.y; nm[3][2] = nT.z;
 							}
+						}
+						if (gop == ImGuizmo::TRANSLATE && !ImGui::GetIO().KeyAlt)   // UI snapping to sibling widgets / the canvas (Alt = free)
+						{
+							Vector3 sp(nT.x, nT.y, nT.z);
+							std::vector<Atom*> also;   // the rest of the selection rides along: no reference
+							for (unsigned long id : gapp->selectedExtra) if (Atom* ex = gapp->currentWorld->GetById((long)id)) also.push_back(ex);
+							if (SnapWidgetMove(gapp->currentWorld, gsel, sp, &also))
+							{
+								nT = glm::vec3((float)sp.x, (float)sp.y, (float)sp.z);
+								gizmoMatrix[12] = nT.x; gizmoMatrix[13] = nT.y; gizmoMatrix[14] = nT.z;
+								nm[3][0] = nT.x; nm[3][1] = nT.y; nm[3][2] = nT.z;
+							}
+							DrawSnapGuides(gview, gproj, grmin, gsz);
 						}
 						gtt.SetGlobal(Vector3(nT.x, nT.y, nT.z),
 						              Quaternion(nR.x, nR.y, nR.z, nR.w),

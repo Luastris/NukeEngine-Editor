@@ -472,6 +472,7 @@ private:
 	std::vector<std::string> inputMapsList;   // content-relative paths, '/' separators
 	void ApplyInputMaps();                    // push the list into the engine + reload the live map
 	std::string pieSnapshot;   // world serialized on Play, restored on Stop (PIE)
+	void StopPIE();            // leave play mode and restore the snapshot (the Stop button, the dev hook)
 	// Edit target captured on Play, restored on Stop: Game.LoadWorld during PIE retargets
 	// AppInstance::currentWorldPath, and the restored world must not inherit that path.
 	std::string pieWorldPath;
@@ -702,6 +703,9 @@ public:
 		bool    gizmoBusy = false;
 		float   flyMul = 1.0f;              // camera speed multiplier (wheel while RMB-flying)
 		float   flyMulHud = 0.0f;           // seconds left to show the speed HUD after a change
+		bool    lookActive = false;         // RMB / MMB look or pan in progress (keeps the drag alive off the image)
+		bool    warpSkip = false;           // swallow the mouse delta on the frame after a cursor warp
+		ImVec2  lookPressPos;               // where the look began: the cursor reappears there on release
 		// Material editor: RMB ORBITS the framed subject (wheel = dolly, MMB = shift the
 		// pivot) instead of the free-fly camera the mesh/prefab windows keep.
 		bool    orbit = false;
@@ -776,7 +780,13 @@ public:
 		bool  prLoop = false;
 		float prSpeed = 1.0f;
 		Atom*     prefabRoot = nullptr;     // .nuprefab: loaded subtree (lives in pv->world)
-		long      prefabSelId = 0;          // selected atom in the prefab tree (stable id)
+		long      prefabSelId = 0;          // selected atom in the prefab tree (stable id) = the PRIMARY
+		std::vector<long> prefabSelExtra;   // the rest of a multi-selection (Ctrl / Shift click, marquee)
+		long      prefabAnchorId = 0;       // Shift-range anchor (tree row order)
+		std::vector<Atom*> prefabRows;      // tree rows in draw order (this frame) for Shift ranges
+		bool      pfMqArm = false, pfMqLive = false;   // marquee in the 3D view (press on empty space)
+		ImVec2    pfMqStart;
+		std::vector<long> pendingDeleteIds; // multi-delete (the single pendingDeleteId stays for menus)
 		// Deferred structural ops (Create/paste/duplicate/folder): the tree walk must finish
 		// before the atom lists mutate. Asset drops (rows, root area, 3D view) queue here too.
 		std::vector<std::function<void(AssetEditorWin&)>> pendingOps;
@@ -800,6 +810,15 @@ public:
 		float  seqSnap[10]; bool seqSnapValid = false;   // RECORD: last-frame TRS of the selection
 		std::vector<std::string> undoQ, redoQ;   // .nuseq history (JSON)
 		std::string idleQ;                        // pre-edit baseline
+		// Host-bound sequencing: the SequencePlayer's atom every path is relative to (0 = the
+		// world-absolute mode of a .nuseq opened from the browser). A prefab window DOCKS the
+		// sequencer under its 3D view (seqPath = the .nuseq, w.path stays the prefab).
+		long        seqHostId = 0;
+		std::string seqPath;
+		std::string seqTarget;              // host mode: the picked descendant new tracks address ("" = the host)
+		bool        seqDock = false, seqDockFocused = false, seqDirty = false;
+		bool        seqEditedNow = false, seqEditing = false;   // the docked sequencer's own undo burst latch
+		float       seqDockH = 280.0f;
 		// .nuanim animation window: owned editing copy (previewClip-served to the rig) +
 		// timeline/selection state + optional retarget side-by-side (second preview world).
 		nuke::AnimClip* anim = nullptr;
@@ -891,6 +910,45 @@ public:
 	void winAssetEditors();
 	void DrawSpriteSlicer(AssetEditorWin& w);        // .nutex Sprite Slicer body
 	void DrawSequenceEditor(AssetEditorWin& w);      // .nuseq timeline body (sequencer.cpp)
+	bool AssetAttaches(const std::string& path) const;   // the type's creator attaches it to an atom on drop (a script -> component)
+	// Inspector "Go to file": show the asset's file in the browser (navigate, select, scroll).
+	// `value` is the field's value (guid, or a content-relative path for file kinds).
+	bool LocateInBrowser(const std::string& kind, const std::string& value);
+	bool DrawAnchorsBlock(Atom* a);                  // canvas-child anchors: presets + sides + distances (inspector.cpp)
+	// Multi-edit: an inspector edit on the primary atom lands on every selected atom. Only the
+	// components the whole selection shares are shown (the Nth of a type pairs with the Nth).
+	// ABSOLUTE = the edited value is copied; RELATIVE = numbers move by the same delta, each from
+	// its own value. Toolbar toggle, persisted in editor_state.json.
+	bool multiEditAbsolute = true;
+	struct MultiFieldSnap { nuke::ReflectValue v; std::vector<int> il; std::vector<float> fl; std::vector<double> dl; std::vector<std::string> sl; };
+	struct MultiCompSnap  { bool enabled = true; int tickEvery = 1; std::vector<MultiFieldSnap> fields; std::vector<nuke::DynProp> dyn; };
+	struct MultiUndoSnap  { long parent = 0; int index = 0; std::string before; };
+	std::map<long, MultiUndoSnap> multiBefore;       // other atoms touched by the running edit (world undo)
+	void MultiTouch(Atom* m, bool undo);             // remember m's state before the first fan-out write
+	void FlushMultiUndo(long primaryId, long primaryParent, int primaryIndex,
+	                    const std::string& primaryBefore, const std::string& primaryAfter);
+	static nuke::Component* MultiPeer(Atom* primary, nuke::Component* cmp, Atom* other);
+	static bool MultiShared(Atom* primary, nuke::Component* cmp, const std::vector<Atom*>& sel);
+	MultiCompSnap MultiSnapshot(nuke::Component* cmp);
+	bool MultiMirror(nuke::Component* cmp, Atom* primary, const std::vector<Atom*>& sel, const MultiCompSnap& before, bool undo);
+	void MultiTransform(Atom* primary, const std::vector<Atom*>& sel, int what, const double was[3], const double now[3], bool undo);   // 0 pos, 1 euler deg, 2 scale
+	bool DrawAnchorsMulti(Atom* primary, const std::vector<Atom*>& sel, bool undo);
+	// Gizmo move of a canvas child: catches the edges / centres of the other widgets and of the
+	// canvas, and the spacings between neighbours (equal gaps). `alsoMoving` = the rest of the
+	// selection (no reference). Leaves the guides for DrawSnapGuides.
+	bool SnapWidgetMove(nuke::World* world, Atom* a, Vector3& pos, const std::vector<Atom*>* alsoMoving = nullptr);
+	struct SnapGuide { Vector3 a, b; bool measure = false; bool world = false; float value = 0.0f; };
+	std::vector<SnapGuide> snapGuides;
+	void DrawSnapGuides(const float* view, const float* proj, ImVec2 rectMin, ImVec2 rectSize);   // viewport.cpp
+	// Sequencer bound to a SequencePlayer's atom (relative paths, local poses): docked into a prefab
+	// window (dockIn) or the standalone window over the live world.
+	void OpenSequenceForPlayer(Atom* host, const std::string& seqGuid, AssetEditorWin* dockIn);
+	// Component clipboard (envelope "component"): copy one, paste its values into a same-type one,
+	// or add it to an atom as a new component. `undo` = record on the world undo stack.
+	void       CopyComponentToClipboard(Component* c);
+	bool       ComponentClipboard(std::string& type, nlohmann::json& props);
+	bool       PasteComponentValues(Component* c, bool undo);
+	Component* PasteComponentAsNew(Atom* a, bool undo);
 	void DrawAnimEditor(AssetEditorWin& w);          // .nuanim window (animeditor.cpp)
 	void DrawSMEditor(AssetEditorWin& w);            // .nusm node graph (smeditor.cpp)
 	void DrawBlendEditor(AssetEditorWin& w);         // .nublend canvas (blendeditor.cpp)
@@ -966,6 +1024,9 @@ public:
 	Atom*  PlaceSpawned(Atom* atom);               // add to the target (+parent), select, record / mark dirty
 	std::function<void()> CreateMenuItems();       // the Create menu body; returns the picked action (empty = none)
 	void   PasteToTarget();                        // clipboard envelope (atom / atoms) into the edit target
+	void   PrefabDuplicate(AssetEditorWin& w, const std::vector<long>& ids);   // prefab window: copies beside the originals
+	void   PrefabGroup(AssetEditorWin& w);                                      // selection -> a new folder (poses kept)
+	void   PrefabUngroup(AssetEditorWin& w);                                    // selected folders dissolve into their parents
 	Vector3 DropPointIn(World* world, Camera* cam, ImVec2 rmin, ImVec2 sz, ImVec2 mp);   // drop landing point
 	void   PrefabViewDrop(AssetEditorWin& w);      // browser asset dropped on the prefab 3D view
 	void StartRename(const std::string& path);
@@ -1072,6 +1133,10 @@ public:
 	void PasteAtom();
 	void DuplicateSelectedAtom();
 	bool AtomClipboardAvailable();                                // clipboard holds an atom envelope
+	// The clipboard text when it is one of OUR envelopes ("nukeClipboard"), else "". Cached by the
+	// OS clipboard change counter: the availability checks run every frame and must not touch the
+	// clipboard unless it changed, nor ask for text when it holds none.
+	static const std::string& ClipboardEnvelope();
 
 	// ---- selection ops (selection.cpp) ------------------------------------------------
 	void HierSelect(Atom* a);                    // plain click: collapse to a single selection

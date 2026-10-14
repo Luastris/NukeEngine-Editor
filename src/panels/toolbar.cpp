@@ -99,8 +99,9 @@ Atom* EditorUI::PlaceSpawned(Atom* atom)
 
 void EditorUI::PasteToTarget()
 {
-	const char* clip = ImGui::GetClipboardText();
-	if (!clip || !strstr(clip, "\"nukeClipboard\"")) return;
+	const std::string& clipEnv = ClipboardEnvelope();   // "" unless the clipboard is one of our envelopes
+	const char* clip = clipEnv.empty() ? nullptr : clipEnv.c_str();
+	if (!clip) return;
 	json j = json::parse(clip, nullptr, false);
 	if (j.is_discarded()) return;
 	const std::string kind = j.value("nukeClipboard", std::string());
@@ -265,6 +266,13 @@ void EditorUI::Toolbar()
 		if (ToolBtn(worldMode ? ICON_LC_GLOBE : ICON_LC_AXIS_3D,
 		            worldMode ? "World space (X)" : "Local space (X)", false, bw))
 			app->manipulationWorld = !app->manipulationWorld;
+		// Multi-edit mode: how an inspector edit lands on the rest of a multi-selection.
+		ImGui::SameLine();
+		if (ToolBtn(multiEditAbsolute ? ICON_LC_EQUAL : ICON_LC_DIFF,
+		            multiEditAbsolute ? "Multi-edit: ABSOLUTE\nan edited value becomes the same on every selected atom"
+		                              : "Multi-edit: RELATIVE\nevery selected atom moves by the same delta from its own value",
+		            false, bw))
+			multiEditAbsolute = !multiEditAbsolute;   // persisted in editor_state.json
 
 		// grid snap: click toggles, right-click opens the increments (persisted per project).
 		ImGui::SameLine();
@@ -309,7 +317,12 @@ void EditorUI::Toolbar()
 				pieWorldPath = app->currentWorldPath;
 				Time::getSingleton()->scale = 1.0;   // a leftover SetTimeScale must not leak into a fresh session
 			}
+			const bool enteringPlay = app->playState == 0;
 			app->playState = 1;
+			// The editor frame renders the world FIRST and ticks it later (in this UI pass), so the
+			// first play-mode frame would show the world before any component had started (a menu
+			// in its rest pose before its intro tweens). Tick once now: the next render sees it started.
+			if (enteringPlay) app->currentWorld->Update();
 		}
 		ImGui::SameLine();
 		if (ToolBtn(ICON_LC_PAUSE, "Pause", app->playState == 2, bw))
@@ -317,25 +330,7 @@ void EditorUI::Toolbar()
 			if (app->playState != 0) app->playState = 2;   // pause only while playing
 		}
 		ImGui::SameLine();
-		if (ToolBtn(ICON_LC_SQUARE, "Stop", app->playState == 0, bw))
-		{
-			const bool wasPlaying = app->playState != 0;
-			// Leave play mode BEFORE the restore: LoadFromString's teardown keeps persistent
-			// atoms only while playing, so PIE-born ones would leak into the edit scene.
-			app->playState = 0;
-			if (wasPlaying && !pieSnapshot.empty())
-			{
-				// LoadFromString recreates every atom — re-resolve the selection by stable id.
-				long selId = app->selectedInHieararchy ? app->selectedInHieararchy->id.id : 0;
-				app->selectedInHieararchy = nullptr;
-				app->currentWorld->LoadFromString(pieSnapshot);
-				app->currentWorldPath = pieWorldPath;             // a script's Game.LoadWorld must not leak past Stop
-				if (selId) app->selectedInHieararchy = app->currentWorld->GetById(selId);
-			}
-			if (app->render) app->render->setCursorMode(0);   // a script may have locked/hidden the cursor
-			Time::getSingleton()->scale = 1.0;
-			app->CancelWorldLoadAsync();   // a staged async world must not activate over the restored edit scene
-		}
+		if (ToolBtn(ICON_LC_SQUARE, "Stop", app->playState == 0, bw)) StopPIE();
 		// PIE possess switch: Game Camera = World::GetMainCamera; Editor Camera = keep the free-fly view.
 		ImGui::SameLine();
 		if (ToolBtn(pieUseEditorCam ? ICON_LC_EYE : ICON_LC_VIDEO,
@@ -493,7 +488,7 @@ void EditorUI::Draw()
 		// NUKE_PLAY=1: enter PIE ~4 s after boot.
 		static int playDelay = -2;
 		if (playDelay == -2) { const char* e = std::getenv("NUKE_PLAY"); playDelay = (e && *e == '1') ? 250 : -1; }
-		if (playDelay > 0 && --playDelay == 0)
+		if (playDelay > 0 && !bootLoading && --playDelay == 0)   // never on a half-loaded boot world (the button is locked too)
 		{
 			AppInstance* app = AppInstance::GetSingleton();
 			if (app->playState == 0)
@@ -501,8 +496,35 @@ void EditorUI::Draw()
 				pieSnapshot  = app->currentWorld->SaveToString();
 				pieWorldPath = app->currentWorldPath;
 			}
+			const bool enteringPlayHook = app->playState == 0;
 			app->playState = 1;
+			if (enteringPlayHook) app->currentWorld->Update();   // first tick before the first play frame (see the Play button)
 			std::cout << "[editor]\t\tNUKE_PLAY hook: entering PIE" << std::endl;
+		}
+		// NUKE_LOCATE=<kind>|<value>: press the inspector's "Go to file" for that asset field ~2 s
+		// after boot and log the browser's selection a second later.
+		static int locDelay = -2; static std::string locSpec;
+		if (locDelay == -2) { const char* e = std::getenv("NUKE_LOCATE"); locSpec = e ? e : ""; locDelay = locSpec.empty() ? -1 : 120; }
+		if (locDelay > 0 && !bootLoading && --locDelay == 0)
+		{
+			const size_t bar = locSpec.find('|');
+			LocateInBrowser(locSpec.substr(0, bar), bar == std::string::npos ? std::string() : locSpec.substr(bar + 1));
+			locDelay = -3;
+		}
+		else if (locDelay == -3) { static int after = 60; if (--after == 0) std::cout << "[editor]\t\tNUKE_LOCATE: cwd '" << browserCwd << "' sel '" << browserSel << "' view " << browserView << std::endl; }
+		// NUKE_PLAY_STOP=<frames>: that many frames after the NUKE_PLAY hook entered PIE, press
+		// Stop and log what the edit world is afterwards (path + root atoms) - the restore proof.
+		static int stopDelay = -2;
+		if (stopDelay == -2) { const char* e = std::getenv("NUKE_PLAY_STOP"); stopDelay = (e && *e) ? std::atoi(e) : -1; }
+		if (stopDelay > 0 && playDelay == 0 && AppInstance::GetSingleton()->playState != 0 && --stopDelay == 0)
+		{
+			AppInstance* app = AppInstance::GetSingleton();
+			std::string before = app->currentWorldPath;
+			StopPIE();
+			std::string roots;
+			for (Atom* a : app->currentWorld->GetHierarchy()) if (a) roots += (roots.empty() ? "" : ", ") + a->GetName();
+			std::cout << "[editor]\t\tNUKE_PLAY_STOP hook: was '" << before << "', now '" << app->currentWorldPath
+			          << "' roots: " << roots << std::endl;
 		}
 		// NUKE_PREFAB_SIM_TEST=<.nuprefab path>: open the prefab editor, toggle simulate,
 		// verify the subtree's rigidbody FALLS in the private sandbox, stop, verify restore.
@@ -940,10 +962,73 @@ void EditorUI::ApplyAtomState(long id, long parentId, int index, const std::stri
 	editing = false; editAtomId = 0;                                      // don't re-capture this change
 }
 
+// One undo step for a multi-edit: the primary (id 0 = none) plus every other atom the fan-out
+// changed. Ancestors apply first - ApplyAtomState re-creates a whole subtree.
+void EditorUI::FlushMultiUndo(long primaryId, long primaryParent, int primaryIndex,
+                              const std::string& primaryBefore, const std::string& primaryAfter)
+{
+	AppInstance* app = AppInstance::GetSingleton();
+	struct Step { long id, parent; int index, depth; std::string before, after; };
+	std::vector<Step> steps;
+	auto depthOf = [](Atom* a) { int d = 0; for (Atom* p = a ? a->parent : nullptr; p; p = p->parent) ++d; return d; };
+	if (primaryId)
+		steps.push_back({ primaryId, primaryParent, primaryIndex, depthOf(app->currentWorld->GetById(primaryId)), primaryBefore, primaryAfter });
+	for (auto& kv : multiBefore)
+	{
+		Atom* m = kv.first != primaryId ? app->currentWorld->GetById(kv.first) : nullptr;
+		if (!m) continue;
+		std::string after = SaveAtomToString(m);
+		if (after != kv.second.before)
+			steps.push_back({ kv.first, kv.second.parent, kv.second.index, depthOf(m), kv.second.before, after });
+	}
+	multiBefore.clear();
+	if (steps.empty()) return;
+	std::stable_sort(steps.begin(), steps.end(), [](const Step& x, const Step& y) { return x.depth < y.depth; });
+	const long selId = app->selectedInHieararchy ? (long)app->selectedInHieararchy->id.id : primaryId;
+	auto apply = [this, steps, selId](bool redo)
+	{
+		for (const Step& s : steps) ApplyAtomState(s.id, s.parent, s.index, redo ? s.after : s.before);
+		AppInstance* ap = AppInstance::GetSingleton();
+		if (Atom* sel = ap->currentWorld->GetById(selId)) ap->selectedInHieararchy = sel;   // the primary stays primary
+	};
+	PushUndo("Edit " + std::to_string(steps.size()) + (steps.size() == 1 ? " atom" : " atoms"),
+		[apply]{ apply(false); }, [apply]{ apply(true); });
+}
+
+void EditorUI::MultiTouch(Atom* m, bool undo)
+{
+	AppInstance* app = AppInstance::GetSingleton();
+	if (!undo || !m || app->playState != 0 || multiBefore.count((long)m->id.id)) return;
+	MultiUndoSnap s;
+	s.parent = AtomParentId(m); s.index = AtomIndex(app->currentWorld, m); s.before = SaveAtomToString(m);
+	multiBefore[(long)m->id.id] = s;
+}
+
+void EditorUI::StopPIE()
+{
+	AppInstance* app = AppInstance::GetSingleton();
+	const bool wasPlaying = app->playState != 0;
+	// Leave play mode BEFORE the restore: LoadFromString's teardown keeps persistent
+	// atoms only while playing, so PIE-born ones would leak into the edit scene.
+	app->playState = 0;
+	if (wasPlaying && !pieSnapshot.empty())
+	{
+		// LoadFromString recreates every atom — re-resolve the selection by stable id.
+		long selId = app->selectedInHieararchy ? app->selectedInHieararchy->id.id : 0;
+		app->selectedInHieararchy = nullptr;
+		app->currentWorld->LoadFromString(pieSnapshot);
+		app->currentWorldPath = pieWorldPath;             // a script's Game.LoadWorld must not leak past Stop
+		if (selId) app->selectedInHieararchy = app->currentWorld->GetById(selId);
+	}
+	if (app->render) app->render->setCursorMode(0);   // a script may have locked/hidden the cursor
+	Time::getSingleton()->scale = 1.0;
+	app->CancelWorldLoadAsync();   // a staged async world must not activate over the restored edit scene
+}
+
 void EditorUI::TrackUndo()
 {
 	AppInstance* app = AppInstance::GetSingleton();
-	if (app->playState != 0) return;   // never track during PIE
+	if (app->playState != 0) { multiBefore.clear(); return; }   // never track during PIE
 	ImGuiID activeId = ImGui::GetActiveID();
 	bool active = (activeId != 0) || ImGuizmo::IsUsing();
 	Atom* sel = app->selectedInHieararchy;
@@ -965,12 +1050,17 @@ void EditorUI::TrackUndo()
 			{
 				long id = editAtomId, parent = AtomParentId(a); int index = AtomIndex(app->currentWorld, a);
 				std::string before = editBefore;
-				PushUndo("Edit " + a->GetName(),
-					[this, id, parent, index, before]{ ApplyAtomState(id, parent, index, before); },
-					[this, id, parent, index, after ]{ ApplyAtomState(id, parent, index, after ); });
+				if (multiBefore.empty())
+					PushUndo("Edit " + a->GetName(),
+						[this, id, parent, index, before]{ ApplyAtomState(id, parent, index, before); },
+						[this, id, parent, index, after ]{ ApplyAtomState(id, parent, index, after ); });
+				else
+					FlushMultiUndo(id, parent, index, before, after);   // one step for the whole selection
 			}
 		}
 	}
+	// A fan-out the detector did not frame (no primary change): still one undo step.
+	if (!editing && !active && !multiBefore.empty()) FlushMultiUndo(0, 0, 0, std::string(), std::string());
 	// "before" = the just-flushed "after" when chaining from another widget, else the last idle
 	// snapshot — a same-frame snapshot would already include a slider's click-to-position jump.
 	if (active && !editing)
@@ -1094,8 +1184,7 @@ static void UniquifySiblingName(World* w, Atom* a, long parentId)
 
 bool EditorUI::AtomClipboardAvailable()
 {
-	const char* clip = ImGui::GetClipboardText();
-	return clip && strstr(clip, "\"nukeClipboard\"") != nullptr;
+	return !ClipboardEnvelope().empty();   // cached: menus ask every frame they are open
 }
 
 void EditorUI::CopySelectedAtom()
@@ -1116,8 +1205,9 @@ void EditorUI::CutSelectedAtom()
 void EditorUI::PasteAtom()
 {
 	AppInstance* app = AppInstance::GetSingleton();
-	const char* clip = ImGui::GetClipboardText();
-	if (!clip || !strstr(clip, "\"nukeClipboard\"")) return;
+	const std::string& clipEnv = ClipboardEnvelope();   // "" unless the clipboard is one of our envelopes
+	const char* clip = clipEnv.empty() ? nullptr : clipEnv.c_str();
+	if (!clip) return;
 	json j = json::parse(clip, nullptr, false);
 	if (j.is_discarded() || j.value("nukeClipboard", std::string()) != "atom" || !j.contains("atom")) return;
 	Atom* a = CloneAtomFromString(j["atom"].dump());

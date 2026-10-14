@@ -16,6 +16,7 @@
 #include <interface/Services.h> // csclass picker: scripting providers
 #include <service/iScript.h>
 #include <reflect/ReflectBind.h>   // multi-edit: per-field mirror across the selection
+#include <interface/EditorHooks.h>  // module-supplied component UI (ED1)
 #include <set>
 #include <memory>
 #include <cmath>
@@ -26,6 +27,8 @@
 #include <API/Model/Layers.h>
 #include <API/Model/Canvas.h>
 #include <API/Model/RectAnchor.h>
+#include <API/Model/Widget.h>
+#include <API/Model/DebugDraw.h>   // UI snapping guides
 #include <API/Model/Sprite.h>
 #include <functional>
 #include <interface/AssetCreators.h>   // module-supplied asset editors
@@ -284,27 +287,7 @@ bool EditorUI::AssetPicker(const char* label, std::string& guid, const std::stri
 	}
 
 	ImGui::SameLine(0, 2);
-	if (ImGui::Button(ICON_LC_FOLDER_SEARCH "##loc"))   // locate the original file in the browser
-	{
-		std::string path;
-		if      (kind == "font") { if (!guid.empty()) path = (nuke::Config::baseDir() / guid).string(); }
-		else if (kind == "script" || kind == "audio" || IsFileKind(kind)) { if (!guid.empty()) path = (bfs::path(contentDir) / guid).string(); }
-		else if (kind == "shader" && db->GetShader(guid)) path = db->GetShader(guid)->vsPath;
-		else                       path = db->PathForGuid(guid);
-		if (!path.empty())
-		{
-			// Navigate in the browser's own path form (native separators): its selection compares
-			// paths as strings against directory-iterator output, so a mixed-separator path from an
-			// asset value would highlight nothing. The draw resolves browserLocate by filesystem
-			// equivalence and scrolls the row into view.
-			bfs::path bp = bfs::path(path).make_preferred();
-			BrowserNavigate(bp.parent_path().string());
-			BrowserSelect(bp.string());
-			browserLocate = bp.string();
-			if (win) win->browser = true;
-			NukeUI::DocFocus("panel:browser");
-		}
-	}
+	if (ImGui::Button(ICON_LC_FOLDER_SEARCH "##loc")) LocateInBrowser(kind, guid);   // show the file in the browser
 	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Go to file");
 	ImGui::SameLine(0, 2);
 	if (ImGui::Button(ICON_LC_ROTATE_CCW "##rst")) { guid = defGuid; changed = true; }   // reset to default
@@ -499,6 +482,13 @@ void EditorUI::RegisterInspectorOverrides()
 	};
 	inspectorOverrides["Animator"] = [this](nuke::Component* c) {
 		DrawAnimatorInspector(static_cast<nuke::Animator*>(c));
+	};
+	inspectorOverrides["SequencePlayer"] = [this](nuke::Component* c) {
+		auto* sp = static_cast<nuke::SequencePlayer*>(c);
+		if (sp->seqGuid.empty()) { ImGui::TextDisabled("Pick a sequence, then edit it here"); return; }
+		if (ImGui::Button(ICON_LC_CLAPPERBOARD " Edit Sequence", ImVec2(-FLT_MIN, 0))) OpenSequenceForPlayer(c->atom, sp->seqGuid, nullptr);
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("Open the sequencer bound to this atom: tracks address it and its children, poses are local");
 	};
 	inspectorOverrides["CharacterController"] = [this](nuke::Component* c) {
 		auto* cc = static_cast<nuke::CharacterController*>(c);
@@ -1648,8 +1638,17 @@ bool EditorUI::DrawFields(void* obj, nuke::TypeInfo* ti)
 		ImGui::TextUnformatted(n);
 		bool tipHover = !f.tip.empty() && ImGui::IsItemHovered();
 		ImGui::SameLine(ImGui::GetContentRegionAvail().x * 0.42f);
-		ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-		switch (f.type)
+		// Module-registered field buttons (EditorHooks): small squares right behind the widget.
+		const nuke::EditorFieldButton* fbtn[4]; int nfb = 0;
+		for (const nuke::EditorFieldButton& b : nuke::FieldButtons())
+			if (nfb < 4 && b.field == f.name && b.typeName == ti->name) { fbtn[nfb++] = &b; if (b.update) b.update(obj); }
+		const float fbSz = ImGui::GetFrameHeight(), fbGap = 2.0f;
+		ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - nfb * (fbSz + fbGap));
+		const nuke::EditorFieldWidget* fwid = nullptr;   // a module-drawn widget for this field (EditorHooks)
+		for (const nuke::EditorFieldWidget& fw : nuke::FieldWidgets())
+			if (fw.field == f.name && fw.typeName == ti->name) { fwid = &fw; break; }
+		if (fwid) changed |= fwid->draw(obj, w);
+		else switch (f.type)
 		{
 		case nuke::FT::Bool:   changed |= ImGui::Checkbox(w, (bool*)a); break;
 		case nuke::FT::Int:
@@ -1721,9 +1720,11 @@ bool EditorUI::DrawFields(void* obj, nuke::TypeInfo* ti)
 				if (!at) return false;
 				if (owner)
 					for (Atom* p = owner; p; p = p->parent) if (p == at) return false;
-				if (f.asset.empty()) return true;
-				for (nuke::Component* c : at->components)
-					if (c) if (nuke::TypeInfo* ti2 = c->GetType()) if (ti2->name == f.asset) return true;
+				if (f.asset.empty() || f.asset == "Atom") return true;   // any atom
+				for (nuke::Component* c : at->components)   // the named type or anything derived from it
+					if (c)
+						for (const nuke::TypeInfo* ti2 = c->GetType(); ti2; ti2 = ti2->base.empty() ? nullptr : nuke::Registry_Find(ti2->base))
+							if (ti2->name == f.asset) return true;
 				return false;
 			};
 			const char* cur = *slot ? (*slot)->name.c_str() : "<none>";
@@ -1833,6 +1834,15 @@ bool EditorUI::DrawFields(void* obj, nuke::TypeInfo* ti)
 		}
 		if (!f.tip.empty() && (tipHover || ImGui::IsItemHovered()))
 			ImGui::SetTooltip("%s", f.tip.c_str());
+		for (int bi = 0; bi < nfb; ++bi)
+		{
+			ImGui::SameLine(0, fbGap);
+			ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0.0f, ImGui::GetStyle().FramePadding.y));   // the glyph centres in the square
+			if (ImGui::Button((fbtn[bi]->icon + "##fb" + fbtn[bi]->id).c_str(), ImVec2(fbSz, fbSz)))
+				if (fbtn[bi]->click(obj)) changed = true;
+			ImGui::PopStyleVar();
+			if (!fbtn[bi]->tip.empty() && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", fbtn[bi]->tip.c_str());
+		}
 	}
 	return changed;
 }
@@ -2029,6 +2039,540 @@ void EditorUI::MoveComponent(Atom* src, Component* c, Atom* dst)
 		});
 }
 
+// ---- multi-edit: one inspector edit lands on every selected atom ----
+static bool MultiFieldSame(const EditorUI::MultiFieldSnap& a, const EditorUI::MultiFieldSnap& b)
+{
+	return a.v.type == b.v.type && a.v.b == b.v.b && a.v.num == b.v.num && a.v.str == b.v.str
+	    && a.v.atom == b.v.atom && a.v.obj == b.v.obj && memcmp(a.v.v, b.v.v, sizeof(a.v.v)) == 0
+	    && a.il == b.il && a.fl == b.fl && a.dl == b.dl && a.sl == b.sl;
+}
+static EditorUI::MultiFieldSnap MultiFieldRead(nuke::Component* c, const nuke::Field& f)
+{
+	EditorUI::MultiFieldSnap s;
+	s.v = nuke::Reflect_GetField(c, f);
+	if (f.addr)
+		switch (f.type)
+		{
+		case nuke::FT::IntList:    s.il = *(std::vector<int>*)f.addr(c); break;
+		case nuke::FT::FloatList:  s.fl = *(std::vector<float>*)f.addr(c); break;
+		case nuke::FT::DoubleList: s.dl = *(std::vector<double>*)f.addr(c); break;
+		case nuke::FT::StringList: s.sl = *(std::vector<std::string>*)f.addr(c); break;
+		default: break;
+		}
+	return s;
+}
+static bool MultiIsList(nuke::FT t)
+{ return t == nuke::FT::IntList || t == nuke::FT::FloatList || t == nuke::FT::DoubleList || t == nuke::FT::StringList; }
+
+// The value another atom's field takes: the edited one (absolute), or its own moved by the same
+// delta (relative; numbers and the edited vector components only - the rest is always copied).
+static nuke::ReflectValue MultiBlend(const nuke::Field& f, const nuke::ReflectValue& was, const nuke::ReflectValue& now,
+                                     const nuke::ReflectValue& mine, bool absolute)
+{
+	nuke::ReflectValue out = now;
+	switch (now.type)
+	{
+	case nuke::FT::Int: case nuke::FT::Float: case nuke::FT::Double:
+	{
+		const bool choice = !f.enumLabels.empty() || !f.widget.empty();   // dropdowns / masks: no arithmetic
+		if (absolute || choice || mine.type != now.type) break;
+		double v = mine.num + (now.num - was.num);
+		if (f.fmax > f.fmin) v = std::min((double)f.fmax, std::max((double)f.fmin, v));
+		if (now.type == nuke::FT::Int) v = std::floor(v + 0.5);
+		out.num = v;
+		break;
+	}
+	case nuke::FT::Vec2: case nuke::FT::Vec3: case nuke::FT::Vec4: case nuke::FT::Color:
+		if (mine.type != now.type) break;
+		for (int i = 0; i < 4; ++i)   // only the edited components travel
+			out.v[i] = (now.v[i] == was.v[i]) ? mine.v[i] : absolute ? now.v[i] : mine.v[i] + (now.v[i] - was.v[i]);
+		break;
+	default: break;
+	}
+	return out;
+}
+
+// The component of `other` that pairs with `cmp` of `primary`: same type, same ordinal among that type.
+nuke::Component* EditorUI::MultiPeer(Atom* primary, nuke::Component* cmp, Atom* other)
+{
+	if (!primary || !cmp || !other) return nullptr;
+	nuke::TypeInfo* ti = cmp->GetType();
+	if (!ti || dynamic_cast<nuke::UnknownComponent*>(cmp)) return nullptr;
+	int nth = 0;
+	for (nuke::Component* c : primary->components)
+	{
+		if (c == cmp) break;
+		if (c && c->GetType() == ti) ++nth;
+	}
+	for (nuke::Component* c : other->components)
+		if (c && c->GetType() == ti && !dynamic_cast<nuke::UnknownComponent*>(c) && nth-- == 0) return c;
+	return nullptr;
+}
+
+bool EditorUI::MultiShared(Atom* primary, nuke::Component* cmp, const std::vector<Atom*>& sel)
+{
+	for (Atom* m : sel)
+		if (m && m != primary && !MultiPeer(primary, cmp, m)) return false;
+	return true;
+}
+
+EditorUI::MultiCompSnap EditorUI::MultiSnapshot(nuke::Component* cmp)
+{
+	MultiCompSnap s;
+	if (!cmp) return s;
+	s.enabled = cmp->enabled; s.tickEvery = cmp->tickEvery;
+	if (nuke::TypeInfo* ti = cmp->GetType())
+		for (const nuke::Field& f : ti->fields) s.fields.push_back(MultiFieldRead(cmp, f));
+	s.dyn = cmp->DynamicProps();
+	return s;
+}
+
+// Fans out whatever changed on `cmp` since `before` to its peers on the other selected atoms.
+bool EditorUI::MultiMirror(nuke::Component* cmp, Atom* primary, const std::vector<Atom*>& sel, const MultiCompSnap& before, bool undo)
+{
+	nuke::TypeInfo* ti = cmp ? cmp->GetType() : nullptr;
+	if (!ti) return false;
+	bool any = false;
+	auto peers = [&](const std::function<void(nuke::Component*)>& fn)
+	{
+		for (Atom* m : sel)
+		{
+			if (!m || m == primary) continue;
+			if (nuke::Component* mc = MultiPeer(primary, cmp, m)) { MultiTouch(m, undo); fn(mc); any = true; }
+		}
+	};
+	if (cmp->enabled != before.enabled)
+		peers([&](nuke::Component* mc) { mc->enabled = cmp->enabled; });
+	if (cmp->tickEvery != before.tickEvery)
+		peers([&](nuke::Component* mc)
+		{ mc->tickEvery = std::max(1, multiEditAbsolute ? cmp->tickEvery : mc->tickEvery + (cmp->tickEvery - before.tickEvery)); });
+	size_t fi = 0;
+	for (const nuke::Field& f : ti->fields)
+	{
+		if (fi >= before.fields.size()) break;
+		const MultiFieldSnap& was = before.fields[fi++];
+		if (f.hidden) continue;   // internal state (ids, caches) stays per component
+		const MultiFieldSnap now = MultiFieldRead(cmp, f);
+		if (MultiFieldSame(now, was)) continue;
+		peers([&](nuke::Component* mc)
+		{
+			if (MultiIsList(f.type))
+			{
+				if (!f.addr) return;
+				switch (f.type)
+				{
+				case nuke::FT::IntList:    *(std::vector<int>*)f.addr(mc) = now.il; break;
+				case nuke::FT::FloatList:  *(std::vector<float>*)f.addr(mc) = now.fl; break;
+				case nuke::FT::DoubleList: *(std::vector<double>*)f.addr(mc) = now.dl; break;
+				default:                   *(std::vector<std::string>*)f.addr(mc) = now.sl; break;
+				}
+			}
+			else
+				nuke::Reflect_SetField(mc, f, MultiBlend(f, was.v, now.v, nuke::Reflect_GetField(mc, f), multiEditAbsolute));
+			nuke::Reflect_ComponentFieldChanged(mc, f);
+		});
+	}
+	// script props, paired by name
+	if (!before.dyn.empty())
+	{
+		const std::vector<nuke::DynProp> nowDyn = cmp->DynamicProps();
+		for (const nuke::DynProp& n : nowDyn)
+			for (const nuke::DynProp& w : before.dyn)
+			{
+				if (w.name != n.name) continue;
+				if (w.value.kind == n.value.kind && w.value.num == n.value.num && w.value.b == n.value.b
+				    && w.value.str == n.value.str && w.value.refId == n.value.refId) break;
+				peers([&](nuke::Component* mc)
+				{
+					for (const nuke::DynProp& mp : mc->DynamicProps())
+					{
+						if (mp.name != n.name || mp.value.kind != n.value.kind) continue;
+						nuke::NukeVar v = n.value;
+						if (!multiEditAbsolute && v.kind == nuke::NukeVar::Kind::Number) v.num = mp.value.num + (n.value.num - w.value.num);
+						mc->SetDynamicProp(n.name, v);
+						break;
+					}
+				});
+				break;
+			}
+	}
+	return any;
+}
+
+void EditorUI::MultiTransform(Atom* primary, const std::vector<Atom*>& sel, int what, const double was[3], const double now[3], bool undo)
+{
+	for (Atom* m : sel)
+	{
+		if (!m || m == primary || m->folder) continue;   // folders stay identity
+		MultiTouch(m, undo);
+		Transform& t = m->GetTransform();
+		Vector3 e = t.EulerDeg();
+		double cur[3];
+		if (what == 0)      { cur[0] = t.position.x; cur[1] = t.position.y; cur[2] = t.position.z; }
+		else if (what == 1) { cur[0] = e.x; cur[1] = e.y; cur[2] = e.z; }
+		else                { cur[0] = t.scale.x; cur[1] = t.scale.y; cur[2] = t.scale.z; }
+		for (int i = 0; i < 3; ++i)   // only the edited axes travel
+			if (now[i] != was[i]) cur[i] = multiEditAbsolute ? now[i] : cur[i] + (now[i] - was[i]);
+		if (what == 0)      t.position = Vector3(cur[0], cur[1], cur[2]);
+		else if (what == 1) t.SetEulerDeg(Vector3(cur[0], cur[1], cur[2]));
+		else                t.scale = Vector3(cur[0], cur[1], cur[2]);
+	}
+}
+
+// Pins / unpins the sides of a canvas child. A side that gets pinned captures the CURRENT
+// distance, so the element stays where it is (RectAnchor is added on the first pinned side).
+static bool SetAnchorSides(Atom* a, bool nl, bool nr, bool nt, bool nb)
+{
+	if (!a) return false;
+	nuke::Canvas* cv = nullptr;
+	for (Atom* p = a->parent; p && !cv; p = p->parent) cv = p->GetComponent<nuke::Canvas>();
+	if (!cv || !cv->transform) return false;
+	nuke::RectAnchor* ra = a->GetComponent<nuke::RectAnchor>();
+	const bool l = ra && ra->left, r = ra && ra->right, tp = ra && ra->top, b = ra && ra->bottom;
+	if (nl == l && nr == r && nt == tp && nb == b) return false;
+	if (!ra) { ra = new nuke::RectAnchor(); a->AddComponent(ra); }
+	ra->left = nl; ra->right = nr; ra->top = nt; ra->bottom = nb;
+	ra->CaptureFromPose();
+	return true;
+}
+
+// The anchors block of the primary atom; its edit lands on every selected canvas child. A toggled
+// side is toggled everywhere (each element keeps its place: it captures its own distance), an
+// edited distance follows the multi-edit mode on the elements that have that side pinned.
+bool EditorUI::DrawAnchorsMulti(Atom* primary, const std::vector<Atom*>& sel, bool undo)
+{
+	struct A { bool on[4] = { false, false, false, false }; float d[4] = { 0, 0, 0, 0 }; };
+	auto read = [](Atom* a)
+	{
+		A s;
+		if (nuke::RectAnchor* ra = a ? a->GetComponent<nuke::RectAnchor>() : nullptr)
+		{
+			s.on[0] = ra->left; s.on[1] = ra->right; s.on[2] = ra->top; s.on[3] = ra->bottom;
+			s.d[0] = ra->distLeft; s.d[1] = ra->distRight; s.d[2] = ra->distTop; s.d[3] = ra->distBottom;
+		}
+		return s;
+	};
+	const A was = read(primary);
+	if (!DrawAnchorsBlock(primary)) return false;
+	if (sel.size() < 2) return true;
+	const A now = read(primary);
+	for (Atom* m : sel)
+	{
+		if (!m || m == primary) continue;
+		const A mine = read(m);
+		bool want[4], flags = false, dist = false;
+		for (int i = 0; i < 4; ++i)
+		{
+			want[i] = (now.on[i] != was.on[i]) ? now.on[i] : mine.on[i];
+			flags |= want[i] != mine.on[i];
+			dist  |= was.on[i] && now.on[i] && mine.on[i] && now.d[i] != was.d[i];
+		}
+		if (!flags && !dist) continue;
+		MultiTouch(m, undo);
+		if (flags && !SetAnchorSides(m, want[0], want[1], want[2], want[3])) continue;   // not under a canvas
+		nuke::RectAnchor* ra = m->GetComponent<nuke::RectAnchor>();
+		if (!ra || !dist) continue;
+		float* d[4] = { &ra->distLeft, &ra->distRight, &ra->distTop, &ra->distBottom };
+		for (int i = 0; i < 4; ++i)
+			if (was.on[i] && now.on[i] && mine.on[i] && now.d[i] != was.d[i])
+				*d[i] = multiEditAbsolute ? now.d[i] : *d[i] + (now.d[i] - was.d[i]);
+	}
+	return true;
+}
+
+bool EditorUI::LocateInBrowser(const std::string& kind, const std::string& value)
+{
+	ResDB* db = ResDB::getSingleton();
+	std::string path;
+	if (value.empty()) {}
+	else if (kind == "font") path = (nuke::Config::baseDir() / value).string();
+	else if (kind == "script" || kind == "audio" || IsFileKind(kind)) path = (bfs::path(contentDir) / value).string();
+	else if (kind == "shader" || kind == "postshader") { if (Shader* s = db->GetShader(value)) path = s->vsPath.empty() ? db->PathForGuid(value) : s->vsPath; }
+	else if (kind == "csclass")
+	{
+		// A C# class, not a file: the .cs named after the class (simple name), anywhere under content.
+		std::string simple = value.substr(value.find_last_of('.') == std::string::npos ? 0 : value.find_last_of('.') + 1);
+		if (auto snap = nuke::FileIndex::Get().Get("content"))
+		{
+			std::vector<const nuke::FileIndex::Entry*> all;
+			snap->Under("", all);
+			for (const nuke::FileIndex::Entry* e : all)
+				if (!e->isDir && bfs::path(e->rel).extension() == ".cs" && bfs::path(e->rel).stem().string() == simple)
+				{ path = (bfs::path(contentDir) / e->rel).string(); break; }
+		}
+	}
+	else path = db->PathForGuid(value);
+	// A relative path (an asset registered by content-relative path) resolves against the content root.
+	if (!path.empty() && bfs::path(path).is_relative() && kind != "font") path = (bfs::path(contentDir) / path).string();
+	boost::system::error_code ec;
+	const bool exists = !path.empty() && bfs::exists(bfs::path(path), ec);
+	std::cout << "[browser]\tlocate " << kind << " '" << value << "' -> '" << path << "'" << (exists ? "" : " (NOT ON DISK)") << std::endl;
+	if (!exists) return false;
+	// The browser compares paths as strings against its index-built entries (native separators,
+	// absolute); the draw resolves browserLocate by filesystem equivalence and scrolls to the row.
+	bfs::path bp = bfs::absolute(bfs::path(path)).lexically_normal().make_preferred();
+	BrowserNavigate(bp.parent_path().string());
+	BrowserSelect(bp.string());
+	browserLocate = bp.string();
+	browserSearch[0] = 0;   // a search filter would hide the row
+	browserRoot = 0;        // content, not the C++ sources root
+	if (win) win->browser = true;
+	NukeUI::DocFocus("panel:browser");
+	return true;
+}
+
+// Anchors of a canvas child (RectAnchor is auto-added on the first enabled side): a 4x4 preset
+// grid drawn as little diagrams (columns left / centre / right / stretch, rows top / middle /
+// bottom / stretch), the four side toggles and their distances. Enabling a side captures the
+// CURRENT distance, so the element stays where it is. Shared by the world inspector and the
+// prefab windows. True when something changed.
+bool EditorUI::DrawAnchorsBlock(Atom* sltd)
+{
+	if (!sltd) return false;
+	nuke::Canvas* cvAnc = nullptr;
+	for (Atom* p = sltd->parent; p && !cvAnc; p = p->parent) cvAnc = p->GetComponent<nuke::Canvas>();
+	if (!cvAnc || !cvAnc->transform) return false;
+	bool changedAny = false;
+	ImGui::SeparatorText("Anchors");
+	nuke::RectAnchor* ra = sltd->GetComponent<nuke::RectAnchor>();
+	const bool  world = (cvAnc->mode == nuke::CanvasMode::WorldSpace);
+
+	bool l = ra && ra->left, r_ = ra && ra->right, tp = ra && ra->top, b = ra && ra->bottom;
+	bool nl = l, nr = r_, nt = tp, nb = b;
+	// Left: the presets, each cell a small picture of where the element pins inside the canvas.
+	ImGui::BeginGroup();
+	{
+		const float S = 26.0f, gap = 3.0f;
+		const ImU32 colBg = IM_COL32(44, 46, 54, 255), colHov = IM_COL32(70, 74, 86, 255), colFrame = IM_COL32(120, 124, 136, 255);
+		const ImU32 colEl = IM_COL32(200, 205, 215, 255), colAct = IM_COL32(90, 160, 255, 255);
+		static const char* colTip[4] = { "left", "centre", "right", "stretch horizontally" };
+		static const char* rowTip[4] = { "top", "middle", "bottom", "stretch vertically" };
+		ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(gap, gap));
+		for (int row = 0; row < 4; ++row)
+			for (int col = 0; col < 4; ++col)
+			{
+				if (col) ImGui::SameLine();
+				ImGui::PushID(row * 4 + col);
+				const ImVec2 p = ImGui::GetCursorScreenPos();
+				const bool pressed = ImGui::InvisibleButton("##anchorpreset", ImVec2(S, S));
+				const bool hov = ImGui::IsItemHovered();
+				const bool pL = col == 0 || col == 3, pR = col == 2 || col == 3, pT = row == 0 || row == 3, pB = row == 2 || row == 3;
+				const bool active = (l == pL && r_ == pR && tp == pT && b == pB);
+				ImDrawList* dl = ImGui::GetWindowDrawList();
+				dl->AddRectFilled(p, ImVec2(p.x + S, p.y + S), hov ? colHov : colBg, 3.0f);
+				dl->AddRect(ImVec2(p.x + 3, p.y + 3), ImVec2(p.x + S - 3, p.y + S - 3), colFrame);   // the canvas
+				const float x0 = col == 2 ? S - 13.0f : col == 1 ? S * 0.5f - 4.0f : 5.0f;
+				const float x1 = col == 0 ? 13.0f : col == 1 ? S * 0.5f + 4.0f : S - 5.0f;
+				const float y0 = row == 2 ? S - 13.0f : row == 1 ? S * 0.5f - 4.0f : 5.0f;
+				const float y1 = row == 0 ? 13.0f : row == 1 ? S * 0.5f + 4.0f : S - 5.0f;
+				dl->AddRectFilled(ImVec2(p.x + x0, p.y + y0), ImVec2(p.x + x1, p.y + y1), active ? colAct : colEl);   // the element
+				if (active) dl->AddRect(p, ImVec2(p.x + S, p.y + S), colAct, 3.0f, 0, 2.0f);
+				if (hov) ImGui::SetTooltip("%s, %s%s", rowTip[row], colTip[col], (row == 1 && col == 1) ? " (no anchors)" : "");
+				if (pressed) { nl = pL; nr = pR; nt = pT; nb = pB; }
+				ImGui::PopID();
+			}
+		ImGui::PopStyleVar();
+	}
+	ImGui::EndGroup();
+	// Right: one row per side - the toggle, its name and the distance (active while the side is
+	// pinned), filling the rest of the panel.
+	ImGui::SameLine(0, 18.0f);
+	ImGui::BeginGroup();
+	{
+		float dummy = 0.0f;
+		const float labelW = ImGui::CalcTextSize("Bottom").x + 10.0f;
+		auto sideRow = [&](const char* name, bool& flag, float* dist)
+		{
+			ImGui::PushID(name);
+			ImGui::Checkbox("##on", &flag);
+			ImGui::SameLine();
+			ImGui::AlignTextToFramePadding();
+			const float tx = ImGui::GetCursorPosX();
+			ImGui::TextUnformatted(name);
+			ImGui::SameLine(tx + labelW);
+			const bool usable = flag && dist != nullptr;
+			if (!usable) ImGui::BeginDisabled();
+			ImGui::SetNextItemWidth(std::max(60.0f, ImGui::GetContentRegionAvail().x));
+			if (ImGui::DragFloat("##dist", usable ? dist : &dummy, world ? 0.01f : 1.0f, 0.0f, 0.0f, usable ? (world ? "%.2f u" : "%.0f px") : "-") && usable) changedAny = true;
+			if (!usable) ImGui::EndDisabled();
+			if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+				ImGui::SetTooltip("Distance from the element's %s edge to the canvas's %s side%s", name, name, usable ? "" : " (pin the side first)");
+			ImGui::PopID();
+		};
+		sideRow("Left",   nl, ra ? &ra->distLeft   : nullptr);
+		sideRow("Right",  nr, ra ? &ra->distRight  : nullptr);
+		sideRow("Top",    nt, ra ? &ra->distTop    : nullptr);
+		sideRow("Bottom", nb, ra ? &ra->distBottom : nullptr);
+	}
+	ImGui::EndGroup();
+	if (nl != l || nr != r_ || nt != tp || nb != b)
+	{
+		SetAnchorSides(sltd, nl, nr, nt, nb);
+		ra = sltd->GetComponent<nuke::RectAnchor>();
+		changedAny = true;
+	}
+	if (ra && ((ra->left && ra->right) || (ra->top && ra->bottom)))
+		ImGui::TextDisabled("opposite sides pinned: the element stretches with the canvas");
+	return changedAny;
+}
+
+// UI snapping while a canvas child is MOVED with the gizmo. Candidates on each canvas axis: the
+// edges and centres of the other widgets of that canvas and of the canvas itself, the spacing
+// between any two neighbours (the element lands one such gap from a neighbour) and the middle
+// between its two nearest neighbours (equal gaps). The nearest candidate within 8 reference px
+// wins per axis. `pos` is the candidate world position (adjusted on a catch). The guides are
+// built at the FINAL position: every line the element now shares, every spacing it now matches.
+bool EditorUI::SnapWidgetMove(nuke::World* world, Atom* a, Vector3& pos, const std::vector<Atom*>* alsoMoving)
+{
+	snapGuides.clear();
+	if (!world || !a) return false;
+	nuke::Widget* wg = a->GetComponent<nuke::Widget>();
+	if (!wg) return false;
+	Atom* cvAtom = nullptr; nuke::Canvas* cv = nullptr;
+	for (Atom* p = a->parent; p && !cv; p = p->parent) if ((cv = p->GetComponent<nuke::Canvas>()) != nullptr) cvAtom = p;
+	if (!cv || !cv->transform || !cvAtom) return false;
+	const bool worldCv = cv->mode == nuke::CanvasMode::WorldSpace;
+	const float ppu = cv->pixelsPerUnit > 0.01f ? cv->pixelsPerUnit : 100.0f;
+	const double unit = worldCv ? 1.0 : 1.0 / ppu;                  // canvas px -> world units on the plane
+	const double px   = worldCv ? 0.01 : unit;                      // one "reference px" (world canvas: 1 cm)
+	const double thr = 8.0 * px, same = 0.25 * px, pad = 6.0 * px;
+	Vector3 cp = cv->transform->globalPosition(), R = cv->transform->right(), U = cv->transform->up();
+	auto uvOf = [&](const Vector3& p, double& u, double& v)
+	{
+		Vector3 d(p.x - cp.x, p.y - cp.y, p.z - cp.z);
+		u = d.x * R.x + d.y * R.y + d.z * R.z; v = d.x * U.x + d.y * U.y + d.z * U.z;
+	};
+	auto at = [&](double uu, double vv) { return Vector3(cp.x + R.x * uu + U.x * vv, cp.y + R.y * uu + U.y * vv, cp.z + R.z * uu + U.z * vv); };
+
+	struct Box { double lo[2], hi[2]; bool canvas; };
+	std::vector<Box> boxes;
+	boxes.push_back({ { -cv->width * 0.5 * unit, -cv->height * 0.5 * unit }, { cv->width * 0.5 * unit, cv->height * 0.5 * unit }, true });
+	auto moving = [&](Atom* x) { if (x == a) return true; if (alsoMoving) for (Atom* m : *alsoMoving) if (m == x) return true; return false; };
+	std::function<void(Atom*)> walk = [&](Atom* p)
+	{
+		for (Atom* ch : p->children)
+		{
+			if (!ch || !ch->enabled || moving(ch)) continue;   // the moved atoms and their subtrees are no reference
+			if (nuke::Widget* ow = ch->GetComponent<nuke::Widget>())
+			{
+				double ou, ov; uvOf(ch->GetTransform().globalPosition(), ou, ov);
+				Vector3 os = ch->GetTransform().globalScale();
+				const double ohw = ow->width * os.x * 0.5, ohh = ow->height * os.y * 0.5;
+				boxes.push_back({ { ou - ohw, ov - ohh }, { ou + ohw, ov + ohh }, false });
+			}
+			walk(ch);
+		}
+	};
+	walk(cvAtom);
+	Vector3 sc = a->GetTransform().globalScale();
+	double c[2]; uvOf(pos, c[0], c[1]);
+	const double half[2] = { wg->width * sc.x * 0.5, wg->height * sc.y * 0.5 };
+
+	// Neighbours along axis k = the widgets overlapping mine on the other axis, in axis order.
+	auto neighbours = [&](int k, std::vector<const Box*>& out)
+	{
+		const int o = 1 - k;
+		for (const Box& b : boxes)
+			if (!b.canvas && b.lo[o] < c[o] + half[o] && b.hi[o] > c[o] - half[o]) out.push_back(&b);
+		std::sort(out.begin(), out.end(), [k](const Box* x, const Box* y) { return x->lo[k] < y->lo[k]; });
+	};
+	auto nearest = [&](int k, const std::vector<const Box*>& nb, const Box*& L, const Box*& Rt)
+	{
+		L = Rt = nullptr;
+		for (const Box* b : nb)
+		{
+			if (b->hi[k] <= c[k] && (!L  || b->hi[k] > L->hi[k]))  L  = b;
+			if (b->lo[k] >= c[k] && (!Rt || b->lo[k] < Rt->lo[k])) Rt = b;
+		}
+	};
+
+	double delta[2] = { 0.0, 0.0 }; bool hit[2] = { false, false };
+	for (int k = 0; k < 2; ++k)
+	{
+		double bd = thr;
+		auto consider = [&](double target)
+		{
+			const double d = target - c[k];
+			if (std::fabs(d) < bd) { bd = std::fabs(d); delta[k] = d; hit[k] = true; }
+		};
+		for (const Box& b : boxes)   // edges and centres (mine against theirs)
+		{
+			const double lines[3] = { b.lo[k], (b.lo[k] + b.hi[k]) * 0.5, b.hi[k] };
+			for (double L : lines) { consider(L + half[k]); consider(L); consider(L - half[k]); }
+		}
+		std::vector<const Box*> nb; neighbours(k, nb);
+		std::vector<double> gaps;    // spacings that already exist between neighbours
+		for (size_t i = 1; i < nb.size(); ++i) { const double g = nb[i]->lo[k] - nb[i - 1]->hi[k]; if (g > 0.0) gaps.push_back(g); }
+		for (const Box* b : nb)
+			for (double g : gaps) { consider(b->hi[k] + g + half[k]); consider(b->lo[k] - g - half[k]); }
+		const Box* L; const Box* Rt; nearest(k, nb, L, Rt);
+		if (L && Rt && Rt->lo[k] - L->hi[k] > 2.0 * half[k]) consider((L->hi[k] + Rt->lo[k]) * 0.5);   // equal gaps
+	}
+	for (int k = 0; k < 2; ++k) c[k] += delta[k];
+
+	// Guides at the final position.
+	const Box me{ { c[0] - half[0], c[1] - half[1] }, { c[0] + half[0], c[1] + half[1] }, false };
+	auto lineGuide = [&](int k, double L, double lo, double hi)
+	{
+		SnapGuide g;
+		g.a = k == 0 ? at(L, lo - pad) : at(lo - pad, L);
+		g.b = k == 0 ? at(L, hi + pad) : at(hi + pad, L);
+		snapGuides.push_back(g);
+	};
+	auto measure = [&](int k, const Box& A, const Box& B)   // the gap between A and B along k
+	{
+		const int o = 1 - k;
+		const double lo = std::max(A.lo[o], B.lo[o]), hi = std::min(A.hi[o], B.hi[o]);
+		const double m = (lo + hi) * 0.5, gap = B.lo[k] - A.hi[k];
+		for (const SnapGuide& g : snapGuides)   // once per gap
+			if (g.measure && std::fabs(g.value - (float)(gap / px)) < 1e-3f)
+			{
+				double gu, gv; uvOf(g.a, gu, gv);
+				if (std::fabs((k == 0 ? gu : gv) - A.hi[k]) < same && std::fabs((k == 0 ? gv : gu) - m) < same) return;
+			}
+		SnapGuide g;
+		g.measure = true; g.world = worldCv; g.value = (float)(gap / px);
+		g.a = k == 0 ? at(A.hi[k], m) : at(m, A.hi[k]);
+		g.b = k == 0 ? at(B.lo[k], m) : at(m, B.lo[k]);
+		snapGuides.push_back(g);
+	};
+	for (int k = 0; k < 2; ++k)
+	{
+		const int o = 1 - k;
+		const double mine[3] = { me.lo[k], c[k], me.hi[k] };
+		std::map<long long, std::pair<double, double>> spans;   // shared line -> extent along o
+		for (const Box& b : boxes)
+		{
+			const double lines[3] = { b.lo[k], (b.lo[k] + b.hi[k]) * 0.5, b.hi[k] };
+			for (double L : lines)
+				for (double m : mine)
+					if (std::fabs(L - m) < same)
+					{
+						auto& sp = spans[(long long)std::llround(L / same)];
+						if (sp.first == 0.0 && sp.second == 0.0) sp = { me.lo[o], me.hi[o] };
+						sp.first = std::min(sp.first, b.lo[o]); sp.second = std::max(sp.second, b.hi[o]);
+					}
+		}
+		for (auto& kv : spans) lineGuide(k, kv.first * same, kv.second.first, kv.second.second);
+
+		std::vector<const Box*> nb; neighbours(k, nb);
+		const Box* L; const Box* Rt; nearest(k, nb, L, Rt);
+		const double gL = L  ? me.lo[k] - L->hi[k]  : -1.0;
+		const double gR = Rt ? Rt->lo[k] - me.hi[k] : -1.0;
+		if (L && Rt && gL > 0.0 && gR > 0.0 && std::fabs(gL - gR) < same) { measure(k, *L, me); measure(k, me, *Rt); }
+		for (size_t i = 1; i < nb.size(); ++i)
+		{
+			const double g = nb[i]->lo[k] - nb[i - 1]->hi[k];
+			if (g <= 0.0) continue;
+			if (L  && gL > 0.0 && std::fabs(gL - g) < same) { measure(k, *L, me);  measure(k, *nb[i - 1], *nb[i]); }
+			if (Rt && gR > 0.0 && std::fabs(gR - g) < same) { measure(k, me, *Rt); measure(k, *nb[i - 1], *nb[i]); }
+		}
+	}
+	if (!hit[0] && !hit[1]) return false;
+	pos = Vector3(pos.x + R.x * delta[0] + U.x * delta[1], pos.y + R.y * delta[0] + U.y * delta[1], pos.z + R.z * delta[0] + U.z * delta[1]);
+	return true;
+}
+
 void EditorUI::winInspector()
 {
 	if (!win->inspector) return;
@@ -2038,12 +2582,12 @@ void EditorUI::winInspector()
 	WorldLock gameGuard(AppInstance::GetSingleton()->currentWorld);   // reads atoms/components the fixed thread may edit
 	if (auto sltd = AppInstance::GetSingleton()->selectedInHieararchy)
 	{
-		// Multi-selection banner: edits below flow to every selected atom where it makes sense
-		// (layer/persistent/enabled fan out; name and components stay on the primary).
+		// Multi-selection: every edit below lands on all selected atoms (the name stays on the
+		// primary); only the components the whole selection shares are listed.
 		const std::vector<Atom*> msel = AppInstance::GetSingleton()->Selection();
 		const bool multi = msel.size() > 1;
-		if (multi) ImGui::TextDisabled(ICON_LC_LAYERS " %zu atoms selected — editing '%s'",
-		                               msel.size(), sltd->GetName().c_str());
+		if (multi) ImGui::TextDisabled(ICON_LC_LAYERS " %zu atoms selected - edits apply to all (%s)",
+		                               msel.size(), multiEditAbsolute ? "absolute" : "relative");
 
 		char name[128];
 		strncpy(name, sltd->GetName().c_str(), 127); name[127] = 0;
@@ -2114,7 +2658,7 @@ void EditorUI::winInspector()
 				if (ImGui::Button("Apply to prefab", ImVec2(ImGui::GetContentRegionAvail().x * 0.5f - ImGui::GetStyle().ItemSpacing.x * 0.5f, 0))) ApplyToPrefab(sltd);
 				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Overwrite the prefab file with this instance's values");
 				ImGui::SameLine();
-				if (ImGui::Button("Reset to prefab", ImVec2(-FLT_MIN, 0))) { ResetToPrefab(sltd); ImGui::End(); return; }   // sltd is replaced
+				if (ImGui::Button("Reset to prefab", ImVec2(-FLT_MIN, 0))) { ResetToPrefab(sltd); return; }   // sltd is replaced; the DocPanel host ends the window
 				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Discard this instance's overrides; reload from the prefab");
 			}
 		}
@@ -2122,76 +2666,20 @@ void EditorUI::winInspector()
 		ImGui::SeparatorText("Transform");
 		Transform& t = sltd->GetTransform();
 		double p[3] = { t.position.x, t.position.y, t.position.z };
+		const double p0[3] = { p[0], p[1], p[2] };
 		if (EditV3("Position", p))
-		{ t.position.x = p[0]; t.position.y = p[1]; t.position.z = p[2]; }
+		{ t.position.x = p[0]; t.position.y = p[1]; t.position.z = p[2]; if (multi) MultiTransform(sltd, msel, 0, p0, p, true); }
 		Vector3 er = t.EulerDeg();
 		double r[3] = { er.x, er.y, er.z };
+		const double r0[3] = { r[0], r[1], r[2] };
 		if (EditV3("Rotation (deg)", r))
-			t.SetEulerDeg(Vector3(r[0], r[1], r[2]));
+		{ t.SetEulerDeg(Vector3(r[0], r[1], r[2])); if (multi) MultiTransform(sltd, msel, 1, r0, r, true); }
 		double s[3] = { t.scale.x, t.scale.y, t.scale.z };
+		const double s0[3] = { s[0], s[1], s[2] };
 		if (EditV3("Scale", s))
-		{ t.scale.x = s[0]; t.scale.y = s[1]; t.scale.z = s[2]; }
+		{ t.scale.x = s[0]; t.scale.y = s[1]; t.scale.z = s[2]; if (multi) MultiTransform(sltd, msel, 2, s0, s, true); }
 
-		// Anchors (canvas children only): enabling a side captures the CURRENT distance. Backed by a
-		// RectAnchor component auto-added on first enable; the world applies it every frame.
-		{
-			nuke::Canvas* cvAnc = nullptr;
-			for (Atom* p = sltd->parent; p && !cvAnc; p = p->parent) cvAnc = p->GetComponent<nuke::Canvas>();
-			if (cvAnc && cvAnc->transform)
-			{
-				ImGui::SeparatorText("Anchors");
-				nuke::RectAnchor* ra = sltd->GetComponent<nuke::RectAnchor>();
-				// Canvas units — must match the conventions of the world's layout pass.
-				const bool  world = (cvAnc->mode == nuke::CanvasMode::WorldSpace);
-				const float ppu = world ? 1.0f : (cvAnc->pixelsPerUnit > 0.01f ? cvAnc->pixelsPerUnit : 100.0f);
-				const float hw = cvAnc->width * 0.5f, hh = cvAnc->height * 0.5f;
-				Vector3 cp = cvAnc->transform->globalPosition();
-				Vector3 gp = t.globalPosition(), gs = t.globalScale();
-				float cx, cy;
-				if (world)
-				{
-					Vector3 R = cvAnc->transform->right(), U = cvAnc->transform->up();
-					Vector3 d(gp.x - cp.x, gp.y - cp.y, gp.z - cp.z);
-					cx = (float)(d.x*R.x + d.y*R.y + d.z*R.z);
-					cy = (float)(d.x*U.x + d.y*U.y + d.z*U.z);
-				}
-				else { cx = (float)(gp.x - cp.x) * ppu; cy = (float)(gp.y - cp.y) * ppu; }
-				nuke::Sprite* spA = sltd->GetComponent<nuke::Sprite>();
-				const float ew = spA ? spA->width  * (float)gs.x * ppu : 0.0f;
-				const float eh = spA ? spA->height * (float)gs.y * ppu : 0.0f;
-
-				auto ensureRA = [&]() -> nuke::RectAnchor*
-				{
-					if (!ra) { ra = new nuke::RectAnchor(); sltd->AddComponent(ra); }
-					return ra;
-				};
-				bool l = ra && ra->left, r_ = ra && ra->right, tp = ra && ra->top, b = ra && ra->bottom;
-				bool nl = l, nr = r_, nt = tp, nb = b;
-				ImGui::Checkbox("Left##anc", &nl);   ImGui::SameLine(120);
-				ImGui::Checkbox("Right##anc", &nr);
-				ImGui::Checkbox("Bottom##anc", &nb); ImGui::SameLine(120);
-				ImGui::Checkbox("Top##anc", &nt);
-				if (nl != l || nr != r_ || nt != tp || nb != b)
-				{
-					nuke::RectAnchor* r2 = ensureRA();
-					if (nl && !l) r2->distLeft   = (cx - ew * 0.5f) - (-hw);
-					if (nr && !r_) r2->distRight = hw - (cx + ew * 0.5f);
-					if (nb && !b) r2->distBottom = (cy - eh * 0.5f) - (-hh);
-					if (nt && !tp) r2->distTop   = hh - (cy + eh * 0.5f);
-					r2->left = nl; r2->right = nr; r2->top = nt; r2->bottom = nb;
-				}
-				if (ra)
-				{
-					const char* unit = world ? "u" : "px";
-					if (ra->left)   { ImGui::SetNextItemWidth(90); ImGui::DragFloat((std::string("Dist Left (") + unit + ")##anc").c_str(),   &ra->distLeft); }
-					if (ra->right)  { ImGui::SetNextItemWidth(90); ImGui::DragFloat((std::string("Dist Right (") + unit + ")##anc").c_str(),  &ra->distRight); }
-					if (ra->bottom) { ImGui::SetNextItemWidth(90); ImGui::DragFloat((std::string("Dist Bottom (") + unit + ")##anc").c_str(), &ra->distBottom); }
-					if (ra->top)    { ImGui::SetNextItemWidth(90); ImGui::DragFloat((std::string("Dist Top (") + unit + ")##anc").c_str(),    &ra->distTop); }
-					if ((ra->left && ra->right) || (ra->top && ra->bottom))
-						ImGui::TextDisabled("opposite sides pinned: stretches with the canvas");
-				}
-			}
-		}
+		if (DrawAnchorsMulti(sltd, msel, true)) worldDirty = true;
 
 		std::string atomName = sltd->GetName();
 		{
@@ -2213,8 +2701,10 @@ void EditorUI::winInspector()
 		compsOpen = ImGui::CollapsingHeader("Components");
 		if (compsOpen)
 		{
+			int notShared = 0;
 			for (auto cmp : sltd->components)
 			{
+				if (multi && !MultiShared(sltd, cmp, msel)) { ++notShared; continue; }   // only what the whole selection has
 				ImGui::PushID(cmp);   // unique ID per component (avoid "Enabled" ID clashes)
 				nuke::UnknownComponent* uc = dynamic_cast<nuke::UnknownComponent*>(cmp);
 				std::string label = uc ? (uc->typeName.empty() ? std::string("Unknown") : uc->typeName)
@@ -2227,6 +2717,16 @@ void EditorUI::winInspector()
 				st = ImGui::CollapsingHeader(hdr.c_str());
 				if (!cmp->modOrigin.empty() && ImGui::IsItemHovered())
 					ImGui::SetTooltip("Added by mod: %s", cmp->modOrigin.c_str());
+				if (!uc && ImGui::BeginPopupContextItem("##compctx"))   // copy this component / paste the clipboard's
+				{
+					if (ImGui::MenuItem(ICON_LC_COPY " Copy Component")) CopyComponentToClipboard(cmp);
+					std::string ct; nlohmann::json cp; const bool have = ComponentClipboard(ct, cp);
+					if (ImGui::MenuItem(ICON_LC_CLIPBOARD_PASTE " Paste Component Values", nullptr, false, have && ct == label))
+						PasteComponentValues(cmp, true);
+					if (ImGui::MenuItem((std::string(ICON_LC_COPY_PLUS " Paste As New Component") + (have ? " (" + ct + ")" : "")).c_str(), nullptr, false, have))
+						PasteComponentAsNew(sltd, true);
+					ImGui::EndPopup();
+				}
 				// Drag the header onto a hierarchy row to move this component to that atom.
 				if (ImGui::BeginDragDropSource())
 				{
@@ -2254,6 +2754,10 @@ void EditorUI::winInspector()
 					}
 					else
 					{
+						// multi-edit: snapshot the component, draw it, then fan out whatever
+						// changed to its peers on the other selected atoms.
+						MultiCompSnap mbefore;
+						if (multi) mbefore = MultiSnapshot(cmp);
 						if (ImGui::Checkbox("Enabled", &cmp->enabled))
 							SyncEnabled(cmp, nullptr, syncEditWorld, cmp->enabled);
 						// InputInt's item width covers the whole widget (text box + both step buttons),
@@ -2277,39 +2781,12 @@ void EditorUI::winInspector()
 							const char* pl = nuke::PluginForType(cti->name);
 							if (pl && pl[0]) ImGui::Text(ICON_LC_PLUG " %s", pl);
 						}
-						// multi-edit: snapshot the fields, draw, then mirror ONLY the fields
-						// that changed to every selected atom carrying the same component type.
-						// Sync-edit mirrors the same way into its CHECKED components (any atom).
+						// Sync-edit mirrors the changed fields into its CHECKED components (any atom).
 						nuke::TypeInfo* mti = cmp->GetType();
 						std::vector<nuke::ReflectValue> sbefore;
 						const bool ssnap = SyncSnapshot(cmp, syncEditWorld, sbefore);
-						std::vector<nuke::ReflectValue> mbefore;
-						if (multi && mti)
-							for (const nuke::Field& f : mti->fields) mbefore.push_back(nuke::Reflect_GetField(cmp, f));
 						const bool mchg = DrawFields(cmp, cmp->GetType());   // auto fields from [[nuke::prop]] schema
 						if (ssnap && mchg) SyncMirror(cmp, nullptr, syncEditWorld, sbefore);
-						if (multi && mti && mchg)
-						{
-							size_t fi = 0;
-							for (const nuke::Field& f : mti->fields)
-							{
-								nuke::ReflectValue now = nuke::Reflect_GetField(cmp, f);
-								const nuke::ReflectValue& was = mbefore[fi++];
-								const bool same = now.type == was.type && now.b == was.b && now.num == was.num
-								               && now.str == was.str && now.atom == was.atom && now.obj == was.obj
-								               && memcmp(now.v, was.v, sizeof(now.v)) == 0;
-								if (same) continue;
-								for (Atom* m : msel)
-								{
-									if (!m || m == sltd) continue;
-									if (nuke::Component* mc = nuke::Reflect_FindComponent(m, mti->name))
-									{
-										nuke::Reflect_SetField(mc, f, now);
-										nuke::Reflect_ComponentFieldChanged(mc, f);
-									}
-								}
-							}
-						}
 						if (mti && mti->name == "VariantSet")
 							DrawVariantSetUI(cmp);         // per-group combos over the child variants
 						DrawDynamicProps(cmp);             // dynamic props (e.g. Lua script vars)
@@ -2319,10 +2796,14 @@ void EditorUI::winInspector()
 							auto ov = inspectorOverrides.find(cti->name);
 							if (ov != inspectorOverrides.end()) ov->second(cmp);
 						}
+						if (multi) MultiMirror(cmp, sltd, msel, mbefore, true);
 					}
 				}
 				ImGui::PopID();
 			}
+			if (notShared)
+				ImGui::TextDisabled("%d component%s not shared by the whole selection %s hidden",
+				                    notShared, notShared == 1 ? "" : "s", notShared == 1 ? "is" : "are");
 		}
 
 		// Apply a deferred component removal now that the component loop is done (can't mutate mid-iterate).
@@ -2332,6 +2813,11 @@ void EditorUI::winInspector()
 		ImGui::Separator();
 		if (ImGui::Button("Add Component", ImVec2(-FLT_MIN, 0)))
 			ImGui::OpenPopup("addcomp");
+		{
+			std::string ct; nlohmann::json cp;
+			if (ComponentClipboard(ct, cp) && ImGui::Button((std::string(ICON_LC_CLIPBOARD_PASTE " Paste Component (") + ct + ")").c_str(), ImVec2(-FLT_MIN, 0)))
+				PasteComponentAsNew(sltd, true);
+		}
 		if (ImGui::BeginPopup("addcomp"))
 		{
 			nuke::TypeInfo* picked = DrawAddComponentMenu(sltd);

@@ -2,6 +2,8 @@
 // to the WHOLE selection as ONE undo step. The engine holds the selection (primary +
 // selectedExtra ids); the shift anchor and row order live on EditorUI (hierarchy.cpp fills them).
 #include <editor/editorui.h>
+#include <reflect/ReflectJson.h>   // component clipboard: SaveObject / LoadObject
+#include <reflect/ReflectBind.h>   // Reflect_AddComponent
 #include <algorithm>
 
 using nlohmann::json;
@@ -171,8 +173,9 @@ void EditorUI::CutSelection()
 
 void EditorUI::PasteAtoms()
 {
-	const char* clip = ImGui::GetClipboardText();
-	if (!clip || !strstr(clip, "\"nukeClipboard\"")) return;
+	const std::string& clipEnv = ClipboardEnvelope();   // "" unless the clipboard is one of our envelopes
+	const char* clip = clipEnv.empty() ? nullptr : clipEnv.c_str();
+	if (!clip) return;
 	json j = json::parse(clip, nullptr, false);
 	if (j.is_discarded()) return;
 	if (j.value("nukeClipboard", std::string()) == "atom") { PasteAtom(); return; }   // single envelope
@@ -195,6 +198,82 @@ void EditorUI::PasteAtoms()
 		[this, added]{ for (const AtomPlace& p : added) ApplyAtomState(p.id, p.parent, p.index, p.json); });
 	HierSelect(pasted[0]);
 	for (size_t i = 1; i < pasted.size(); ++i) app->selectedExtra.push_back(pasted[i]->id.id);
+}
+
+// ---- component clipboard -------------------------------------------------------------------
+// {"nukeClipboard":"component","type":<TypeInfo name>,"props":<SaveObject>} - the same text
+// clipboard the atom envelopes use, so a component travels between the world inspector and any
+// prefab window.
+void EditorUI::CopyComponentToClipboard(Component* c)
+{
+	if (!c || !c->GetType()) return;
+	json env; env["nukeClipboard"] = "component"; env["type"] = c->GetType()->name;
+	json props; nuke::SaveObject(*c->GetType(), c, props);
+	env["props"] = props;
+	ImGui::SetClipboardText(env.dump().c_str());
+}
+// Polled every frame by menus and the Paste button: the change-tracked clipboard text comes from
+// NukeUI (the window layer, per platform); only an envelope of ours is kept.
+const std::string& EditorUI::ClipboardEnvelope()
+{
+	static std::string cached;
+	bool changed = false;
+	const std::string& clip = NukeUI::ClipboardText(&changed);
+	if (changed) cached = (clip.find("\"nukeClipboard\"") != std::string::npos) ? clip : std::string();
+	return cached;
+}
+
+bool EditorUI::ComponentClipboard(std::string& type, json& props)
+{
+	// Parsed once per clipboard change (the Paste button asks every frame).
+	static std::string parsedFor; static std::string pType; static json pProps; static bool pOk = false;
+	const std::string& env = ClipboardEnvelope();
+	if (env != parsedFor)
+	{
+		parsedFor = env; pOk = false; pType.clear(); pProps = json();
+		json j = env.empty() ? json() : json::parse(env, nullptr, false);
+		if (!env.empty() && !j.is_discarded() && j.value("nukeClipboard", std::string()) == "component" && j.contains("props"))
+		{ pType = j.value("type", std::string()); pProps = j["props"]; pOk = !pType.empty(); }
+	}
+	if (!pOk) return false;
+	type = pType; props = pProps;
+	return true;
+}
+
+bool EditorUI::PasteComponentValues(Component* c, bool undo)
+{
+	std::string type; json props;
+	if (!c || !c->atom || !c->GetType() || !ComponentClipboard(type, props) || type != c->GetType()->name) return false;
+	const std::string before = undo ? nuke::SaveAtomToString(c->atom) : std::string();
+	nuke::LoadObject(*c->GetType(), c, props);
+	if (undo)
+	{
+		editing = false; editAtomId = 0;   // its own command, not the auto edit-detector's
+		AtomPlace p = PlaceOf(this, c->atom); const std::string after = p.json;
+		PushUndo("Paste component values",
+			[this, p, before]{ ApplyAtomState(p.id, p.parent, p.index, before); },
+			[this, p, after ]{ ApplyAtomState(p.id, p.parent, p.index, after ); });
+	}
+	return true;
+}
+Component* EditorUI::PasteComponentAsNew(Atom* a, bool undo)
+{
+	std::string type; json props;
+	if (!a || !ComponentClipboard(type, props)) return nullptr;
+	const std::string before = undo ? nuke::SaveAtomToString(a) : std::string();
+	Component* c = nuke::Reflect_AddComponent(a, type);
+	if (!c) return nullptr;
+	if (c->GetType()) nuke::LoadObject(*c->GetType(), c, props);
+	World::BumpHierarchy();
+	if (undo)
+	{
+		editing = false; editAtomId = 0;
+		AtomPlace p = PlaceOf(this, a); const std::string after = p.json;
+		PushUndo("Paste component",
+			[this, p, before]{ ApplyAtomState(p.id, p.parent, p.index, before); },
+			[this, p, after ]{ ApplyAtomState(p.id, p.parent, p.index, after ); });
+	}
+	return c;
 }
 
 void EditorUI::SetSelectionEnabled(bool on)

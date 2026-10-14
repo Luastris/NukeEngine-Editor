@@ -84,6 +84,22 @@ bool EditorUI::SearchMatch(const std::string& name)
 
 // Recursive folder tree (Tree view), rooted at `dir` (a folder under the current browse root).
 // Rows come from the index snapshot: no disk access per frame.
+// Paths as the tree sees them vs. what an asset value / go-to-file hands over: normalized,
+// generic separators, case-folded (Windows).
+static std::string TreeKey(const std::string& p)
+{
+	std::string s = bfs::path(p).lexically_normal().generic_string();
+	for (char& c : s) c = (char)tolower((unsigned char)c);
+	return s;
+}
+static bool TreeSame(const std::string& a, const std::string& b)  { return !a.empty() && TreeKey(a) == TreeKey(b); }
+static bool TreeUnder(const std::string& file, const std::string& dir)
+{
+	if (file.empty()) return false;
+	const std::string f = TreeKey(file), d = TreeKey(dir) + "/";
+	return f.size() > d.size() && f.compare(0, d.size(), d) == 0;
+}
+
 void EditorUI::BrowserTree(const std::string& dir)
 {
 	std::set<std::string> shown;   // lowercase names at this level (disk wins over pak)
@@ -103,12 +119,14 @@ void EditorUI::BrowserTree(const std::string& dir)
 		{
 			std::string name = e->rel.substr(e->rel.rfind('/') == std::string::npos ? 0 : e->rel.rfind('/') + 1);
 			shown.insert(lowName(name));
+			const std::string full = (bfs::path(dir) / name).string();
 			if (e->isDir)
 			{
 				if (IsCellsInternal(name)) continue;
+				if (TreeUnder(browserLocate, full)) ImGui::SetNextItemOpen(true);   // go-to-file: open the way down
 				if (ImGui::TreeNode((std::string(ICON_LC_FOLDER) + " " + name).c_str()))
 				{
-					BrowserTree((bfs::path(dir) / name).string());
+					BrowserTree(full);
 					ImGui::TreePop();
 				}
 			}
@@ -117,7 +135,15 @@ void EditorUI::BrowserTree(const std::string& dir)
 				std::string ext = bfs::path(name).extension().string();
 				for (char& c : ext) c = (char)tolower((unsigned char)c);
 				if (ExtVisible(ext) && SearchMatch(name))
-					ImGui::BulletText("%s %s", ExtIcon(ext), name.c_str());
+				{
+					const bool located = TreeSame(browserLocate, full);
+					if (located) BrowserSelect(full);
+					const bool sel = located || TreeSame(browserSel, full);
+					ImGui::PushID(name.c_str());
+					if (ImGui::Selectable((std::string(ExtIcon(ext)) + " " + name).c_str(), sel)) BrowserSelect(full);
+					ImGui::PopID();
+					if (located) ImGui::SetScrollHereY(0.5f);
+				}
 			}
 		}
 	}
@@ -805,21 +831,49 @@ Atom* EditorUI::DropAsset(const std::string& path)
 	return nullptr;
 }
 
+bool EditorUI::AssetAttaches(const std::string& path) const
+{
+	std::string ext = bfs::path(path).extension().string();
+	std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+	const nuke::AssetCreator* ac = nuke::AssetCreatorForExt(ext);
+	return ac && ac->dropOnAtom;
+}
+
+// A browser asset dropped ON an atom: material / texture onto its MeshRenderer, or an attaching
+// type (scripts: the module's creator adds the component). One undo step in the world; the
+// prefab editor's snapshot undo owns the edit there.
 void EditorUI::DropAssetOnAtom(Atom* a, const std::string& path)
 {
 	if (!a) return;
-	nuke::MeshRenderer* mr = a->GetComponent<nuke::MeshRenderer>();
-	if (!mr) return;   // only mesh objects carry a material
 	std::string ext = bfs::path(path).extension().string();
 	std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-	if (ext != ".numat" && ext != ".nutex") return;
+	const nuke::AssetCreator* ac = nuke::AssetCreatorForExt(ext);
+	const bool attaches = ac && ac->dropOnAtom;
+	nuke::MeshRenderer* mr = a->GetComponent<nuke::MeshRenderer>();
+	if (!attaches)
+	{
+		if (!mr) return;   // only mesh objects carry a material
+		if (ext != ".numat" && ext != ".nutex") return;
+	}
 
 	ResDB* db = ResDB::getSingleton();
 	std::string before = nuke::SaveAtomToString(a);
 	bool changed = false;
+	std::string undoLabel;
 
-	if (ext == ".numat")
+	if (attaches)
 	{
+		// The module gets a content-relative path (what its component stores).
+		boost::system::error_code ec;
+		bfs::path rel = bfs::relative(bfs::path(path), bfs::path(contentDir), ec);
+		std::string rs = (!ec && !rel.empty()) ? rel.generic_string() : bfs::path(path).generic_string();
+		if (rs.compare(0, 2, "..") == 0) rs = bfs::path(path).generic_string();
+		if (ac->dropOnAtom(a, rs)) { changed = true; World::BumpHierarchy(); }
+		undoLabel = "Add " + ac->label;
+	}
+	else if (ext == ".numat")
+	{
+		undoLabel = "Assign material";
 		std::string guid = db->GuidForPath(path);
 		if (guid.empty())   // not indexed yet: load + register
 			if (Material* m = Material::LoadFromFile(path)) { db->RegisterMaterial(m); db->SetAssetPath(m->guid, path); guid = m->guid; }
@@ -834,6 +888,7 @@ void EditorUI::DropAssetOnAtom(Atom* a, const std::string& path)
 	}
 	else   // .nutex
 	{
+		undoLabel = "Assign texture";
 		std::string guid = db->GuidForPath(path);
 		if (guid.empty())
 			if (Texture* t = Texture::LoadFromFile(path)) { db->RegisterTexture(t); db->SetAssetPath(t->guid, path); guid = t->guid; }
@@ -872,7 +927,7 @@ void EditorUI::DropAssetOnAtom(Atom* a, const std::string& path)
 	World* w = AppInstance::GetSingleton()->currentWorld;
 	long id = a->id.id, parent = a->parent ? a->parent->id.id : 0;
 	int index = 0; { auto& lst = a->parent ? a->parent->children : w->GetHierarchy(); int i = 0; for (Atom* s : lst) { if (s == a) { index = i; break; } ++i; } }
-	PushUndo(ext == ".numat" ? "Assign material" : "Assign texture",
+	PushUndo(undoLabel,
 		[this, id, parent, index, before]{ ApplyAtomState(id, parent, index, before); },
 		[this, id, parent, index, after ]{ ApplyAtomState(id, parent, index, after ); });
 }
@@ -1265,10 +1320,10 @@ void EditorUI::winBrowser()
 
 	if (browserView == 2)   // Tree
 	{
-		browserLocate.clear();   // go-to-file: selection is already set; the tree has no row scroll
 		ImGui::BeginChild("##browserfiles");   // only the tree scrolls
-		BrowserTree(root.string());
+		BrowserTree(root.string());            // a pending go-to-file opens its folders + scrolls to the row
 		ImGui::EndChild();
+		browserLocate.clear();
 		return;   // the DocPanel ends the window
 	}
 
@@ -1387,6 +1442,8 @@ void EditorUI::winBrowser()
 				break;
 			}
 		}
+		std::cout << "[browser]\tlocate '" << browserLocate << "' in '" << cwd.string() << "' (" << entries.size() << " entries): "
+		          << (locateNow ? "found" : "NOT FOUND") << std::endl;
 		browserLocate.clear();
 	}
 

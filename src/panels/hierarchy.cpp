@@ -370,7 +370,8 @@ void EditorUI::winHierarchy()
 	}
 	if (!dndAsset.empty())
 	{
-		if (Atom* a = DropAsset(dndAsset)) { if (dndAssetParent) app->currentWorld->Reparent(a, dndAssetParent); }
+		if (AssetAttaches(dndAsset)) { if (dndAssetParent) DropAssetOnAtom(dndAssetParent, dndAsset); }   // a script onto the row's atom
+		else if (Atom* a = DropAsset(dndAsset)) { if (dndAssetParent) app->currentWorld->Reparent(a, dndAssetParent); }
 		dndAsset.clear(); dndAssetParent = nullptr;
 	}
 

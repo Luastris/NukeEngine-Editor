@@ -18,6 +18,7 @@
 #include <API/Model/resdb.h>        // .nupair editor: clip pickers
 #include <input/Input.h>
 #include <interface/AssetCreators.h>   // module-supplied asset editors
+#include <interface/EditorHooks.h>     // module-supplied component UI (ED1)
 #include <editor/animshared.h>          // EditorApplyMeshMaterials: mesh windows use import mats
 #include <API/Model/VariantSet.h>       // custom variant-switch body (combos over child prefixes)
 #include "nukeui.h"                     // NukeUI host windows for detached editors
@@ -117,6 +118,10 @@ EditorUI::PreviewWorld* EditorUI::AcquirePreview()
 	s->cam = new Camera();
 	cam->AddComponent(s->cam);
 	s->cam->renderTarget = s->rt;
+	// An EDITOR camera, like the viewport's: screen-space canvases draw as world planes with
+	// their frame gizmo instead of as a screen overlay (a canvas prefab showed nothing), and
+	// the upscaler / main-camera rules skip it.
+	s->cam->editorCamera = true;
 	s->world->Add(cam);
 
 	s->inUse = true;
@@ -192,6 +197,13 @@ void EditorUI::FramePreview(PreviewWorld& s, Atom* subtree)
 	s.center = any ? c : Vector3(0, 0, 0);
 	s.radius = any ? std::max(r, 0.01f) : 1.0f;
 	s.dist = 0.0f;   // re-derived from radius on next draw
+}
+
+// Preview look wrap (same as the main viewport): the cursor teleports to the opposite edge of
+// the image just before it could leave, so a look / pan never dies at the border.
+static void PvWarpMouse(EditorUI::PreviewWorld& s, const ImVec2& to)
+{
+	if (NukeUI::WarpCursor(ImGui::GetWindowViewport(), to.x, to.y)) s.warpSkip = true;   // NukeUI owns the window layer
 }
 
 void EditorUI::DrawPreviewImage(PreviewWorld& s, ImVec2 size)
@@ -285,7 +297,13 @@ void EditorUI::DrawPreviewImage(PreviewWorld& s, ImVec2 size)
 
 	ImGuiIO& io = ImGui::GetIO();
 	if (s.locked) { s.visible = true; return; }   // static shot: renders, takes no camera input
-	if (ImGui::IsItemHovered() && s.orbit)
+	// A look / pan that started over the image stays alive wherever the cursor goes (edge wrap below).
+	if (ImGui::IsItemHovered() && (ImGui::IsMouseClicked(ImGuiMouseButton_Right) || ImGui::IsMouseClicked(ImGuiMouseButton_Middle)))
+	{ s.lookActive = true; s.lookPressPos = io.MousePos; }
+	const bool pvHov = ImGui::IsItemHovered() || s.lookActive;
+	const ImVec2 lookDelta = s.warpSkip ? ImVec2(0, 0) : io.MouseDelta;   // a warp lands as one giant delta
+	s.warpSkip = false;
+	if (pvHov && s.orbit)
 	{
 		// ORBIT mode (material editor): RMB circles the subject, wheel dollies toward it,
 		// MMB shifts the pivot. yaw/pitch/dist stay authoritative; the camera is re-placed
@@ -295,8 +313,8 @@ void EditorUI::DrawPreviewImage(PreviewWorld& s, ImVec2 size)
 		bool moved = false;
 		if (ImGui::IsMouseDragging(ImGuiMouseButton_Right))
 		{
-			s.yaw   += io.MouseDelta.x * rotSpeed;
-			s.pitch += io.MouseDelta.y * rotSpeed;   // drag up = camera rises above the subject
+			s.yaw   += lookDelta.x * rotSpeed;
+			s.pitch += lookDelta.y * rotSpeed;   // drag up = camera rises above the subject
 			const float lim = 1.55f;
 			if (s.pitch >  lim) s.pitch =  lim;
 			if (s.pitch < -lim) s.pitch = -lim;
@@ -313,7 +331,7 @@ void EditorUI::DrawPreviewImage(PreviewWorld& s, ImVec2 size)
 		if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle))
 		{
 			const double pan = 0.0025 * std::max(0.2f, s.dist);
-			s.center += t->right() * (-io.MouseDelta.x * pan) + t->up() * (io.MouseDelta.y * pan);
+			s.center += t->right() * (-lookDelta.x * pan) + t->up() * (lookDelta.y * pan);
 			moved = true;
 		}
 		if (moved)
@@ -327,7 +345,7 @@ void EditorUI::DrawPreviewImage(PreviewWorld& s, ImVec2 size)
 			t->SetEulerDeg(Vector3(fp * 57.29577951308232, fyw * 57.29577951308232, 0.0));
 		}
 	}
-	else if (ImGui::IsItemHovered())
+	else if (pvHov)
 	{
 		// RMB = look, MMB = pan, wheel = dolly (or speed while flying), RMB + WASD/QE = fly.
 		Transform* t = s.cam->transform;
@@ -349,16 +367,16 @@ void EditorUI::DrawPreviewImage(PreviewWorld& s, ImVec2 size)
 		}
 		if (ImGui::IsMouseDragging(ImGuiMouseButton_Right))
 		{
-			s.yaw   += io.MouseDelta.x * rotSpeed;
-			s.pitch += io.MouseDelta.y * rotSpeed;
+			s.yaw   += lookDelta.x * rotSpeed;
+			s.pitch += lookDelta.y * rotSpeed;
 			const float lim = 1.55f;
 			if (s.pitch >  lim) s.pitch =  lim;
 			if (s.pitch < -lim) s.pitch = -lim;
 			t->SetEulerDeg(Vector3(s.pitch * 57.29578f, s.yaw * 57.29578f + 180.0f, 0.0f));
 		}
 		if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle))
-			t->position += t->right() * (double)(-io.MouseDelta.x * panSpeed)
-			             + t->up()    * (double)( io.MouseDelta.y * panSpeed);
+			t->position += t->right() * (double)(-lookDelta.x * panSpeed)
+			             + t->up()    * (double)( lookDelta.y * panSpeed);
 		if (io.MouseWheel != 0.0f)
 		{
 			if (ImGui::IsMouseDown(ImGuiMouseButton_Right))
@@ -382,6 +400,25 @@ void EditorUI::DrawPreviewImage(PreviewWorld& s, ImVec2 size)
 			if (ImGui::IsKeyDown(ImGuiKey_E)) t->position += t->up()        * (double) fly;
 			if (ImGui::IsKeyDown(ImGuiKey_Q)) t->position += t->up()        * (double)-fly;
 		}
+	}
+	// Edge wrap while a look / pan is held; the cursor is hidden meanwhile, like the main viewport.
+	if (s.lookActive)
+	{
+		if (ImGui::IsMouseDown(ImGuiMouseButton_Right) || ImGui::IsMouseDown(ImGuiMouseButton_Middle))
+		{
+			ImGui::SetMouseCursor(ImGuiMouseCursor_None);
+			const ImVec2 mn = s.rectMin, mx(s.rectMin.x + s.rectSize.x, s.rectMin.y + s.rectSize.y);
+			if (mx.x - mn.x > 24.0f && mx.y - mn.y > 24.0f)
+			{
+				ImVec2 p = io.MousePos; bool wrap = false;
+				if      (p.x <= mn.x + 2.0f) { p.x = mx.x - 8.0f; wrap = true; }
+				else if (p.x >= mx.x - 2.0f) { p.x = mn.x + 8.0f; wrap = true; }
+				if      (p.y <= mn.y + 2.0f) { p.y = mx.y - 8.0f; wrap = true; }
+				else if (p.y >= mx.y - 2.0f) { p.y = mn.y + 8.0f; wrap = true; }
+				if (wrap) PvWarpMouse(s, p);
+			}
+		}
+		else { s.lookActive = false; PvWarpMouse(s, s.lookPressPos); }   // reappear where the look began
 	}
 	if (s.flyMulHud > 0.0f)   // transient speed HUD after a wheel change
 	{
@@ -617,6 +654,9 @@ void EditorUI::FireEventAtPreview(AssetEditorWin& w)
 static const char* kPreviewMeshGuid[] = { "builtin:sphere", "builtin:cube", "builtin:plane" };
 
 static nuke::Atom* FindInSubtree(nuke::Atom* a, long id);
+static bool PfIsSelected(const EditorUI::AssetEditorWin& w, long id);   // prefab window multi-selection (defined by the tree)
+static void PfSelect(EditorUI::AssetEditorWin& w, long id);
+static std::vector<nuke::Atom*> PfSelectionTop(EditorUI::AssetEditorWin& w);
 
 // Per-window undo/redo: prefabs use subtree JSON snapshots, materials use clones.
 static const size_t kAeUndoCap = 64;
@@ -1250,7 +1290,18 @@ bool EditorUI::DrawLiveMaterialSections(nuke::Material* m)
 
 void EditorUI::AssetEditorUndo(AssetEditorWin& w)
 {
-	if (w.ext == ".nuprefab" && w.prefabRoot && !w.undoP.empty())
+	if (w.seqDock && w.seqDockFocused && w.seq && !w.undoQ.empty())   // the docked sequencer owns Ctrl+Z while focused
+	{
+		w.redoQ.push_back(w.seq->ToString());
+		if (nuke::Sequence* r = nuke::Sequence::FromString(w.undoQ.back()))
+		{
+			delete w.seq; w.seq = r;
+			if (w.seqPv) w.seqPv->SetSequence(r);
+		}
+		w.undoQ.pop_back();
+		w.idleQ = w.seq->ToString(); w.seqEditing = false; w.seqDirty = true;
+	}
+	else if (w.ext == ".nuprefab" && w.prefabRoot && !w.undoP.empty())
 	{
 		w.redoP.push_back(nuke::SaveAtomToString(w.prefabRoot));
 		RestorePrefabState(w, w.undoP.back());
@@ -1334,7 +1385,18 @@ void EditorUI::AssetEditorUndo(AssetEditorWin& w)
 
 void EditorUI::AssetEditorRedo(AssetEditorWin& w)
 {
-	if (w.ext == ".nuprefab" && w.prefabRoot && !w.redoP.empty())
+	if (w.seqDock && w.seqDockFocused && w.seq && !w.redoQ.empty())
+	{
+		w.undoQ.push_back(w.seq->ToString());
+		if (nuke::Sequence* r = nuke::Sequence::FromString(w.redoQ.back()))
+		{
+			delete w.seq; w.seq = r;
+			if (w.seqPv) w.seqPv->SetSequence(r);
+		}
+		w.redoQ.pop_back();
+		w.idleQ = w.seq->ToString(); w.seqEditing = false; w.seqDirty = true;
+	}
+	else if (w.ext == ".nuprefab" && w.prefabRoot && !w.redoP.empty())
 	{
 		w.undoP.push_back(nuke::SaveAtomToString(w.prefabRoot));
 		RestorePrefabState(w, w.redoP.back());
@@ -2064,6 +2126,74 @@ static nuke::Atom* PrefabPickAt(EditorUI::AssetEditorWin& w, ImVec2 mp)
 // Browser asset dropped on the prefab's 3D view: material/texture onto the atom under the
 // cursor, a prefab/mesh spawned under the root AT the aimed point (same rules as the main
 // viewport). Call right after the preview image was submitted (it is the drop item).
+// Duplicate each atom beside its original; the copies become the selection.
+void EditorUI::PrefabDuplicate(AssetEditorWin& w, const std::vector<long>& ids)
+{
+	std::vector<long> copies;
+	for (long id : ids)
+	{
+		Atom* src = FindInSubtree(w.prefabRoot, id);
+		if (!src || !src->parent) continue;
+		EditTargetScope scope(this, { w.pv->world, src->parent, &w });
+		if (Atom* c = PlaceSpawned(nuke::CloneAtomFromString(nuke::SaveAtomToString(src)))) copies.push_back((long)c->id.id);
+	}
+	if (copies.empty()) return;
+	PfSelect(w, copies[0]);
+	for (size_t i = 1; i < copies.size(); ++i) w.prefabSelExtra.push_back(copies[i]);
+}
+// Group the selection's top-level atoms into a new folder under their common parent (the
+// primary's parent), world poses preserved.
+void EditorUI::PrefabGroup(AssetEditorWin& w)
+{
+	std::vector<Atom*> top = PfSelectionTop(w);
+	top.erase(std::remove(top.begin(), top.end(), w.prefabRoot), top.end());
+	if (top.empty()) return;
+	Atom* primary = FindInSubtree(w.prefabRoot, w.prefabSelId);
+	Atom* parent = (primary && primary != w.prefabRoot && primary->parent) ? primary->parent : top[0]->parent;
+	if (!parent) parent = w.prefabRoot;
+	Atom* g = nullptr;
+	{
+		EditTargetScope scope(this, { w.pv->world, parent, &w });
+		Atom* f = new Atom("Group"); f->folder = true;
+		g = PlaceSpawned(f);
+	}
+	if (!g) return;
+	for (Atom* a : top)
+	{
+		if (a == g || FindInSubtree(a, (long)g->id.id)) continue;
+		Transform& t = a->GetTransform();
+		Vector3 wp = t.globalPosition(); Quaternion wr = t.globalRotation(); Vector3 ws = t.globalScale();
+		w.pv->world->Reparent(a, g);
+		t.SetGlobal(wp, wr, ws);
+	}
+	PfSelect(w, (long)g->id.id);
+	w.dirty = true; w.editedNow = true;
+}
+// Ungroup: every selected folder hands its children to its parent (poses kept) and goes away.
+void EditorUI::PrefabUngroup(AssetEditorWin& w)
+{
+	std::vector<Atom*> top = PfSelectionTop(w);
+	std::vector<long> freed;
+	for (Atom* f : top)
+	{
+		if (!f || f == w.prefabRoot || !f->folder || !f->parent) continue;
+		std::vector<Atom*> kids(f->children.begin(), f->children.end());
+		for (Atom* k : kids)
+		{
+			Transform& t = k->GetTransform();
+			Vector3 wp = t.globalPosition(); Quaternion wr = t.globalRotation(); Vector3 ws = t.globalScale();
+			w.pv->world->Reparent(k, f->parent);
+			t.SetGlobal(wp, wr, ws);
+			freed.push_back((long)k->id.id);
+		}
+		w.pendingDeleteIds.push_back((long)f->id.id);
+	}
+	if (freed.empty()) return;
+	PfSelect(w, freed[0]);
+	for (size_t i = 1; i < freed.size(); ++i) w.prefabSelExtra.push_back(freed[i]);
+	w.dirty = true; w.editedNow = true;
+}
+
 void EditorUI::PrefabViewDrop(AssetEditorWin& w)
 {
 	if (!ImGui::BeginDragDropTarget()) return;
@@ -2074,7 +2204,7 @@ void EditorUI::PrefabViewDrop(AssetEditorWin& w)
 		if (dot != std::string::npos) dext = dpath.substr(dot);
 		std::transform(dext.begin(), dext.end(), dext.begin(), ::tolower);
 		const ImVec2 mp = ImGui::GetMousePos();
-		if (dext == ".numat" || dext == ".nutex")
+		if (dext == ".numat" || dext == ".nutex" || AssetAttaches(dpath))   // onto the hit atom (scripts attach)
 		{
 			if (Atom* hit = PrefabPickAt(w, mp))
 			{
@@ -2092,18 +2222,105 @@ void EditorUI::PrefabViewDrop(AssetEditorWin& w)
 	ImGui::EndDragDropTarget();
 }
 
+// ---- prefab window multi-selection (primary + extras, like the world hierarchy) ----------------
+static bool PfIsSelected(const EditorUI::AssetEditorWin& w, long id)
+{
+	if (!id) return false;
+	if (w.prefabSelId == id) return true;
+	return std::find(w.prefabSelExtra.begin(), w.prefabSelExtra.end(), id) != w.prefabSelExtra.end();
+}
+static void PfSelect(EditorUI::AssetEditorWin& w, long id)
+{
+	w.prefabSelId = id; w.prefabSelExtra.clear(); w.prefabAnchorId = id;
+}
+static void PfToggle(EditorUI::AssetEditorWin& w, long id)
+{
+	if (!id) return;
+	if (!w.prefabSelId) { PfSelect(w, id); return; }
+	auto& ex = w.prefabSelExtra;
+	if (id == w.prefabSelId)
+	{
+		if (ex.empty()) { PfSelect(w, 0); return; }
+		w.prefabSelId = ex.front(); ex.erase(ex.begin());
+		return;
+	}
+	auto it = std::find(ex.begin(), ex.end(), id);
+	if (it != ex.end()) { ex.erase(it); return; }
+	ex.insert(ex.begin(), w.prefabSelId);
+	w.prefabSelId = id; w.prefabAnchorId = id;
+}
+static void PfRange(EditorUI::AssetEditorWin& w, long id, bool additive)
+{
+	int ia = -1, ib = -1;
+	for (int i = 0; i < (int)w.prefabRows.size(); ++i)
+	{
+		if (w.prefabRows[i] && (long)w.prefabRows[i]->id.id == w.prefabAnchorId) ia = i;
+		if (w.prefabRows[i] && (long)w.prefabRows[i]->id.id == id) ib = i;
+	}
+	if (ia < 0 || ib < 0) { PfSelect(w, id); return; }
+	if (!additive) w.prefabSelExtra.clear();
+	for (int i = std::min(ia, ib); i <= std::max(ia, ib); ++i)
+	{
+		const long rid = (long)w.prefabRows[i]->id.id;
+		if (rid == id) continue;
+		if (std::find(w.prefabSelExtra.begin(), w.prefabSelExtra.end(), rid) == w.prefabSelExtra.end()) w.prefabSelExtra.push_back(rid);
+	}
+	if (w.prefabSelId && w.prefabSelId != id && std::find(w.prefabSelExtra.begin(), w.prefabSelExtra.end(), w.prefabSelId) == w.prefabSelExtra.end())
+		w.prefabSelExtra.push_back(w.prefabSelId);
+	w.prefabSelId = id;
+	w.prefabSelExtra.erase(std::remove(w.prefabSelExtra.begin(), w.prefabSelExtra.end(), id), w.prefabSelExtra.end());
+}
+// Every selected atom of the prefab that has no selected ancestor (the ones structural ops act on).
+static std::vector<Atom*> PfSelectionTop(EditorUI::AssetEditorWin& w)
+{
+	std::vector<Atom*> sel, out;
+	if (Atom* p = FindInSubtree(w.prefabRoot, w.prefabSelId)) sel.push_back(p);
+	for (long id : w.prefabSelExtra) if (Atom* e = FindInSubtree(w.prefabRoot, id)) sel.push_back(e);
+	for (Atom* a : sel)
+	{
+		bool covered = false;
+		for (Atom* p = a->parent; p && !covered; p = p->parent)
+			for (Atom* s : sel) if (s == p) { covered = true; break; }
+		if (!covered) out.push_back(a);
+	}
+	return out;
+}
+static std::string PfClipboardEnvelope(const std::vector<Atom*>& atoms)
+{
+	if (atoms.size() == 1) return std::string("{\"nukeClipboard\":\"atom\",\"atom\":") + nuke::SaveAtomToString(atoms[0]) + "}";
+	nlohmann::json arr = nlohmann::json::array();
+	for (Atom* a : atoms) arr.push_back(nlohmann::json::parse(nuke::SaveAtomToString(a), nullptr, false));
+	nlohmann::json env; env["nukeClipboard"] = "atoms"; env["atoms"] = arr;
+	return env.dump();
+}
+// Queue the selection's top-level atoms (never the root) for deletion.
+static void PfDeleteSelection(EditorUI::AssetEditorWin& w)
+{
+	for (Atom* a : PfSelectionTop(w)) if (a != w.prefabRoot) w.pendingDeleteIds.push_back((long)a->id.id);
+}
+
 void EditorUI::DrawPrefabTree(AssetEditorWin& w, Atom* a)
 {
 	if (!a) return;
+	w.prefabRows.push_back(a);
 	ImGui::PushID((int)a->id.id);
 	ImGuiTreeNodeFlags tf = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth
 	                      | ImGuiTreeNodeFlags_DefaultOpen;
 	if (a->children.empty())        tf |= ImGuiTreeNodeFlags_Leaf;
-	if ((long)a->id.id == w.prefabSelId) tf |= ImGuiTreeNodeFlags_Selected;
+	if (PfIsSelected(w, (long)a->id.id)) tf |= ImGuiTreeNodeFlags_Selected;
 	if (!a->enabled) ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyle().Colors[ImGuiCol_TextDisabled]);
 	bool openNode = ImGui::TreeNodeEx(a->GetName().c_str(), tf);
 	if (!a->enabled) ImGui::PopStyleColor();
-	if (ImGui::IsItemClicked()) w.prefabSelId = (long)a->id.id;
+	// Click = select, Ctrl = toggle, Shift = range from the anchor (tree order), Ctrl+Shift = add range.
+	if (ImGui::IsItemClicked())
+	{
+		const ImGuiIO& cio = ImGui::GetIO();
+		if (cio.KeyShift)     PfRange(w, (long)a->id.id, cio.KeyCtrl);
+		else if (cio.KeyCtrl) PfToggle(w, (long)a->id.id);
+		else                  PfSelect(w, (long)a->id.id);
+	}
+	// A right-click on an unselected row selects it, so the menu acts on what was clicked.
+	if (ImGui::IsItemClicked(ImGuiMouseButton_Right) && !PfIsSelected(w, (long)a->id.id)) PfSelect(w, (long)a->id.id);
 
 	// Drag to reparent within this prefab window; the world pose is preserved.
 	if (a != w.prefabRoot && ImGui::BeginDragDropSource())
@@ -2158,12 +2375,15 @@ void EditorUI::DrawPrefabTree(AssetEditorWin& w, Atom* a)
 			ImGui::EndMenu();
 		}
 		ImGui::Separator();
-		if (ImGui::MenuItem(ICON_LC_COPY " Copy"))
-			ImGui::SetClipboardText((std::string("{\"nukeClipboard\":\"atom\",\"atom\":") + nuke::SaveAtomToString(a) + "}").c_str());
-		if (ImGui::MenuItem(ICON_LC_SCISSORS " Cut", nullptr, false, !isRoot))
+		const std::vector<Atom*> selTop = PfSelectionTop(w);   // the menu acts on the whole selection
+		const int nsel = (int)selTop.size();
+		auto label = [&](const char* base) { return nsel > 1 ? std::string(base) + " (" + std::to_string(nsel) + ")" : std::string(base); };
+		if (ImGui::MenuItem(label(ICON_LC_COPY " Copy").c_str()))
+			ImGui::SetClipboardText(PfClipboardEnvelope(selTop).c_str());
+		if (ImGui::MenuItem(label(ICON_LC_SCISSORS " Cut").c_str(), nullptr, false, !isRoot))
 		{
-			ImGui::SetClipboardText((std::string("{\"nukeClipboard\":\"atom\",\"atom\":") + nuke::SaveAtomToString(a) + "}").c_str());
-			w.pendingDeleteId = pid;
+			ImGui::SetClipboardText(PfClipboardEnvelope(selTop).c_str());
+			PfDeleteSelection(w);
 		}
 		if (ImGui::MenuItem(ICON_LC_CLIPBOARD_PASTE " Paste", nullptr, false, AtomClipboardAvailable()))
 			w.pendingOps.push_back([this, pid](AssetEditorWin& ww)
@@ -2171,14 +2391,15 @@ void EditorUI::DrawPrefabTree(AssetEditorWin& w, Atom* a)
 				EditTargetScope scope(this, { ww.pv->world, FindInSubtree(ww.prefabRoot, pid), &ww });
 				PasteToTarget();
 			});
-		if (ImGui::MenuItem(ICON_LC_COPY_PLUS " Duplicate", nullptr, false, !isRoot))
-			w.pendingOps.push_back([this, pid](AssetEditorWin& ww)
-			{
-				Atom* src = FindInSubtree(ww.prefabRoot, pid);
-				if (!src || !src->parent) return;
-				EditTargetScope scope(this, { ww.pv->world, src->parent, &ww });
-				PlaceSpawned(nuke::CloneAtomFromString(nuke::SaveAtomToString(src)));
-			});
+		if (ImGui::MenuItem(label(ICON_LC_COPY_PLUS " Duplicate").c_str(), nullptr, false, !isRoot))
+		{
+			std::vector<long> ids; for (Atom* s : selTop) if (s != w.prefabRoot) ids.push_back((long)s->id.id);
+			w.pendingOps.push_back([this, ids](AssetEditorWin& ww) { PrefabDuplicate(ww, ids); });
+		}
+		if (ImGui::MenuItem(label(ICON_LC_GROUP " Group").c_str(), "Ctrl+G", false, !isRoot))
+			w.pendingOps.push_back([this](AssetEditorWin& ww) { PrefabGroup(ww); });
+		if (ImGui::MenuItem(ICON_LC_UNGROUP " Ungroup", "Ctrl+Shift+G", false, !isRoot && a->folder))
+			w.pendingOps.push_back([this](AssetEditorWin& ww) { PrefabUngroup(ww); });
 		ImGui::Separator();
 		if (ImGui::MenuItem(ICON_LC_FOLDER_PLUS " New Folder"))
 			w.pendingOps.push_back([this, pid](AssetEditorWin& ww)
@@ -2189,7 +2410,7 @@ void EditorUI::DrawPrefabTree(AssetEditorWin& w, Atom* a)
 		ImGui::Separator();
 		if (ImGui::MenuItem("Enabled", nullptr, a->enabled)) { a->enabled = !a->enabled; w.dirty = true; w.editedNow = true; }
 		ImGui::Separator();
-		if (ImGui::MenuItem(ICON_LC_TRASH_2 " Delete", nullptr, false, !isRoot)) w.pendingDeleteId = pid;
+		if (ImGui::MenuItem(label(ICON_LC_TRASH_2 " Delete").c_str(), nullptr, false, !isRoot)) PfDeleteSelection(w);
 		ImGui::EndPopup();
 	}
 
@@ -2217,11 +2438,18 @@ bool EditorUI::DrawPrefabAtomEditor(AssetEditorWin& w, Atom* a)
 	// World-bound widgets inside (AtomRef pickers, drops) must see THIS window's preview world.
 	EditTargetScope scope(this, { w.pv ? w.pv->world : nullptr, nullptr, &w });
 	Transform& t = a->GetTransform();
+	// Multi-selection: the same fan-out as the world inspector (undo = this window's own).
+	std::vector<Atom*> msel{ a };
+	for (long id : w.prefabSelExtra)
+		if (Atom* e = FindInSubtree(w.prefabRoot, id)) if (e != a) msel.push_back(e);
+	const bool multi = msel.size() > 1;
+	if (multi) ImGui::TextDisabled(ICON_LC_LAYERS " %zu atoms selected - edits apply to all (%s)",
+	                               msel.size(), multiEditAbsolute ? "absolute" : "relative");
 
 	char nameBuf[128];
 	strncpy(nameBuf, a->GetName().c_str(), 127); nameBuf[127] = 0;
 	bool aen = a->enabled;
-	if (ImGui::Checkbox("##atomon", &aen)) { a->enabled = aen; edited = true; }
+	if (ImGui::Checkbox("##atomon", &aen)) { for (Atom* m : msel) m->enabled = aen; edited = true; }
 	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Atom enabled (disabled subtrees neither render nor update)");
 	ImGui::SameLine();
 	ImGui::SetNextItemWidth(240);
@@ -2230,33 +2458,51 @@ bool EditorUI::DrawPrefabAtomEditor(AssetEditorWin& w, Atom* a)
 	if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen))
 	{
 		double pos[3] = { t.position.x, t.position.y, t.position.z };
-		if (EditV3("Position", pos)) { t.position = Vector3(pos[0], pos[1], pos[2]); edited = true; }
+		const double pos0[3] = { pos[0], pos[1], pos[2] };
+		if (EditV3("Position", pos)) { t.position = Vector3(pos[0], pos[1], pos[2]); MultiTransform(a, msel, 0, pos0, pos, false); edited = true; }
 		Vector3 e = t.EulerDeg();
 		double eul[3] = { e.x, e.y, e.z };
-		if (EditV3("Rotation", eul)) { t.SetEulerDeg(Vector3(eul[0], eul[1], eul[2])); edited = true; }
+		const double eul0[3] = { eul[0], eul[1], eul[2] };
+		if (EditV3("Rotation", eul)) { t.SetEulerDeg(Vector3(eul[0], eul[1], eul[2])); MultiTransform(a, msel, 1, eul0, eul, false); edited = true; }
 		double scl[3] = { t.scale.x, t.scale.y, t.scale.z };
-		if (EditV3("Scale", scl)) { t.scale = Vector3(scl[0], scl[1], scl[2]); edited = true; }
+		const double scl0[3] = { scl[0], scl[1], scl[2] };
+		if (EditV3("Scale", scl)) { t.scale = Vector3(scl[0], scl[1], scl[2]); MultiTransform(a, msel, 2, scl0, scl, false); edited = true; }
 	}
+	if (DrawAnchorsMulti(a, msel, false)) edited = true;   // canvas children: the same block as the world inspector
 	if (ImGui::SmallButton("Expand All"))   w.compFold = 2;
 	ImGui::SameLine();
 	if (ImGui::SmallButton("Collapse All")) w.compFold = 1;
 
 	Component* toRemove = nullptr;
+	int notShared = 0;
 	for (Component* c : a->components)
 	{
 		if (!c) continue;
 		nuke::TypeInfo* ti = c->GetType();
 		if (!ti) continue;
+		if (multi && !MultiShared(a, c, msel)) { ++notShared; continue; }   // only what the whole selection has
 		ImGui::PushID((int)c->id.id);   // stable across restores (pointers are reborn on sim stop)
 		bool keep = true;
 		ImGui::SetNextItemAllowOverlap();   // the sync button rides the header
 		if (w.compFold != 0) ImGui::SetNextItemOpen(w.compFold == 2);
 		bool openHdr = ImGui::CollapsingHeader(ti->name.c_str(), &keep, ImGuiTreeNodeFlags_DefaultOpen);
 		if (!keep) toRemove = c;   // header close button = remove component
+		if (ImGui::BeginPopupContextItem("##pcompctx"))   // copy this component / paste the clipboard's
+		{
+			if (ImGui::MenuItem(ICON_LC_COPY " Copy Component")) CopyComponentToClipboard(c);
+			std::string ct; nlohmann::json cp; const bool have = ComponentClipboard(ct, cp);
+			if (ImGui::MenuItem(ICON_LC_CLIPBOARD_PASTE " Paste Component Values", nullptr, false, have && ct == ti->name))
+				if (PasteComponentValues(c, false)) edited = true;
+			if (ImGui::MenuItem((std::string(ICON_LC_COPY_PLUS " Paste As New Component") + (have ? " (" + ct + ")" : "")).c_str(), nullptr, false, have))
+				if (PasteComponentAsNew(a, false)) edited = true;
+			ImGui::EndPopup();
+		}
 		ImGui::SameLine(ImGui::GetContentRegionMax().x - 46);   // sync edit within THIS prefab
 		DrawSyncEditButton(c, w.prefabRoot, w.syncEdit);
 		if (openHdr)
 		{
+			MultiCompSnap mbefore;
+			if (multi) mbefore = MultiSnapshot(c);
 			bool en = c->enabled;
 			if (ImGui::Checkbox("Enabled", &en))
 			{
@@ -2273,9 +2519,20 @@ bool EditorUI::DrawPrefabAtomEditor(AssetEditorWin& w, Atom* a)
 			}
 			if (ti->name == "VariantSet" && DrawVariantSetUI(c))
 				edited = true;   // per-group combos over the child variants
+			if (ti->name == "SequencePlayer")   // the sequencer docks under the 3D view, bound to this atom
+			{
+				auto* sp = static_cast<nuke::SequencePlayer*>(c);
+				if (sp->seqGuid.empty()) ImGui::TextDisabled("Pick a sequence, then edit it here");
+				else if (ImGui::Button(ICON_LC_CLAPPERBOARD " Edit Sequence", ImVec2(-FLT_MIN, 0))) OpenSequenceForPlayer(a, sp->seqGuid, &w);
+				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Open the sequencer docked in this window: tracks address this atom and its children, poses are local");
+			}
+			if (multi && MultiMirror(c, a, msel, mbefore, false)) edited = true;
 		}
 		ImGui::PopID();
 	}
+	if (notShared)
+		ImGui::TextDisabled("%d component%s not shared by the whole selection %s hidden",
+		                    notShared, notShared == 1 ? "" : "s", notShared == 1 ? "is" : "are");
 	w.compFold = 0;   // the fold applied to every header this frame
 	if (toRemove)
 	{
@@ -2294,6 +2551,15 @@ bool EditorUI::DrawPrefabAtomEditor(AssetEditorWin& w, Atom* a)
 	ImGui::Separator();
 	if (ImGui::Button(ICON_LC_PLUS " Add Component"))
 		w.wantAddComp = true;
+	{
+		std::string ct; nlohmann::json cp;
+		if (ComponentClipboard(ct, cp))
+		{
+			ImGui::SameLine();
+			if (ImGui::Button((std::string(ICON_LC_CLIPBOARD_PASTE " Paste ") + ct).c_str()))
+				if (PasteComponentAsNew(a, false)) edited = true;
+		}
+	}
 	return edited;
 }
 
@@ -2860,16 +3126,20 @@ void EditorUI::DrawAssetEditorBody(int i)
 					}
 					w.pendingAddParentId = 0;
 				}
-				if (w.pendingDeleteId)
+				if (w.pendingDeleteId) { w.pendingDeleteIds.push_back(w.pendingDeleteId); w.pendingDeleteId = 0; }
+				if (!w.pendingDeleteIds.empty())
 				{
-					if (w.pendingDeleteId != (long)w.prefabRoot->id.id)
+					std::vector<long> ids; ids.swap(w.pendingDeleteIds);
+					nuke::PhysicsSceneScope ps(w.pv ? w.pv->phys : nullptr);   // colliders die in the sandbox
+					for (long id : ids)
 					{
-						nuke::PhysicsSceneScope ps(w.pv ? w.pv->phys : nullptr);   // colliders die in the sandbox
-						w.pv->world->RemoveAtomById(w.pendingDeleteId);
-						if (w.prefabSelId == w.pendingDeleteId) w.prefabSelId = (long)w.prefabRoot->id.id;
+						if (id == (long)w.prefabRoot->id.id || !FindInSubtree(w.prefabRoot, id)) continue;   // gone with a parent already
+						w.pv->world->RemoveAtomById(id);
+						w.prefabSelExtra.erase(std::remove(w.prefabSelExtra.begin(), w.prefabSelExtra.end(), id), w.prefabSelExtra.end());
+						if (w.prefabSelId == id) w.prefabSelId = (long)w.prefabRoot->id.id;
 						w.dirty = true; w.editedNow = true;
 					}
-					w.pendingDeleteId = 0;
+					w.prefabSelExtra.clear();
 				}
 				if (!w.pendingOps.empty())
 				{
@@ -2888,7 +3158,7 @@ void EditorUI::DrawAssetEditorBody(int i)
 					std::transform(dext.begin(), dext.end(), dext.begin(), ::tolower);
 					nuke::PhysicsSceneScope ps(w.pv ? w.pv->phys : nullptr);
 					EditTargetScope scope(this, { w.pv->world, target, &w });
-					if (dext == ".numat" || dext == ".nutex") DropAssetOnAtom(target, w.pendingAssetDrop);
+					if (dext == ".numat" || dext == ".nutex" || AssetAttaches(w.pendingAssetDrop)) DropAssetOnAtom(target, w.pendingAssetDrop);
 					else if (Atom* spawned = DropAsset(w.pendingAssetDrop))
 					{
 						if (w.pendingAssetHasPos)
@@ -2901,8 +3171,10 @@ void EditorUI::DrawAssetEditorBody(int i)
 				}
 
 				// Left: hierarchy tree. Right: gizmo toolbar + 3D view, atom editor below.
-				ImGui::BeginChild("##ptree", ImVec2(240, 0), ImGuiChildFlags_ResizeX | ImGuiChildFlags_Borders,
+				const float seqDockRoom = (w.seqDock && w.seq) ? -(w.seqDockH + 10.0f) : 0.0f;   // negative = fill minus the strip
+				ImGui::BeginChild("##ptree", ImVec2(240, seqDockRoom), ImGuiChildFlags_ResizeX | ImGuiChildFlags_Borders,
 				                  ImGuiWindowFlags_HorizontalScrollbar);   // deep rigs overflow to the right
+				w.prefabRows.clear();
 				DrawPrefabTree(w, w.prefabRoot);
 				// Empty area below the tree = drop target for the prefab root (reparent to the
 				// root, or a browser asset as a root child).
@@ -2939,14 +3211,14 @@ void EditorUI::DrawAssetEditorBody(int i)
 				}
 				ImGui::EndChild();
 				ImGui::SameLine();
-				ImGui::BeginChild("##pright", ImVec2(0, 0), ImGuiChildFlags_None,
+				ImGui::BeginChild("##pright", ImVec2(0, seqDockRoom), ImGuiChildFlags_None,
 				                  ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 				{
 					// Button width from the actual glyphs — fixed 34 px clipped the icons on
 					// larger UI fonts.
 					float tbw = 34.0f;
 					for (const char* ic : { ICON_LC_MOUSE_POINTER, ICON_LC_MOVE, ICON_LC_ROTATE_3D,
-					                        ICON_LC_SCALING, ICON_LC_GLOBE, ICON_LC_AXIS_3D, ICON_LC_PLAY })
+					                        ICON_LC_SCALING, ICON_LC_GLOBE, ICON_LC_AXIS_3D, ICON_LC_EQUAL, ICON_LC_DIFF, ICON_LC_PLAY })
 						tbw = std::max(tbw, ImGui::CalcTextSize(ic).x + ImGui::GetStyle().FramePadding.x * 2.0f + 2.0f);
 					// Create: same menu as the main toolbar, landing under the selected atom (or the root).
 					if (ToolBtn(ICON_LC_PLUS, "Create (under the selected atom)", false, tbw)) ImGui::OpenPopup("##pf-create");
@@ -2972,6 +3244,13 @@ void EditorUI::DrawAssetEditorBody(int i)
 					if (ToolBtn(w.gizmoWorld ? ICON_LC_GLOBE : ICON_LC_AXIS_3D,
 					            w.gizmoWorld ? "World space (X)" : "Local space (X)", false, tbw))
 						w.gizmoWorld = !w.gizmoWorld;
+					// Multi-edit mode (shared with the main toolbar): how an edit lands on the rest of the selection.
+					ImGui::SameLine();
+					if (ToolBtn(multiEditAbsolute ? ICON_LC_EQUAL : ICON_LC_DIFF,
+					            multiEditAbsolute ? "Multi-edit: ABSOLUTE\nan edited value becomes the same on every selected atom"
+					                              : "Multi-edit: RELATIVE\nevery selected atom moves by the same delta from its own value",
+					            false, tbw))
+						multiEditAbsolute = !multiEditAbsolute;
 
 					// Animation preview: play ticks the subtree's Animators, stop restores the snapshot.
 					if (true)   // the sandbox simulates any prefab: animators, cloth, springs, pose cloning, physics
@@ -3018,9 +3297,32 @@ void EditorUI::DrawAssetEditorBody(int i)
 							Atom* fs = FindInSubtree(w.prefabRoot, w.prefabSelId);
 							FramePreview(*w.pv, fs ? fs : w.prefabRoot);   // frame selection, else all
 						}
-						if (ImGui::IsKeyPressed(ImGuiKey_Delete)
-						    && w.prefabSelId && w.prefabSelId != (long)w.prefabRoot->id.id)
-							w.pendingDeleteId = w.prefabSelId;
+						if (ImGui::IsKeyPressed(ImGuiKey_Delete)) PfDeleteSelection(w);
+						// Edit chords from the shared rebindable pool (the hierarchy panel's set), on the
+						// WHOLE selection: pastes land under the primary (or the root), duplicates beside
+						// each original, Ctrl+G groups into a folder, Ctrl+Shift+G ungroups.
+						nuke::Hotkeys* hk = nuke::Hotkeys::Get();
+						auto chord = [&](const char* id) { nuke::Hotkey* h = hk->Find(id); return h && h->bound && ImGui::IsKeyChordPressed((ImGuiKeyChord)h->chord); };
+						const std::vector<Atom*> kTop = PfSelectionTop(w);
+						Atom* ksel = FindInSubtree(w.prefabRoot, w.prefabSelId);
+						const long kpid = ksel ? (long)ksel->id.id : (long)w.prefabRoot->id.id;
+						const bool kroot = kTop.empty() || (kTop.size() == 1 && kTop[0] == w.prefabRoot);
+						if (chord("editor.copy") && !kTop.empty()) ImGui::SetClipboardText(PfClipboardEnvelope(kTop).c_str());
+						if (chord("editor.cut") && !kroot) { ImGui::SetClipboardText(PfClipboardEnvelope(kTop).c_str()); PfDeleteSelection(w); }
+						if (chord("editor.delete.force")) PfDeleteSelection(w);
+						if (chord("editor.paste") && AtomClipboardAvailable())
+							w.pendingOps.push_back([this, kpid](AssetEditorWin& ww)
+							{
+								EditTargetScope scope(this, { ww.pv->world, FindInSubtree(ww.prefabRoot, kpid), &ww });
+								PasteToTarget();
+							});
+						if (chord("editor.duplicate") && !kroot)
+						{
+							std::vector<long> ids; for (Atom* s : kTop) if (s != w.prefabRoot) ids.push_back((long)s->id.id);
+							w.pendingOps.push_back([this, ids](AssetEditorWin& ww) { PrefabDuplicate(ww, ids); });
+						}
+						if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_G)) w.pendingOps.push_back([this](AssetEditorWin& ww) { PrefabUngroup(ww); });
+						else if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_G) && !kroot) w.pendingOps.push_back([this](AssetEditorWin& ww) { PrefabGroup(ww); });
 					}
 
 					ImVec2 av = ImGui::GetContentRegionAvail();
@@ -3073,6 +3375,7 @@ void EditorUI::DrawAssetEditorBody(int i)
 						float snapv   = (gop == ImGuizmo::TRANSLATE) ? 0.5f : (gop == ImGuizmo::ROTATE) ? 15.0f : 0.1f;
 						float snap[3] = { snapv, snapv, snapv };
 						float* snapPtr = ImGui::GetIO().KeyCtrl ? snap : nullptr;
+						const glm::mat4 prevM = glm::make_mat4(w.gizmoMtx);
 						ImGuizmo::Manipulate(gview, gproj, gop, gmode, w.gizmoMtx, nullptr, snapPtr);
 						if (ImGuizmo::IsUsing())
 						{
@@ -3084,9 +3387,45 @@ void EditorUI::DrawAssetEditorBody(int i)
 								if (nS.x < 1e-3f && nS.x > -1e-3f) nS.x = 1e-3f;
 								if (nS.y < 1e-3f && nS.y > -1e-3f) nS.y = 1e-3f;
 								if (nS.z < 1e-3f && nS.z > -1e-3f) nS.z = 1e-3f;
+								if (gop == ImGuizmo::TRANSLATE && !ImGui::GetIO().KeyAlt)   // UI snapping to sibling widgets / the canvas (Alt = free)
+								{
+									Vector3 sp(nT.x, nT.y, nT.z);
+									std::vector<Atom*> also;   // the rest of the selection rides along: no reference
+									for (long id : w.prefabSelExtra) if (Atom* ex = FindInSubtree(w.prefabRoot, id)) also.push_back(ex);
+									if (SnapWidgetMove(w.pv->world, sel, sp, &also))
+									{
+										nT = glm::vec3((float)sp.x, (float)sp.y, (float)sp.z);
+										w.gizmoMtx[12] = nT.x; w.gizmoMtx[13] = nT.y; w.gizmoMtx[14] = nT.z;
+										nm[3][0] = nT.x; nm[3][1] = nT.y; nm[3][2] = nT.z;
+									}
+									DrawSnapGuides(gview, gproj, w.pv->rectMin, w.pv->rectSize);
+								}
 								gtt.SetGlobal(Vector3(nT.x, nT.y, nT.z),
 								              Quaternion(nR.x, nR.y, nR.z, nR.w),
 								              Vector3(nS.x, nS.y, nS.z));
+								// Every other selected atom follows by the same world-space delta (the
+								// primary's frame is the common pivot), unless a selected ancestor carries it.
+								if (!w.prefabSelExtra.empty())
+								{
+									const glm::mat4 delta = nm * glm::inverse(prevM);
+									for (long id : w.prefabSelExtra)
+									{
+										Atom* ex = FindInSubtree(w.prefabRoot, id);
+										if (!ex || ex == sel) continue;
+										bool covered = false;
+										for (Atom* p = ex->parent; p && !covered; p = p->parent) if (PfIsSelected(w, (long)p->id.id)) covered = true;
+										if (covered) continue;
+										Transform& et = ex->GetTransform();
+										Vector3 eP = et.globalPosition(); Quaternion eR = et.globalRotation(); Vector3 eS = et.globalScale();
+										glm::mat4 ew = glm::translate(glm::mat4(1.0f), glm::vec3((float)eP.x, (float)eP.y, (float)eP.z))
+										             * glm::mat4_cast(glm::quat((float)eR.w, (float)eR.x, (float)eR.y, (float)eR.z))
+										             * glm::scale(glm::mat4(1.0f), glm::vec3((float)eS.x, (float)eS.y, (float)eS.z));
+										glm::mat4 nw = delta * ew;
+										glm::vec3 wS, wT, wSk; glm::vec4 wPp; glm::quat wR;
+										if (glm::decompose(nw, wS, wR, wT, wSk, wPp) && std::isfinite(wT.x) && std::isfinite(wT.y) && std::isfinite(wT.z))
+											et.SetGlobal(Vector3(wT.x, wT.y, wT.z), Quaternion(wR.x, wR.y, wR.z, wR.w), Vector3(wS.x, wS.y, wS.z));
+									}
+								}
 								w.dirty = true; w.editedNow = true;
 							}
 						}
@@ -3124,19 +3463,71 @@ void EditorUI::DrawAssetEditorBody(int i)
 							// Same rhythm as the main viewport: the first click grabs the WHOLE prefab
 							// (its root), the next one drills into the part under the cursor, and a
 							// third returns to the root.
+							const bool ctrlMod = ImGui::GetIO().KeyCtrl;
 							if (hit && FindInSubtree(w.prefabRoot, (long)hit->id.id))
 							{
 								const long root = (long)w.prefabRoot->id.id;
 								const long hid  = (long)hit->id.id;
-								if (hid == root)                w.prefabSelId = root;   // single-atom prefab
-								else if (w.prefabSelId == root) w.prefabSelId = hid;    // drill into the part
-								else if (w.prefabSelId == hid)  w.prefabSelId = root;   // back out to the whole
-								else                            w.prefabSelId = root;   // new pick: whole first
+								if (ctrlMod)                    PfToggle(w, hid);        // Ctrl: add / remove the part
+								else if (hid == root)           PfSelect(w, root);       // single-atom prefab
+								else if (w.prefabSelId == root) PfSelect(w, hid);        // drill into the part
+								else if (w.prefabSelId == hid)  PfSelect(w, root);       // back out to the whole
+								else                            PfSelect(w, root);       // new pick: whole first
 							}
 							else if (!hit)
-								w.prefabSelId = 0;   // clicked empty space = deselect
+							{
+								if (!ctrlMod) { PfSelect(w, 0); w.pfMqArm = true; w.pfMqStart = mp; }   // empty space: deselect + arm the marquee
+							}
 						}
 					}
+					// Marquee: a drag from empty space rubber-bands a rect; every prefab atom whose
+					// position projects inside is selected on release (the first becomes primary).
+					if (w.pfMqArm && ImGui::IsMouseDown(ImGuiMouseButton_Left) && ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left) && !ImGuizmo::IsUsing())
+					{
+						const ImVec2 mp = ImGui::GetIO().MousePos;
+						ImVec2 a(std::min(w.pfMqStart.x, mp.x), std::min(w.pfMqStart.y, mp.y)), b(std::max(w.pfMqStart.x, mp.x), std::max(w.pfMqStart.y, mp.y));
+						ImDrawList* dl = ImGui::GetWindowDrawList();
+						dl->AddRectFilled(a, b, IM_COL32(80, 160, 255, 28)); dl->AddRect(a, b, IM_COL32(80, 160, 255, 200));
+						w.pfMqLive = true;
+					}
+					if (w.pfMqArm && ImGui::IsMouseReleased(ImGuiMouseButton_Left))
+					{
+						if (w.pfMqLive && w.pv->cam && w.pv->cam->transform && w.pv->rectSize.y > 1.0f)
+						{
+							const ImVec2 mp = ImGui::GetIO().MousePos;
+							const ImVec2 ra(std::min(w.pfMqStart.x, mp.x), std::min(w.pfMqStart.y, mp.y)), rb(std::max(w.pfMqStart.x, mp.x), std::max(w.pfMqStart.y, mp.y));
+							const ImVec2 rmin = w.pv->rectMin, sz = w.pv->rectSize;
+							Transform* ct = w.pv->cam->transform;
+							Vector3 co = ct->globalPosition(), cf = ct->direction(), cr = ct->right(), cu = ct->up();
+							const float thf = tanf((float)w.pv->cam->fov * 0.5f * 0.01745329252f), aspect = sz.x / sz.y;
+							PfSelect(w, 0);
+							std::function<void(Atom*)> walk = [&](Atom* atom)
+							{
+								if (!atom) return;
+								if (atom != w.prefabRoot && atom->enabled)
+								{
+									Vector3 p = atom->GetTransform().globalPosition();
+									Vector3 d(p.x - co.x, p.y - co.y, p.z - co.z);
+									const double fz = d.x * cf.x + d.y * cf.y + d.z * cf.z;
+									if (fz > 0.0)
+									{
+										const double lx = (d.x * cr.x + d.y * cr.y + d.z * cr.z) / (fz * thf * aspect);
+										const double ly = (d.x * cu.x + d.y * cu.y + d.z * cu.z) / (fz * thf);
+										const float px = rmin.x + (float)((lx + 1.0) * 0.5) * sz.x, py = rmin.y + (float)((1.0 - ly) * 0.5) * sz.y;
+										if (px >= ra.x && px <= rb.x && py >= ra.y && py <= rb.y)
+										{
+											if (!w.prefabSelId) PfSelect(w, (long)atom->id.id);
+											else PfToggle(w, (long)atom->id.id);
+										}
+									}
+								}
+								for (Atom* ch : atom->children) walk(ch);
+							};
+							walk(w.prefabRoot);
+						}
+						w.pfMqArm = w.pfMqLive = false;
+					}
+					if (!ImGui::IsMouseDown(ImGuiMouseButton_Left) && !ImGui::IsMouseReleased(ImGuiMouseButton_Left)) w.pfMqArm = w.pfMqLive = false;
 
 					// Drag edge between the 3D view and the atom editor (resizes the panel).
 					if (w.prefabEdRight)
@@ -3177,6 +3568,20 @@ void EditorUI::DrawAssetEditorBody(int i)
 					ImGui::EndChild();
 				}
 				ImGui::EndChild();
+
+				// Docked sequencer: the prefab's SequencePlayer sequence, tracks over THIS prefab's atoms.
+				if (w.seqDock && w.seq)
+				{
+					ImGui::InvisibleButton("##pseqsplit", ImVec2(std::max(ImGui::GetContentRegionAvail().x, 1.0f), 6.0f));
+					if (ImGui::IsItemHovered() || ImGui::IsItemActive()) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+					if (ImGui::IsItemActive() && ImGui::GetIO().MouseDelta.y != 0.0f)
+						w.seqDockH = std::max(140.0f, std::min(w.seqDockH - ImGui::GetIO().MouseDelta.y, ImGui::GetWindowSize().y - 200.0f));
+					ImGui::BeginChild("##pseq", ImVec2(0, w.seqDockH), ImGuiChildFlags_Borders);
+					w.seqDockFocused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+					DrawSequenceEditor(w);
+					ImGui::EndChild();
+				}
+				else w.seqDockFocused = false;
 
 				// Add Component popup, parented to the EDITOR WINDOW (not a nested child):
 				// submenus of a child-parented popup close before the click lands.
@@ -3239,6 +3644,18 @@ void EditorUI::DrawAssetEditorBody(int i)
 				else if (isInput)                              { SaveInputAsset(w); w.dirty = false; }
 			}
 
+			// The docked sequencer keeps its own burst latch into the .nuseq history.
+			if (w.seqDock && w.seq)
+			{
+				if (w.seqEditedNow && !w.seqEditing && !w.idleQ.empty())
+				{
+					w.undoQ.push_back(w.idleQ);
+					if (w.undoQ.size() > kAeUndoCap) w.undoQ.erase(w.undoQ.begin());
+					w.redoQ.clear();
+				}
+				w.seqEditing = w.seqEditedNow; w.seqEditedNow = false;
+				if (!w.seqEditing) w.idleQ = w.seq->ToString();
+			}
 			// Per-window undo latch: one edit burst (drag, typing) becomes one entry.
 			if (w.editedNow && !w.editing)
 			{

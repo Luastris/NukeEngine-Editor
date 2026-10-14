@@ -229,7 +229,7 @@ void EditorUI::ApplyPendingWorldOpen()
 		const char* w = std::getenv("NUKE_OPEN_WORLD");
 		devDelay = (w && w[0]) ? 90 : -1;
 	}
-	if (devDelay > 0 && --devDelay == 0) pendingWorldOpen = std::getenv("NUKE_OPEN_WORLD");
+	if (devDelay > 0 && !bootLoading && --devDelay == 0) pendingWorldOpen = std::getenv("NUKE_OPEN_WORLD");   // after the boot world landed, or it would clobber this one
 
 	if (pendingWorldOpen.empty()) return;
 	std::string path;
